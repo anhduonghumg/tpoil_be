@@ -1,32 +1,30 @@
-import { CallHandler, ExecutionContext, Injectable, NestInterceptor, StreamableFile } from "@nestjs/common";
+import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nestjs/common";
 import { Observable, map } from "rxjs";
-import { SKIP_WRAP_KEY } from "./skip-wrap.decorator";
-import type { ApiResponse } from "./http.types";
-import { Reflector } from "@nestjs/core";
+import { ApiResponse } from "./http.types";
 
 @Injectable()
 export class TransformInterceptor implements NestInterceptor {
-  constructor(private readonly reflector: Reflector) {}
-
   intercept(ctx: ExecutionContext, next: CallHandler): Observable<any> {
-    const isSkip = this.reflector.getAllAndOverride<boolean>(SKIP_WRAP_KEY, [ctx.getHandler(), ctx.getClass()]);
-    const http = ctx.switchToHttp();
-    const req = http.getRequest();
-    const res = http.getResponse();
+    const req = ctx.switchToHttp().getRequest() as any;
+    const requestId: string | undefined = req?.id;
 
     return next.handle().pipe(
-      map(body => {
-        if (isSkip || body instanceof StreamableFile || Buffer.isBuffer(body) || typeof body === "string" || body?.__raw) return body;
-
-        const statusCode = res.statusCode ?? 200;
-        const payload: ApiResponse = {
-          statusCode,
-          success: statusCode < 400,
+      map((payload: any): ApiResponse => {
+        // Nếu service đã trả ApiResponse → giữ nguyên
+        if (payload && typeof payload === "object" && "success" in payload && "statusCode" in payload) {
+          // gắn requestId nếu thiếu
+          if (!payload.requestId && requestId) payload.requestId = requestId;
+          return payload;
+        }
+        // Mặc định bọc payload vào success=true
+        return {
+          statusCode: 200,
+          success: true,
+          message: "OK",
           timestamp: new Date().toISOString(),
-          requestId: req?.id,
-          data: body ?? null,
+          requestId,
+          data: payload,
         };
-        return payload;
       }),
     );
   }

@@ -18,13 +18,13 @@ export class AuthService {
     if (!user || !user.isActive) return null;
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return null;
-    return { id: user.id, email: user.email, name: user.fullname };
+    return { id: user.id, email: user.email, name: user.name };
   }
 
   async findUserById(id: string) {
     const user = await this.prisma.user.findUnique({
       where: { id },
-      select: { id: true, email: true, fullname: true, isActive: true },
+      select: { id: true, email: true, name: true, isActive: true },
     });
     if (!user) throw AppException.notFound("Không tìm thấy thông tin tài khoản trên hệ thống!", { id });
     if (!user.isActive) throw AppException.forbidden("User inactive", { id });

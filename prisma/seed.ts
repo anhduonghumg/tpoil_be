@@ -13,7 +13,7 @@ async function main() {
       username: "admin",
       email: "admin@tpoil.com",
       password: hash,
-      fullname: "Admin",
+      name: "Admin",
       isActive: true,
     },
   });

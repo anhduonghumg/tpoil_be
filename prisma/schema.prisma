@@ -1,54 +1,365 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
-generator client {
-  provider = "prisma-client-js"
-}
-
+// =======================================
+// Datasource & Generator
+// =======================================
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+generator client {
+  provider = "prisma-client-js"
+}
 
+// =======================================
+// Enums
+// =======================================
+enum EmployeeStatus {
+  active
+  inactive
+  suspended
+}
+
+enum Gender {
+  male
+  female
+  other
+}
+
+enum DepartmentType {
+  board
+  office
+  group
+  branch
+}
+
+enum ManagerRole {
+  head
+  deputy
+  acting
+}
+
+enum ScopeType {
+  global
+  department
+  site
+  employee
+}
+
+enum ExportFormat {
+  csv
+  xlsx
+  pdf
+}
+
+enum JobStatus {
+  queued
+  running
+  done
+  failed
+  partial
+}
+
+enum ImportMode {
+  append
+  upsert
+  replace
+}
+
+// =======================================
+// Auth (User)
+// =======================================
 model User {
-  id           String   @id @default(uuid())
-  username      String   @unique
-  email        String   @unique
-  password     String
-  fullname     String?
-  isActive     Boolean  @default(true)
-  lastLoginAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String    @id @default(uuid()) @db.Uuid
+  username    String    @unique
+  email       String    @unique
+  password    String
+  name        String?
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
 
-  roles        UserRole[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  employee     Employee?
+  roleBindings UserRoleBinding[]
+}
+
+// =======================================
+// Employee – Hồ sơ nhân sự
+// =======================================
+model Employee {
+  id   String @id @db.Uuid
+  code String @unique
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  phone         String?
+  personalEmail String?        @unique
+  status        EmployeeStatus @default(active)
+  gender        Gender?
+  nationality   String?
+
+  grade Int?
+  floor Int?
+  desk  String?
+
+  dob      DateTime?
+  joinedAt DateTime?
+  leftAt   DateTime?
+
+  avatarUrl String?
+
+  // JSONB gọn nhẹ cho dữ liệu phụ
+  banking   Json?
+  citizen   Json?
+  emergency Json?
+  tax       Json?
+
+  memberships  EmployeeDepartment[]
+  managerRoles DepartmentManager[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// =======================================
+// Danh mục Site / Area
+// =======================================
+model Area {
+  id    String @id @db.Uuid
+  code  String @unique
+  name  String
+  sites Site[]
+}
+
+model Site {
+  id     String  @id @db.Uuid
+  code   String  @unique
+  name   String
+  areaId String?
+  area   Area?   @relation(fields: [areaId], references: [id])
+
+  departments Department[]
+}
+
+// =======================================
+// Department – Phòng ban nhiều cấp
+// =======================================
+model Department {
+  id   String         @id @db.Uuid
+  code String         @unique
+  name String
+  type DepartmentType
+
+  parentId String?
+  parent   Department?  @relation("DeptHierarchy", fields: [parentId], references: [id])
+  children Department[] @relation("DeptHierarchy")
+
+  siteId String?
+  site   Site?   @relation(fields: [siteId], references: [id])
+
+  costCenter String?
+
+  members  EmployeeDepartment[]
+  managers DepartmentManager[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  createdBy String?
+  updatedBy String? 
+  deletedBy String?
+
+  @@index([parentId])
+  @@index([siteId])
+}
+
+model EmployeeDepartment {
+  id           String @id @db.Uuid
+  employeeId   String
+  departmentId String
+
+  isPrimary Boolean   @default(false)
+  startDate DateTime  @default(now())
+  endDate   DateTime?
+
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([employeeId, isPrimary])
+  @@index([departmentId, startDate, endDate])
+}
+
+model DepartmentManager {
+  id           String      @id @db.Uuid
+  departmentId String
+  employeeId   String
+  role         ManagerRole
+  startDate    DateTime    @default(now())
+  endDate      DateTime?
+
+  department Department @relation(fields: [departmentId], references: [id])
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departmentId, startDate, endDate])
+  @@index([employeeId, startDate, endDate])
+}
+
+// =======================================
+// RBAC + Scope
+// =======================================
+model Module {
+  id          String       @id @db.Uuid
+  code        String       @unique
+  name        String
+  permissions Permission[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Permission {
+  id        String           @id @db.Uuid
+  code      String           @unique
+  name      String
+  moduleId  String
+  module    Module           @relation(fields: [moduleId], references: [id])
+  roles     RolePermission[]
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([moduleId])
 }
 
 model Role {
-  id    String    @id @default(uuid())
-  code  String    @unique
-  name  String
-  users UserRole[]
+  id        String            @id @db.Uuid
+  code      String            @unique
+  name      String
+  desc      String?
+  perms     RolePermission[]
+  bindings  UserRoleBinding[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
 }
 
-model UserRole {
-  userId String
-  roleId String
-  user   User @relation(fields: [userId], references: [id])
-  role   Role @relation(fields: [roleId], references: [id])
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
 
-  @@id([userId, roleId])
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model UserRoleBinding {
+  id        String    @id @db.Uuid
+  userId    String
+  roleId    String
+  scopeType ScopeType
+  scopeId   String?
+  startAt   DateTime  @default(now())
+  endAt     DateTime?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@index([userId])
+  @@index([roleId])
+  @@index([scopeType, scopeId])
+  @@index([startAt, endAt])
+}
+
+// =======================================
+// Audit Log
+// =======================================
+model AuditLog {
+  id String @id @db.Uuid
+
+  // request-level
+  requestId  String?
+  at         DateTime @default(now())
+  userId     String?
+  ip         String?
+  ua         String?
+  method     String?
+  path       String?
+  statusCode Int?
+
+  // business-level
+  moduleCode String?
+  permission String?
+  action     String?
+  entityId   String?
+  scopeType  ScopeType?
+  scopeId    String?
+
+  // data snapshots
+  before Json?
+  after  Json?
+  diff   Json?
+  error  Json?
+
+  @@index([userId, at])
+  @@index([moduleCode, action, at])
+  @@index([entityId])
+}
+
+// =======================================
+// Export / Import Jobs
+// =======================================
+model ExportJob {
+  id         String       @id @db.Uuid
+  moduleCode String
+  format     ExportFormat
+  filter     Json?
+  status     JobStatus    @default(queued)
+  fileUrl    String?
+  error      String?
+
+  createdBy  String
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([moduleCode, status, createdBy, createdAt])
+}
+
+model ImportJob {
+  id         String     @id @db.Uuid
+  moduleCode String
+  mode       ImportMode
+  mapping    Json?
+  status     JobStatus  @default(queued)
+  total      Int?
+  success    Int?
+  failed     Int?
+  srcFileUrl String?
+  reportUrl  String?
+  error      String?
+
+  createdBy  String
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([moduleCode, status, createdBy, createdAt])
 }
 
 model LoginAttempt {
-  id    String   @id @default(uuid())
-  email String
-  ok    Boolean
-  ip    String?
-  ua    String?
-  at    DateTime @default(now())
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String
+  ok        Boolean
+  ip        String?
+  ua        String?
+  createdAt DateTime @default(now())
 }

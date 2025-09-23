@@ -4,13 +4,13 @@ import { ErrCode } from "./error-codes";
 export type AppErrorDetails = unknown;
 
 export class AppException extends HttpException {
-  readonly code: ErrCode;
-  readonly details?: AppErrorDetails;
-
-  constructor(code: ErrCode, message: string, status: HttpStatus, details?: AppErrorDetails) {
-    super({ code, message, details }, status);
-    this.code = code;
-    this.details = details;
+  constructor(
+    message: string,
+    public readonly code: string,
+    status: number = HttpStatus.BAD_REQUEST,
+    public readonly details?: any,
+  ) {
+    super({ message, code, details }, status);
   }
 
   // ======= Factory helpers (ngắn gọn – dễ dùng) =======
