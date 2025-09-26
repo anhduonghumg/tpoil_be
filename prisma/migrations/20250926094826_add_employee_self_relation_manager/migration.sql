@@ -1,5 +1,5 @@
 -- CreateEnum
-CREATE TYPE "public"."EmployeeStatus" AS ENUM ('active', 'inactive', 'suspended');
+CREATE TYPE "public"."EmployeeStatus" AS ENUM ('active', 'inactive', 'suspended', 'probation', 'terminated');
 
 -- CreateEnum
 CREATE TYPE "public"."Gender" AS ENUM ('male', 'female', 'other');
@@ -30,6 +30,7 @@ CREATE TABLE "public"."User" (
     "password" TEXT NOT NULL,
     "name" TEXT,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "lastLoginAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -40,25 +41,34 @@ CREATE TABLE "public"."User" (
 CREATE TABLE "public"."Employee" (
     "id" UUID NOT NULL,
     "code" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
+    "userId" UUID,
+    "fullName" TEXT,
     "phone" TEXT,
     "personalEmail" TEXT,
     "status" "public"."EmployeeStatus" NOT NULL DEFAULT 'active',
     "gender" "public"."Gender",
     "nationality" TEXT,
-    "grade" INTEGER,
+    "maritalStatus" TEXT,
+    "title" TEXT,
+    "grade" TEXT,
     "floor" INTEGER,
     "desk" TEXT,
+    "siteId" UUID,
+    "managerId" UUID,
     "dob" TIMESTAMP(3),
     "joinedAt" TIMESTAMP(3),
     "leftAt" TIMESTAMP(3),
     "avatarUrl" TEXT,
+    "accessCardId" TEXT,
+    "addressPermanent" TEXT,
+    "addressCurrent" TEXT,
     "banking" JSONB,
     "citizen" JSONB,
     "emergency" JSONB,
     "tax" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "deletedAt" TIMESTAMP(3),
 
     CONSTRAINT "Employee_pkey" PRIMARY KEY ("id")
 );
@@ -77,7 +87,7 @@ CREATE TABLE "public"."Site" (
     "id" UUID NOT NULL,
     "code" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "areaId" TEXT,
+    "areaId" UUID,
 
     CONSTRAINT "Site_pkey" PRIMARY KEY ("id")
 );
@@ -88,11 +98,15 @@ CREATE TABLE "public"."Department" (
     "code" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "type" "public"."DepartmentType" NOT NULL,
-    "parentId" TEXT,
-    "siteId" TEXT,
+    "parentId" UUID,
+    "siteId" UUID,
     "costCenter" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "deletedAt" TIMESTAMP(3),
+    "createdBy" TEXT,
+    "updatedBy" TEXT,
+    "deletedBy" TEXT,
 
     CONSTRAINT "Department_pkey" PRIMARY KEY ("id")
 );
@@ -100,8 +114,8 @@ CREATE TABLE "public"."Department" (
 -- CreateTable
 CREATE TABLE "public"."EmployeeDepartment" (
     "id" UUID NOT NULL,
-    "employeeId" TEXT NOT NULL,
-    "departmentId" TEXT NOT NULL,
+    "employeeId" UUID NOT NULL,
+    "departmentId" UUID NOT NULL,
     "isPrimary" BOOLEAN NOT NULL DEFAULT false,
     "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "endDate" TIMESTAMP(3),
@@ -114,8 +128,8 @@ CREATE TABLE "public"."EmployeeDepartment" (
 -- CreateTable
 CREATE TABLE "public"."DepartmentManager" (
     "id" UUID NOT NULL,
-    "departmentId" TEXT NOT NULL,
-    "employeeId" TEXT NOT NULL,
+    "departmentId" UUID NOT NULL,
+    "employeeId" UUID NOT NULL,
     "role" "public"."ManagerRole" NOT NULL,
     "startDate" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "endDate" TIMESTAMP(3),
@@ -141,7 +155,7 @@ CREATE TABLE "public"."Permission" (
     "id" UUID NOT NULL,
     "code" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "moduleId" TEXT NOT NULL,
+    "moduleId" UUID NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -162,8 +176,8 @@ CREATE TABLE "public"."Role" (
 
 -- CreateTable
 CREATE TABLE "public"."RolePermission" (
-    "roleId" TEXT NOT NULL,
-    "permissionId" TEXT NOT NULL,
+    "roleId" UUID NOT NULL,
+    "permissionId" UUID NOT NULL,
 
     CONSTRAINT "RolePermission_pkey" PRIMARY KEY ("roleId","permissionId")
 );
@@ -171,8 +185,8 @@ CREATE TABLE "public"."RolePermission" (
 -- CreateTable
 CREATE TABLE "public"."UserRoleBinding" (
     "id" UUID NOT NULL,
-    "userId" TEXT NOT NULL,
-    "roleId" TEXT NOT NULL,
+    "userId" UUID NOT NULL,
+    "roleId" UUID NOT NULL,
     "scopeType" "public"."ScopeType" NOT NULL,
     "scopeId" TEXT,
     "startAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -245,6 +259,18 @@ CREATE TABLE "public"."ImportJob" (
     CONSTRAINT "ImportJob_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "public"."LoginAttempt" (
+    "id" UUID NOT NULL,
+    "email" TEXT NOT NULL,
+    "ok" BOOLEAN NOT NULL,
+    "ip" TEXT,
+    "ua" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "LoginAttempt_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "User_username_key" ON "public"."User"("username");
 
@@ -259,6 +285,18 @@ CREATE UNIQUE INDEX "Employee_userId_key" ON "public"."Employee"("userId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Employee_personalEmail_key" ON "public"."Employee"("personalEmail");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Employee_accessCardId_key" ON "public"."Employee"("accessCardId");
+
+-- CreateIndex
+CREATE INDEX "Employee_status_idx" ON "public"."Employee"("status");
+
+-- CreateIndex
+CREATE INDEX "Employee_deletedAt_idx" ON "public"."Employee"("deletedAt");
+
+-- CreateIndex
+CREATE INDEX "Employee_code_idx" ON "public"."Employee"("code");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Area_code_key" ON "public"."Area"("code");
@@ -276,16 +314,25 @@ CREATE INDEX "Department_parentId_idx" ON "public"."Department"("parentId");
 CREATE INDEX "Department_siteId_idx" ON "public"."Department"("siteId");
 
 -- CreateIndex
+CREATE INDEX "Department_deletedAt_idx" ON "public"."Department"("deletedAt");
+
+-- CreateIndex
 CREATE INDEX "EmployeeDepartment_employeeId_isPrimary_idx" ON "public"."EmployeeDepartment"("employeeId", "isPrimary");
 
 -- CreateIndex
 CREATE INDEX "EmployeeDepartment_departmentId_startDate_endDate_idx" ON "public"."EmployeeDepartment"("departmentId", "startDate", "endDate");
 
 -- CreateIndex
+CREATE INDEX "EmployeeDepartment_employeeId_startDate_endDate_idx" ON "public"."EmployeeDepartment"("employeeId", "startDate", "endDate");
+
+-- CreateIndex
 CREATE INDEX "DepartmentManager_departmentId_startDate_endDate_idx" ON "public"."DepartmentManager"("departmentId", "startDate", "endDate");
 
 -- CreateIndex
 CREATE INDEX "DepartmentManager_employeeId_startDate_endDate_idx" ON "public"."DepartmentManager"("employeeId", "startDate", "endDate");
+
+-- CreateIndex
+CREATE INDEX "DepartmentManager_departmentId_role_startDate_endDate_idx" ON "public"."DepartmentManager"("departmentId", "role", "startDate", "endDate");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Module_code_key" ON "public"."Module"("code");
@@ -330,7 +377,13 @@ CREATE INDEX "ExportJob_moduleCode_status_createdBy_createdAt_idx" ON "public"."
 CREATE INDEX "ImportJob_moduleCode_status_createdBy_createdAt_idx" ON "public"."ImportJob"("moduleCode", "status", "createdBy", "createdAt");
 
 -- AddForeignKey
-ALTER TABLE "public"."Employee" ADD CONSTRAINT "Employee_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."Employee" ADD CONSTRAINT "Employee_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."Employee" ADD CONSTRAINT "Employee_siteId_fkey" FOREIGN KEY ("siteId") REFERENCES "public"."Site"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "public"."Employee" ADD CONSTRAINT "Employee_managerId_fkey" FOREIGN KEY ("managerId") REFERENCES "public"."Employee"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "public"."Site" ADD CONSTRAINT "Site_areaId_fkey" FOREIGN KEY ("areaId") REFERENCES "public"."Area"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -342,28 +395,28 @@ ALTER TABLE "public"."Department" ADD CONSTRAINT "Department_parentId_fkey" FORE
 ALTER TABLE "public"."Department" ADD CONSTRAINT "Department_siteId_fkey" FOREIGN KEY ("siteId") REFERENCES "public"."Site"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."EmployeeDepartment" ADD CONSTRAINT "EmployeeDepartment_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "public"."Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."EmployeeDepartment" ADD CONSTRAINT "EmployeeDepartment_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "public"."Employee"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "public"."EmployeeDepartment" ADD CONSTRAINT "EmployeeDepartment_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "public"."Department"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."DepartmentManager" ADD CONSTRAINT "DepartmentManager_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "public"."Department"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."DepartmentManager" ADD CONSTRAINT "DepartmentManager_departmentId_fkey" FOREIGN KEY ("departmentId") REFERENCES "public"."Department"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."DepartmentManager" ADD CONSTRAINT "DepartmentManager_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "public"."Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."DepartmentManager" ADD CONSTRAINT "DepartmentManager_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "public"."Employee"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."Permission" ADD CONSTRAINT "Permission_moduleId_fkey" FOREIGN KEY ("moduleId") REFERENCES "public"."Module"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."Permission" ADD CONSTRAINT "Permission_moduleId_fkey" FOREIGN KEY ("moduleId") REFERENCES "public"."Module"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."RolePermission" ADD CONSTRAINT "RolePermission_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "public"."Role"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."RolePermission" ADD CONSTRAINT "RolePermission_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "public"."Role"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."RolePermission" ADD CONSTRAINT "RolePermission_permissionId_fkey" FOREIGN KEY ("permissionId") REFERENCES "public"."Permission"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."RolePermission" ADD CONSTRAINT "RolePermission_permissionId_fkey" FOREIGN KEY ("permissionId") REFERENCES "public"."Permission"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."UserRoleBinding" ADD CONSTRAINT "UserRoleBinding_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."UserRoleBinding" ADD CONSTRAINT "UserRoleBinding_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "public"."UserRoleBinding" ADD CONSTRAINT "UserRoleBinding_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "public"."Role"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "public"."UserRoleBinding" ADD CONSTRAINT "UserRoleBinding_roleId_fkey" FOREIGN KEY ("roleId") REFERENCES "public"."Role"("id") ON DELETE CASCADE ON UPDATE CASCADE;

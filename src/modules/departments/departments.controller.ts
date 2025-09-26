@@ -21,6 +21,11 @@ export class DepartmentsController {
         return this.svc.findMany(q)
     }
 
+    @Get('all')
+    listAll() {
+        return this.svc.findAll()
+    }
+
     @Get('sites')
     sites() {
         return this.svc.listSites()

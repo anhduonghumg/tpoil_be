@@ -17,6 +17,8 @@ enum EmployeeStatus {
   active
   inactive
   suspended
+  probation
+  terminated
 }
 
 enum Gender {
@@ -71,7 +73,7 @@ enum ImportMode {
 model User {
   id          String    @id @default(uuid()) @db.Uuid
   username    String    @unique
-  email       String    @unique
+  email       String    @unique // work email
   password    String
   name        String?
   isActive    Boolean   @default(true)
@@ -88,29 +90,43 @@ model User {
 // Employee – Hồ sơ nhân sự
 // =======================================
 model Employee {
-  id   String @id @db.Uuid
+  id   String @id @default(uuid()) @db.Uuid
   code String @unique
 
-  userId String @unique
-  user   User   @relation(fields: [userId], references: [id])
+  userId String? @unique @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
+  fullName      String?
   phone         String?
   personalEmail String?        @unique
   status        EmployeeStatus @default(active)
   gender        Gender?
   nationality   String?
+  maritalStatus String?
 
-  grade Int?
+  title String?
+  grade String?
   floor Int?
   desk  String?
+
+  siteId String? @db.Uuid
+  site   Site?   @relation(fields: [siteId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  // Self relation: nhân viên -> quản lý (và quản lý -> danh sách cấp dưới)
+  managerId    String?    @db.Uuid
+  manager      Employee?  @relation("EmpManagerLine", fields: [managerId], references: [id], onDelete: SetNull)
+  subordinates Employee[] @relation("EmpManagerLine")
 
   dob      DateTime?
   joinedAt DateTime?
   leftAt   DateTime?
 
-  avatarUrl String?
+  avatarUrl    String?
+  accessCardId String? @unique
 
-  // JSONB gọn nhẹ cho dữ liệu phụ
+  addressPermanent String?
+  addressCurrent   String?
+
   banking   Json?
   citizen   Json?
   emergency Json?
@@ -119,45 +135,51 @@ model Employee {
   memberships  EmployeeDepartment[]
   managerRoles DepartmentManager[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+  @@index([deletedAt])
+  @@index([code])
 }
 
 // =======================================
 // Danh mục Site / Area
 // =======================================
 model Area {
-  id    String @id @db.Uuid
+  id    String @id @default(uuid()) @db.Uuid
   code  String @unique
   name  String
   sites Site[]
 }
 
 model Site {
-  id     String  @id @db.Uuid
+  id     String  @id @default(uuid()) @db.Uuid
   code   String  @unique
   name   String
-  areaId String?
-  area   Area?   @relation(fields: [areaId], references: [id])
+  areaId String? @db.Uuid
+  area   Area?   @relation(fields: [areaId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   departments Department[]
+  Employee    Employee[]
 }
 
 // =======================================
 // Department – Phòng ban nhiều cấp
 // =======================================
 model Department {
-  id   String         @id @db.Uuid
+  id   String         @id @default(uuid()) @db.Uuid
   code String         @unique
   name String
   type DepartmentType
 
-  parentId String?
-  parent   Department?  @relation("DeptHierarchy", fields: [parentId], references: [id])
+  parentId String?      @db.Uuid
+  parent   Department?  @relation("DeptHierarchy", fields: [parentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   children Department[] @relation("DeptHierarchy")
 
-  siteId String?
-  site   Site?   @relation(fields: [siteId], references: [id])
+  siteId String? @db.Uuid
+  site   Site?   @relation(fields: [siteId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   costCenter String?
 
@@ -169,55 +191,64 @@ model Department {
   deletedAt DateTime?
 
   createdBy String?
-  updatedBy String? 
+  updatedBy String?
   deletedBy String?
 
   @@index([parentId])
   @@index([siteId])
+  @@index([deletedAt])
 }
 
+// =======================================
+// Liên kết nhân viên - phòng ban (membership)
+// =======================================
 model EmployeeDepartment {
-  id           String @id @db.Uuid
-  employeeId   String
-  departmentId String
+  id           String @id @default(uuid()) @db.Uuid
+  employeeId   String @db.Uuid
+  departmentId String @db.Uuid
 
   isPrimary Boolean   @default(false)
   startDate DateTime  @default(now())
   endDate   DateTime?
 
-  employee   Employee   @relation(fields: [employeeId], references: [id])
-  department Department @relation(fields: [departmentId], references: [id])
+  employee   Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([employeeId, isPrimary])
   @@index([departmentId, startDate, endDate])
+  @@index([employeeId, startDate, endDate])
 }
 
+// =======================================
+// Quản lý trưởng/phó phòng
+// =======================================
 model DepartmentManager {
-  id           String      @id @db.Uuid
-  departmentId String
-  employeeId   String
+  id           String      @id @default(uuid()) @db.Uuid
+  departmentId String      @db.Uuid
+  employeeId   String      @db.Uuid
   role         ManagerRole
   startDate    DateTime    @default(now())
   endDate      DateTime?
 
-  department Department @relation(fields: [departmentId], references: [id])
-  employee   Employee   @relation(fields: [employeeId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  employee   Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([departmentId, startDate, endDate])
   @@index([employeeId, startDate, endDate])
+  @@index([departmentId, role, startDate, endDate])
 }
 
 // =======================================
 // RBAC + Scope
 // =======================================
 model Module {
-  id          String       @id @db.Uuid
+  id          String       @id @default(uuid()) @db.Uuid
   code        String       @unique
   name        String
   permissions Permission[]
@@ -226,11 +257,11 @@ model Module {
 }
 
 model Permission {
-  id        String           @id @db.Uuid
+  id        String           @id @default(uuid()) @db.Uuid
   code      String           @unique
   name      String
-  moduleId  String
-  module    Module           @relation(fields: [moduleId], references: [id])
+  moduleId  String           @db.Uuid
+  module    Module           @relation(fields: [moduleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   roles     RolePermission[]
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
@@ -239,7 +270,7 @@ model Permission {
 }
 
 model Role {
-  id        String            @id @db.Uuid
+  id        String            @id @default(uuid()) @db.Uuid
   code      String            @unique
   name      String
   desc      String?
@@ -250,19 +281,19 @@ model Role {
 }
 
 model RolePermission {
-  roleId       String
-  permissionId String
-  role         Role       @relation(fields: [roleId], references: [id])
-  permission   Permission @relation(fields: [permissionId], references: [id])
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@id([roleId, permissionId])
   @@index([permissionId])
 }
 
 model UserRoleBinding {
-  id        String    @id @db.Uuid
-  userId    String
-  roleId    String
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  roleId    String    @db.Uuid
   scopeType ScopeType
   scopeId   String?
   startAt   DateTime  @default(now())
@@ -272,8 +303,8 @@ model UserRoleBinding {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id])
-  role Role @relation(fields: [roleId], references: [id])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@index([userId])
   @@index([roleId])
@@ -285,7 +316,7 @@ model UserRoleBinding {
 // Audit Log
 // =======================================
 model AuditLog {
-  id String @id @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
 
   // request-level
   requestId  String?
@@ -320,7 +351,7 @@ model AuditLog {
 // Export / Import Jobs
 // =======================================
 model ExportJob {
-  id         String       @id @db.Uuid
+  id         String       @id @default(uuid()) @db.Uuid
   moduleCode String
   format     ExportFormat
   filter     Json?
@@ -336,7 +367,7 @@ model ExportJob {
 }
 
 model ImportJob {
-  id         String     @id @db.Uuid
+  id         String     @id @default(uuid()) @db.Uuid
   moduleCode String
   mode       ImportMode
   mapping    Json?

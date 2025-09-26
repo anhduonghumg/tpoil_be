@@ -129,6 +129,15 @@ export class DepartmentsService {
         return paged(items, page, pageSize, total)
     }
 
+    async findAll() {
+        const all = await this.prisma.department.findMany({
+            where: { deletedAt: null, type: { in: ['office', 'board'] } },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+        })
+        return success(all)
+    }
+
     // TREE (chỉ bản ghi còn sống)
     async findTree(rootId?: string) {
         const all = await this.prisma.department.findMany({ where: { deletedAt: null }, orderBy: { createdAt: 'asc' } })
