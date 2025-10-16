@@ -1,3 +1,5 @@
+import { EmployeesModule } from './modules/employees/employees.module'
+import { EmployeesController } from './modules/employees/employees.controller'
 import { DepartmentsModule } from './modules/departments/departments.module'
 import { DepartmentsController } from './modules/departments/departments.controller'
 import { AuditModule } from './audit/audit.module'
@@ -14,10 +16,29 @@ import { AppLoggingModule } from './infra/logging/logging.module'
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor'
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
 import { DepartmentsService } from './modules/departments/departments.service'
+import { ServeStaticModule } from '@nestjs/serve-static'
+import { join } from 'path'
 
 @Module({
-    imports: [DepartmentsModule, AuditModule, RbacModule, PrismaModule, AuthModule, AppLoggingModule],
-    controllers: [DepartmentsController, AuthController, AppController],
+    imports: [
+        ServeStaticModule.forRoot(
+            {
+                rootPath: join(__dirname, '..', 'client'),
+            },
+            {
+                rootPath: join(process.cwd(), 'uploads'),
+                serveRoot: '/static',
+            },
+        ),
+        EmployeesModule,
+        DepartmentsModule,
+        AuditModule,
+        RbacModule,
+        PrismaModule,
+        AuthModule,
+        AppLoggingModule,
+    ],
+    controllers: [EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
 })
 export class AppModule {}

@@ -95,6 +95,8 @@ export class AuditInterceptor implements NestInterceptor {
     private async pickBefore(moduleCode: string, id: string) {
         if (moduleCode === 'department') {
             return this.prisma.department.findUnique({ where: { id } })
+        } else if (moduleCode === 'employee') {
+            return this.prisma.employee.findUnique({ where: { id } })
         }
         return null
     }

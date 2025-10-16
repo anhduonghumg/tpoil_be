@@ -33,8 +33,6 @@ async function bootstrap() {
         session({
             name: 'sid',
             secret: process.env.SESSION_SECRET!,
-            resave: false,
-            saveUninitialized: false,
             store: new PgSession({
                 pool: pgPool,
                 tableName: 'session',
@@ -43,11 +41,14 @@ async function bootstrap() {
                 pruneSessionInterval: 60 * 10,
                 ttl: 60 * 60 * 8,
             }),
+            resave: false,
+            saveUninitialized: false,
+            rolling: true,
             cookie: {
                 httpOnly: true,
                 secure: false, //process.env.NODE_ENV === "production"
                 sameSite: 'lax', //process.env.NODE_ENV === "production" ? "none" : "lax",
-                maxAge: 1000 * 60 * 60 * 8,
+                maxAge: 30 * 60 * 1000,
             },
         }),
     )
@@ -58,6 +59,8 @@ async function bootstrap() {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }))
     app.useGlobalInterceptors(new TransformInterceptor())
     app.useGlobalFilters(new HttpExceptionFilter())
+
+    app.use(helmet())
 
     await app.listen(process.env.PORT ?? 3000)
 }

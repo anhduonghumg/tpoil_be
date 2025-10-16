@@ -98,6 +98,7 @@ model Employee {
 
   fullName      String?
   phone         String?
+  workEmail     String?
   personalEmail String?        @unique
   status        EmployeeStatus @default(active)
   gender        Gender?

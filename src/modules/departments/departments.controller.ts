@@ -1,11 +1,13 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, UseInterceptors } from '@nestjs/common'
 import { DepartmentsService } from './departments.service'
 import { CreateDepartmentDto } from './dto/create-department.dto'
 import { UpdateDepartmentDto } from './dto/update-department.dto'
 import { AuditInterceptor } from 'src/audit/audit.interceptor'
 import { MODULE_CODES } from 'src/common/constants/modules'
 import { ModuleName } from 'src/common/decorators/module-name.decorator'
+import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 
+@UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.DEPARTMENT)
 @Controller('departments')

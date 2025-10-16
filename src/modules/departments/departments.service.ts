@@ -98,7 +98,6 @@ export class DepartmentsService {
         const [rows, total] = await this.prisma.$transaction([
             this.prisma.department.findMany({
                 where,
-                // chỉ chọn các cột cần + quan hệ parent/site để lấy tên
                 select: {
                     id: true,
                     code: true,
