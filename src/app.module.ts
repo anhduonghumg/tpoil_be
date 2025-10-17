@@ -18,6 +18,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter'
 import { DepartmentsService } from './modules/departments/departments.service'
 import { ServeStaticModule } from '@nestjs/serve-static'
 import { join } from 'path'
+import { UploadModule } from './modules/uploads/uploads.module'
 
 @Module({
     imports: [
@@ -30,6 +31,7 @@ import { join } from 'path'
                 serveRoot: '/static',
             },
         ),
+        UploadModule,
         EmployeesModule,
         DepartmentsModule,
         AuditModule,
