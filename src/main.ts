@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core'
 import { AppModule } from './app.module'
 import { Logger } from 'nestjs-pino'
-import { ValidationPipe } from '@nestjs/common'
+import { BadRequestException, ValidationPipe } from '@nestjs/common'
 import { TransformInterceptor } from './common/http/transform.interceptor'
 import { HttpExceptionFilter } from './common/http/http-exception.filter'
 
@@ -56,7 +56,25 @@ async function bootstrap() {
     app.use(passport.initialize())
     app.use(passport.session())
 
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }))
+    app.useGlobalPipes(
+        new ValidationPipe({
+            whitelist: true,
+            transform: true,
+            exceptionFactory: (errors) => {
+                const messages: string[] = []
+                const fields: string[] = []
+                for (const e of errors) {
+                    fields.push(e.property)
+                    if (e.constraints) messages.push(...Object.values(e.constraints))
+                }
+                return new BadRequestException({
+                    code: 'VALIDATION_ERROR',
+                    message: 'Dữ liệu không hợp lệ',
+                    details: { messages, fields },
+                })
+            },
+        }),
+    )
     app.useGlobalInterceptors(new TransformInterceptor())
     app.useGlobalFilters(new HttpExceptionFilter())
 

@@ -159,7 +159,7 @@ export class EmployeesService {
             throw new ConflictException(`Trùng dữ liệu ở trường: ${field}`)
         }
         if (e?.code === 'P2025') {
-            throw new NotFoundException('Không tìm thấy bản ghi')
+            throw new NotFoundException('Không tìm thấy bản ghi:' + e)
         }
         throw new BadRequestException(e?.message || 'Lỗi dữ liệu')
     }
