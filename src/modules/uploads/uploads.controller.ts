@@ -2,7 +2,7 @@
 import { BadRequestException, Body, Controller, Post, UploadedFile, UseInterceptors, Req } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { diskStorage } from 'multer'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import type { Request } from 'express'
 import { FileValidationPipe } from './file-validation.pipe'
 import { defaultUploadConfig } from './config'
@@ -39,5 +39,18 @@ export class UploadController {
         const rs = await this.service.saveLocal(file, folder || 'employee')
         const requestId = (req.headers['x-request-id'] as string) || (req as any).requestId
         return success({ url: rs.url }, 'Uploaded', 200, requestId)
+    }
+
+    @Post('delete')
+    async deleteFiles(@Req() req: Request, @Body('urls') urls: string[]) {
+        if (!Array.isArray(urls) || urls.length === 0) {
+            throw new BadRequestException({
+                code: 'BAD_REQUEST',
+                message: 'urls must be a non-empty array',
+            })
+        }
+        const { deleted, failed } = await this.service.deleteByUrls(urls)
+        const requestId = (req.headers['x-request-id'] as string) || (req as any)?.requestId
+        return success({ deleted, failed }, 'Deleted', 200, requestId)
     }
 }
