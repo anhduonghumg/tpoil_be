@@ -8,7 +8,7 @@ import { TaxDto, BankingDto } from './finance.dto'
 
 export class CreateEmployeeDto {
     // personal
-    @IsString() name!: string
+    @IsString() fullName!: string
     @IsOptional() @IsEnum(['male', 'female', 'other']) gender?: 'male' | 'female' | 'other'
     @IsOptional() @DMYtoDate() dob?: Date
     @IsOptional() @IsString() nationality?: string

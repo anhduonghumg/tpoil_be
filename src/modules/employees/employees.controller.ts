@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, Req, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, Query, Req, UseInterceptors } from '@nestjs/common'
 import { EmployeesService } from './employees.service'
 import { MODULE_CODES } from 'src/common/constants/modules'
 import { ModuleName } from 'src/common/decorators/module-name.decorator'
@@ -42,5 +42,11 @@ export class EmployeesController {
 
         const items = await this.svc.listByRoles(parsed.length ? parsed : undefined)
         return success(items, 'OK', 200, getReqId(req))
+    }
+
+    @Get(':id')
+    async getById(@Req() req: Request, @Param('id') id: string) {
+        const item = await this.svc.getById(id)
+        return success(item, 'OK', 200, getReqId(req))
     }
 }

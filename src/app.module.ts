@@ -23,12 +23,17 @@ import { UploadModule } from './modules/uploads/uploads.module'
 @Module({
     imports: [
         ServeStaticModule.forRoot(
-            {
-                rootPath: join(__dirname, '..', 'client'),
-            },
+            // {
+            //     rootPath: join(__dirname, '..', 'client'),
+            // },
             {
                 rootPath: join(process.cwd(), 'uploads'),
                 serveRoot: '/static',
+                serveStaticOptions: {
+                    index: false,
+                    fallthrough: false,
+                    etag: true,
+                },
             },
         ),
         UploadModule,

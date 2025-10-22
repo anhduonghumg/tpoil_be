@@ -3,6 +3,7 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { Prisma } from '@prisma/client'
 import { CreateEmployeeDto } from './dto/create-employee.dto'
 import { UpdateEmployeeDto } from './dto/update-employee.dto'
+import { AppException } from 'src/common/errors/app-exception'
 
 type RoleKey = 'manager' | 'director' | 'vp' | 'lead'
 
@@ -32,7 +33,7 @@ function mapCreateInput(dto: CreateEmployeeDto): Prisma.EmployeeCreateInput {
     // JSON fields giữ nguyên; email/phone trim; floor là string
     return {
         code: normStr(dto.code),
-        fullName: normStr(dto.name),
+        fullName: normStr(dto.fullName),
         gender: dto.gender as any,
         dob: dto.dob,
         nationality: normStr(dto.nationality),
@@ -192,5 +193,19 @@ export class EmployeesService {
             select: { id: true, fullName: true },
             orderBy: { fullName: 'asc' },
         })
+    }
+
+    async getById(id: string) {
+        const emp = await this.prisma.employee.findFirst({
+            where: { id, deletedAt: null },
+            // include liên quan nếu cần:
+            include: {
+                // site: true,
+                manager: { select: { id: true, fullName: true }},
+                memberships: { select: { departmentId: true } },
+            },
+        })
+        if (!emp) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
+        return emp
     }
 }

@@ -32,6 +32,7 @@ export class EmployeeCreateDto {
 
     @IsOptional() @IsUUID() siteId?: string
     @IsOptional() @IsUUID() managerId?: string
+    @IsOptional() @IsString() departmentId?: string
 
     @IsOptional() @IsString() avatarUrl?: string
     @IsOptional() @IsString() accessCardId?: string

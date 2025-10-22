@@ -78,7 +78,14 @@ async function bootstrap() {
     app.useGlobalInterceptors(new TransformInterceptor())
     app.useGlobalFilters(new HttpExceptionFilter())
 
-    app.use(helmet())
+    app.use(
+        helmet({
+            // Cho phép nhúng resource từ origin khác
+            crossOriginResourcePolicy: { policy: 'cross-origin' },
+            // Nếu bạn có bật COEP, tắt đi để tránh yêu cầu CORP/CORS cho mọi resource nhúng
+            crossOriginEmbedderPolicy: false,
+        }),
+    )
 
     await app.listen(process.env.PORT ?? 3000)
 }

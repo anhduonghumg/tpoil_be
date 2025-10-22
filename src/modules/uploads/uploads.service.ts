@@ -44,7 +44,6 @@ export class UploadService {
         return { url, path: destPath }
     }
 
-    // D:\code\tpoil\backend\uploads\.21258855_9f0fee6105791b4b.webp
     private toAbsFromUrl(url?: string | null): string | null {
         if (!url || typeof url !== 'string') return null
 
@@ -78,7 +77,7 @@ export class UploadService {
                     return
                 }
                 try {
-                    console.log('log:', abs)
+                    // console.log('log:', abs)
                     await fs.promises.unlink(abs)
                     deleted++
                 } catch (err: any) {
