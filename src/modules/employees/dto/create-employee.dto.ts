@@ -29,7 +29,8 @@ export class CreateEmployeeDto {
     @IsOptional() @Type(() => CitizenDto) citizen?: CitizenDto
 
     // employment
-    @IsOptional() @IsEnum(['active', 'inactive', 'on_leave']) status?: 'active' | 'inactive' | 'on_leave'
+    @IsEnum(['active', 'inactive', 'suspended', 'probation', 'terminated'])
+    status?: 'active' | 'inactive' | 'suspended' | 'probation' | 'terminated'
     @IsOptional() @DMYtoDate() joinedAt?: Date
     @IsOptional() @DMYtoDate() leftAt?: Date
 

@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client'
 import { CreateEmployeeDto } from './dto/create-employee.dto'
 import { UpdateEmployeeDto } from './dto/update-employee.dto'
 import { AppException } from 'src/common/errors/app-exception'
+import dayjs from 'dayjs'
 
 type RoleKey = 'manager' | 'director' | 'vp' | 'lead'
 
@@ -27,6 +28,27 @@ function toJsonString(v?: any) {
     } catch {
         return undefined
     }
+}
+
+function normalizeCitizen(citizen?: any) {
+    if (!citizen) return undefined
+    const fix = { ...citizen }
+    const fixDate = (v?: string) => {
+        if (!v) return undefined
+        const d = dayjs(v, ['DD-MM-YYYY', 'YYYY-MM-DD'], true)
+        // Trả về chuỗi ISO rút gọn, Prisma JSON an toàn
+        return d.isValid() ? d.format('YYYY-MM-DD') : v
+    }
+    fix.issuedDate = fixDate(fix.issuedDate)
+    fix.expiryDate = fixDate(fix.expiryDate)
+    return fix
+}
+
+function parseDate(v?: string | Date | null): Date | undefined {
+    if (!v) return undefined
+    if (v instanceof Date) return v
+    const d = dayjs(v, ['DD-MM-YYYY', 'YYYY-MM-DD'], true)
+    return d.isValid() ? d.toDate() : undefined
 }
 
 function mapCreateInput(dto: CreateEmployeeDto): Prisma.EmployeeCreateInput {
@@ -73,8 +95,14 @@ function mapCreateInput(dto: CreateEmployeeDto): Prisma.EmployeeCreateInput {
 function mapUpdateInput(dto: UpdateEmployeeDto): Prisma.EmployeeUpdateInput {
     const base = mapCreateInput(dto as any)
     const { site, manager, ...rest } = base as any
+
     return {
         ...rest,
+        dob: parseDate(dto.dob),
+        joinedAt: parseDate(dto.joinedAt),
+        leftAt: parseDate(dto.leftAt),
+        // citizen: normalizeCitizen(dto.citizen),
+
         site: dto.siteId === undefined ? undefined : dto.siteId ? { connect: { id: dto.siteId } } : { disconnect: true },
         manager: dto.managerId === undefined ? undefined : dto.managerId ? { connect: { id: dto.managerId } } : { disconnect: true },
     } as Prisma.EmployeeUpdateInput
@@ -83,7 +111,15 @@ function mapUpdateInput(dto: UpdateEmployeeDto): Prisma.EmployeeUpdateInput {
 @Injectable()
 export class EmployeesService {
     constructor(private prisma: PrismaService) {}
-    async list(params: { q?: string; status?: 'active' | 'inactive' | 'probation'; deptId?: string; page?: number; limit?: number }) {
+    async list(params: {
+        q?: string
+        status?: 'active' | 'inactive' | 'probation' | 'suspended' | 'terminated'
+        deptId?: string
+        page?: number
+        limit?: number
+        sortBy?: string
+        sortDir?: 'asc' | 'desc'
+    }) {
         const { q, status, deptId } = params
 
         const page = Math.max(1, Number(params.page) || 1)
@@ -114,12 +150,21 @@ export class EmployeesService {
                 : {}),
         }
 
+        const SORTABLE: Record<string, true> = {
+            fullName: true,
+        }
+
+        const by = params.sortBy && SORTABLE[params.sortBy] ? params.sortBy : undefined
+        const dir: Prisma.SortOrder = params.sortDir === 'desc' ? 'desc' : 'asc'
+        // console.log('Sorting by', by, dir)
+        const orderBy: Prisma.EmployeeOrderByWithRelationInput[] = by ? [{ [by]: dir } as any, { createdAt: 'desc' }] : [{ createdAt: 'desc' }]
+
         const [items, total] = await this.prisma.$transaction([
             this.prisma.employee.findMany({
                 where,
                 skip,
                 take,
-                orderBy: [{ createdAt: 'desc' }],
+                orderBy,
                 include: {
                     site: true,
                     manager: { select: { id: true, fullName: true } },
@@ -148,6 +193,95 @@ export class EmployeesService {
                     })
                 }
                 return emp
+            })
+        } catch (e: any) {
+            return this.handlePrismaError(e)
+        }
+    }
+
+    async update(id: string, dto: UpdateEmployeeDto) {
+        const data = mapUpdateInput(dto) // dùng chung logic bạn đã viết
+
+        try {
+            return await this.prisma.$transaction(async (tx) => {
+                // 1) Tồn tại & chưa bị soft-delete
+                // console.log('Updating employee', id)
+                const current = await tx.employee.findFirst({ where: { id, deletedAt: null } })
+                if (!current) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
+
+                // 2) Update employee chính
+                const emp = await tx.employee.update({
+                    where: { id },
+                    data,
+                })
+
+                // 3) Đồng bộ memberships nếu client gửi departmentIds
+                if (dto.departmentIds) {
+                    const desired = dto.departmentIds
+                    const cur = await tx.employeeDepartment.findMany({
+                        where: { employeeId: id },
+                        select: { departmentId: true },
+                    })
+                    const curIds = cur.map((x) => x.departmentId)
+
+                    const toAdd = desired.filter((d) => !curIds.includes(d))
+                    const toDel = curIds.filter((d) => !desired.includes(d))
+
+                    if (toAdd.length) {
+                        await tx.employeeDepartment.createMany({
+                            data: toAdd.map((d) => ({ employeeId: id, departmentId: d })),
+                            skipDuplicates: true,
+                        })
+                    }
+                    if (toDel.length) {
+                        await tx.employeeDepartment.deleteMany({
+                            where: { employeeId: id, departmentId: { in: toDel } },
+                        })
+                    }
+                }
+
+                return emp
+            })
+        } catch (e: any) {
+            return this.handlePrismaError(e)
+        }
+    }
+
+    // ====== DELETE ONE ======
+    async deleteOne(id: string) {
+        const emp = await this.prisma.employee.findFirst({
+            where: { id, deletedAt: null },
+        })
+        if (!emp) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
+
+        try {
+            return await this.prisma.employee.update({
+                where: { id },
+                data: { deletedAt: new Date() },
+            })
+        } catch (e: any) {
+            return this.handlePrismaError(e)
+        }
+    }
+
+    // ====== DELETE MANY ======
+    async deleteMany(ids: string[]) {
+        if (!ids?.length) throw new AppException('VALIDATION_ERROR', 'Không có ID')
+        try {
+            return await this.prisma.$transaction(async (tx) => {
+                const existing = await tx.employee.findMany({
+                    where: { id: { in: ids }, deletedAt: null },
+                    select: { id: true },
+                })
+                const foundIds = existing.map((x) => x.id)
+                if (!foundIds.length) throw new AppException('NOT_FOUND', 'Không tìm thấy bản ghi hợp lệ')
+
+                await tx.employee.updateMany({
+                    where: { id: { in: foundIds } },
+                    data: { deletedAt: new Date() },
+                })
+
+                return { count: foundIds.length, data: foundIds }
             })
         } catch (e: any) {
             return this.handlePrismaError(e)
@@ -201,7 +335,7 @@ export class EmployeesService {
             // include liên quan nếu cần:
             include: {
                 // site: true,
-                manager: { select: { id: true, fullName: true }},
+                manager: { select: { id: true, fullName: true } },
                 memberships: { select: { departmentId: true } },
             },
         })

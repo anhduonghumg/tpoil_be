@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseInterceptors } from '@nestjs/common'
 import { EmployeesService } from './employees.service'
 import { MODULE_CODES } from 'src/common/constants/modules'
 import { ModuleName } from 'src/common/decorators/module-name.decorator'
 import { AuditInterceptor } from 'src/audit/audit.interceptor'
 import { CreateEmployeeDto } from './dto/create-employee.dto'
 import { created, paged, success } from 'src/common/http/http.response.util'
+import { UpdateEmployeeDto } from './dto/update-employee.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
@@ -20,6 +21,8 @@ export class EmployeesController {
             q: q.q,
             status: q.status,
             deptId: q.deptId,
+            sortBy: q.sortBy,
+            sortDir: q.sortDir,
             page: Number(q.page),
             limit: Number(q.size ?? q.limit),
         })
@@ -30,6 +33,24 @@ export class EmployeesController {
     async create(@Req() req: Request, @Body() dto: CreateEmployeeDto) {
         const emp = await this.svc.create(dto)
         return created(emp, 'Created', getReqId(req))
+    }
+
+    @Patch(':id')
+    async update(@Req() req: Request, @Param('id') id: string, @Body() dto: Partial<UpdateEmployeeDto>) {
+        const emp = await this.svc.update(id, dto)
+        return success(emp, 'Updated', 200, getReqId(req))
+    }
+
+    @Delete(':id')
+    async deleteOne(@Param('id') id: string) {
+        const data = await this.svc.deleteOne(id)
+        return success(data, 'Deleted', 200)
+    }
+
+    @Post('bulk-delete')
+    async deleteMany(@Body('ids') ids: string[]) {
+        const data = await this.svc.deleteMany(ids)
+        return success(data, 'Deleted', 200)
     }
 
     @Get('roles')
