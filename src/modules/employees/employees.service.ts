@@ -342,4 +342,50 @@ export class EmployeesService {
         if (!emp) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
         return emp
     }
+
+    async birthdaysInMonth(month?: number) {
+        const m = month ?? new Date().getMonth() + 1 // 1..12
+
+        // Postgres
+        const rows = await this.prisma.$queryRaw<
+            Array<{
+                id: string
+                full_name: string
+                dob: Date | null
+                department_name: string | null
+                avatar_url: string | null
+            }>
+        >`
+      SELECT e.id,
+             e."fullName"      AS full_name,
+             e.dob             AS dob,
+             e."departmentName" AS department_name,
+             e."avatarUrl"     AS avatar_url
+      FROM "Employee" e
+      WHERE e."deletedAt" IS NULL
+        AND e.status IN ('active','probation','suspended')
+        AND e.dob IS NOT NULL
+        AND EXTRACT(MONTH FROM e.dob) = ${m}
+      ORDER BY EXTRACT(DAY FROM e.dob) ASC, e."fullName" ASC
+    `
+        return rows
+    }
+
+    async birthdayCount(month?: number, from: 'today' | 'monthStart' = 'today') {
+        const list = await this.birthdaysInMonth(month)
+        if (from === 'monthStart') return list.length
+        const today = new Date().getDate()
+        // 29/02 → nếu năm không nhuận: tính như 28/02
+        const year = new Date().getFullYear()
+        const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+
+        const cnt = list.filter((r) => {
+            if (!r.dob) return false
+            const d = r.dob.getDate()
+            if (!isLeap && r.dob.getMonth() + 1 === 2 && d === 29 && today === 28) return true
+            return d >= today
+        }).length
+
+        return cnt
+    }
 }
