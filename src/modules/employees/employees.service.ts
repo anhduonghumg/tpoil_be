@@ -5,8 +5,16 @@ import { CreateEmployeeDto } from './dto/create-employee.dto'
 import { UpdateEmployeeDto } from './dto/update-employee.dto'
 import { AppException } from 'src/common/errors/app-exception'
 import dayjs from 'dayjs'
+import customParseFormat from 'dayjs/plugin/customParseFormat'
+dayjs.extend(customParseFormat)
 
 type RoleKey = 'manager' | 'director' | 'vp' | 'lead'
+
+type BirthdayRow = {
+    id: string
+    full_name: string
+    dob: Date | null
+}
 
 function normStr(v?: string) {
     return v?.toString().trim() || undefined
@@ -30,19 +38,19 @@ function toJsonString(v?: any) {
     }
 }
 
-function normalizeCitizen(citizen?: any) {
-    if (!citizen) return undefined
-    const fix = { ...citizen }
-    const fixDate = (v?: string) => {
-        if (!v) return undefined
-        const d = dayjs(v, ['DD-MM-YYYY', 'YYYY-MM-DD'], true)
-        // Trả về chuỗi ISO rút gọn, Prisma JSON an toàn
-        return d.isValid() ? d.format('YYYY-MM-DD') : v
-    }
-    fix.issuedDate = fixDate(fix.issuedDate)
-    fix.expiryDate = fixDate(fix.expiryDate)
-    return fix
-}
+// function normalizeCitizen(citizen?: any) {
+//     if (!citizen) return undefined
+//     const fix = { ...citizen }
+//     const fixDate = (v?: string) => {
+//         if (!v) return undefined
+//         const d = dayjs(v, ['DD-MM-YYYY', 'YYYY-MM-DD'], true)
+//         // Trả về chuỗi ISO rút gọn, Prisma JSON an toàn
+//         return d.isValid() ? d.format('YYYY-MM-DD') : v
+//     }
+//     fix.issuedDate = fixDate(fix.issuedDate)
+//     fix.expiryDate = fixDate(fix.expiryDate)
+//     return fix
+// }
 
 function parseDate(v?: string | Date | null): Date | undefined {
     if (!v) return undefined
@@ -205,11 +213,11 @@ export class EmployeesService {
         try {
             return await this.prisma.$transaction(async (tx) => {
                 // 1) Tồn tại & chưa bị soft-delete
-                // console.log('Updating employee', id)
                 const current = await tx.employee.findFirst({ where: { id, deletedAt: null } })
                 if (!current) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
 
                 // 2) Update employee chính
+                console.log('Updating employee', id, data)
                 const emp = await tx.employee.update({
                     where: { id },
                     data,
@@ -343,24 +351,14 @@ export class EmployeesService {
         return emp
     }
 
-    async birthdaysInMonth(month?: number) {
-        const m = month ?? new Date().getMonth() + 1 // 1..12
+    async birthdays(month?: number) {
+        const now = new Date()
+        const m = month ?? now.getMonth() + 1
 
-        // Postgres
-        const rows = await this.prisma.$queryRaw<
-            Array<{
-                id: string
-                full_name: string
-                dob: Date | null
-                department_name: string | null
-                avatar_url: string | null
-            }>
-        >`
+        const rows = await this.prisma.$queryRaw<BirthdayRow[]>`
       SELECT e.id,
-             e."fullName"      AS full_name,
-             e.dob             AS dob,
-             e."departmentName" AS department_name,
-             e."avatarUrl"     AS avatar_url
+             e."fullName" AS full_name,
+             e.dob        AS dob
       FROM "Employee" e
       WHERE e."deletedAt" IS NULL
         AND e.status IN ('active','probation','suspended')
@@ -368,24 +366,14 @@ export class EmployeesService {
         AND EXTRACT(MONTH FROM e.dob) = ${m}
       ORDER BY EXTRACT(DAY FROM e.dob) ASC, e."fullName" ASC
     `
-        return rows
-    }
-
-    async birthdayCount(month?: number, from: 'today' | 'monthStart' = 'today') {
-        const list = await this.birthdaysInMonth(month)
-        if (from === 'monthStart') return list.length
-        const today = new Date().getDate()
-        // 29/02 → nếu năm không nhuận: tính như 28/02
-        const year = new Date().getFullYear()
-        const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
-
-        const cnt = list.filter((r) => {
-            if (!r.dob) return false
-            const d = r.dob.getDate()
-            if (!isLeap && r.dob.getMonth() + 1 === 2 && d === 29 && today === 28) return true
-            return d >= today
-        }).length
-
-        return cnt
+        return {
+            month: m,
+            count: rows.length,
+            items: rows.map((r) => ({
+                id: r.id,
+                fullName: r.full_name,
+                dob: r.dob,
+            })),
+        }
     }
 }

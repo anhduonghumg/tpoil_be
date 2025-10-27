@@ -29,30 +29,6 @@ export class EmployeesController {
         return paged(rs.items, rs.page, rs.limit, rs.total, 'OK', getReqId(req))
     }
 
-    @Post()
-    async create(@Req() req: Request, @Body() dto: CreateEmployeeDto) {
-        const emp = await this.svc.create(dto)
-        return created(emp, 'Created', getReqId(req))
-    }
-
-    @Patch(':id')
-    async update(@Req() req: Request, @Param('id') id: string, @Body() dto: Partial<UpdateEmployeeDto>) {
-        const emp = await this.svc.update(id, dto)
-        return success(emp, 'Updated', 200, getReqId(req))
-    }
-
-    @Delete(':id')
-    async deleteOne(@Param('id') id: string) {
-        const data = await this.svc.deleteOne(id)
-        return success(data, 'Deleted', 200)
-    }
-
-    @Post('bulk-delete')
-    async deleteMany(@Body('ids') ids: string[]) {
-        const data = await this.svc.deleteMany(ids)
-        return success(data, 'Deleted', 200)
-    }
-
     @Get('roles')
     async getByRoles(@Req() req: Request, @Query('roles') roles?: string) {
         const parsed = (roles ?? '')
@@ -65,9 +41,41 @@ export class EmployeesController {
         return success(items, 'OK', 200, getReqId(req))
     }
 
+    @Get('birthdays')
+    async birthdays(@Query('month') month?: string) {
+        const m = month ? Math.min(12, Math.max(1, Number(month))) : undefined
+        const data = await this.svc.birthdays(m)
+        return success(data, 'OK', 200)
+    }
+
+    @Post()
+    async create(@Req() req: Request, @Body() dto: CreateEmployeeDto) {
+        const emp = await this.svc.create(dto)
+        return created(emp, 'Created', getReqId(req))
+    }
+
+    @Patch(':id')
+    async update(@Req() req: Request, @Param('id') id: string, @Body() dto: Partial<UpdateEmployeeDto>) {
+        console.log('UpdateEmployeeDto', dto)
+        const emp = await this.svc.update(id, dto)
+        return success(emp, 'Updated', 200, getReqId(req))
+    }
+
+    @Delete(':id')
+    async deleteOne(@Param('id') id: string) {
+        const data = await this.svc.deleteOne(id)
+        return success(data, 'Deleted', 200)
+    }
+
     @Get(':id')
     async getById(@Req() req: Request, @Param('id') id: string) {
         const item = await this.svc.getById(id)
         return success(item, 'OK', 200, getReqId(req))
+    }
+
+    @Post('bulk-delete')
+    async deleteMany(@Body('ids') ids: string[]) {
+        const data = await this.svc.deleteMany(ids)
+        return success(data, 'Deleted', 200)
     }
 }
