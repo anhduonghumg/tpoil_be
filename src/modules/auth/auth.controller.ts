@@ -33,21 +33,15 @@ export class AuthController {
         return { user: req.user }
     }
 
-    @UseGuards(LoggedInGuard)
     @HttpCode(200)
     @Post('logout')
-    async logout(@Req() req) {
-        const uid = req.user?.id
-        return new Promise((resolve, reject) => {
-            req.logout((err) => {
-                if (err) return reject(AppException.internal('Đăng xuất thất bại!', { err: String(err) }))
-                req.session.destroy((e) => {
-                    if (e) return reject(AppException.internal('Session destroy failed', { err: String(e) }))
-                    this.logger.info({ msg: 'Đăng xuất thành công!', userId: uid })
-                    resolve({ ok: true })
-                })
-            })
-        })
+    async logout(@Req() req, @Res({ passthrough: true }) res) {
+        const sidName = 'sid'
+        await new Promise<void>((resolve) => req.logout(() => resolve()))
+        await new Promise<void>((resolve) => req.session?.destroy(() => resolve()))
+        // Xoá cookie phía client (khớp option trong main.ts)
+        res.clearCookie(sidName, { httpOnly: true, sameSite: 'lax', secure: false })
+        return { ok: true }
     }
 
     // @Post('logout')

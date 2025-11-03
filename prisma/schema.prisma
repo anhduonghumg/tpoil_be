@@ -67,6 +67,68 @@ enum ImportMode {
   replace
 }
 
+enum CustomerType {
+  B2B
+  B2C
+  Distributor
+  Other
+}
+
+enum CustomerRole {
+  Agent
+  Retail
+  Wholesale
+  Other
+}
+
+enum CustomerStatus {
+  Active
+  Inactive
+  Blacklisted
+}
+
+enum TaxSource {
+  Sepay
+  Manual
+  Other
+}
+
+enum ContractType {
+  Supply
+  Service
+  Framework
+  Other
+}
+
+enum ContractStatus {
+  Draft
+  PendingApproval
+  Approved
+  Active
+  Suspended
+  Expired
+  Cancelled
+}
+
+enum RiskLevel {
+  Low
+  Medium
+  High
+}
+
+enum AttachmentCategory {
+  ScanSigned
+  Draft
+  Appendix
+  Other
+}
+
+enum RiskSource {
+  Manual
+  AutoRule
+  Overdue
+}
+
 // =======================================
 // Auth (User)
 // =======================================
@@ -311,6 +373,131 @@ model UserRoleBinding {
   @@index([roleId])
   @@index([scopeType, scopeId])
   @@index([startAt, endAt])
+}
+
+model Customer {
+  id              String               @id @default(uuid())
+  code            String               @unique
+  name            String
+  taxCode         String?
+  taxVerified     Boolean              @default(false)
+  taxSource       TaxSource?
+  taxSyncedAt     DateTime?
+  roles           CustomerRole[]
+  type            CustomerType
+  billingAddress  String?
+  shippingAddress String?
+  contactEmail    String?
+  contactPhone    String?
+  creditLimit     Decimal?
+  tempLimit       Decimal?
+  tempFrom        DateTime?
+  tempTo          DateTime?
+  paymentTermDays Int?
+  status          CustomerStatus       @default(Active)
+  note            String?
+  contacts        ContactPerson[]
+  contracts       Contract[]
+  riskFlags       RiskFlag[]
+  creditHistories CreditLimitHistory[]
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  deletedAt       DateTime?
+}
+
+model ContactPerson {
+  id         String   @id @default(uuid())
+  customerId String   
+  customer   Customer @relation(fields: [customerId], references: [id])
+  fullName   String
+  position   String?
+  phone      String?
+  email      String?
+  isPrimary  Boolean  @default(false)
+}
+
+model Contract {
+  id                  String         @id @default(uuid())
+  code                String         @unique
+  customerId          String         
+  customer            Customer       @relation(fields: [customerId], references: [id])
+  type                ContractType
+  startDate           DateTime
+  endDate             DateTime
+  status              ContractStatus @default(Draft)
+  paymentTermDays     Int?
+  creditLimitOverride Decimal?
+  sla                 Json?
+  deliveryScope       Json?
+  riskLevel           RiskLevel      @default(Low)
+  approvalRequestId   String?
+
+  items       ContractItem[]
+  appendices  ContractAppendix[]
+  attachments ContractAttachment[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
+model ContractItem {
+  id         String   @id @default(uuid())
+  contractId String   
+  contract   Contract @relation(fields: [contractId], references: [id])
+  productId  String   
+  uom        String
+  price      Decimal
+  minQty     Decimal?
+  maxQty     Decimal?
+  discount   Decimal?
+  taxRate    Decimal?
+  note       String?
+}
+
+model ContractAppendix {
+  id            String   @id @default(uuid())
+  contractId    String   
+  contract      Contract @relation(fields: [contractId], references: [id])
+  code          String
+  effectiveDate DateTime
+  changeSummary String?
+  docUrl        String?
+}
+
+model ContractAttachment {
+  id         String             @id @default(uuid())
+  contractId String            
+  contract   Contract           @relation(fields: [contractId], references: [id])
+  fileName   String
+  fileUrl    String
+  category   AttachmentCategory
+}
+
+model CreditLimitHistory {
+  id         String    @id @default(uuid())
+  customerId String    
+  customer   Customer  @relation(fields: [customerId], references: [id])
+  oldLimit   Decimal?
+  newLimit   Decimal?
+  tempLimit  Decimal?
+  tempFrom   DateTime?
+  tempTo     DateTime?
+  reason     String?
+  changedBy  String
+  changedAt  DateTime  @default(now())
+}
+
+model RiskFlag {
+  id         String     @id @default(uuid())
+  customerId String     
+  customer   Customer   @relation(fields: [customerId], references: [id])
+  level      RiskLevel
+  source     RiskSource
+  message    String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  deletedAt  DateTime?
 }
 
 // =======================================

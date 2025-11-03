@@ -1,3 +1,5 @@
+import { CustomersController } from './modules/customers/customers.controller';
+import { CustomersService } from './modules/customers/customers.service';
 import { EmployeesModule } from './modules/employees/employees.module'
 import { EmployeesController } from './modules/employees/employees.controller'
 import { DepartmentsModule } from './modules/departments/departments.module'
@@ -45,7 +47,9 @@ import { UploadModule } from './modules/uploads/uploads.module'
         AuthModule,
         AppLoggingModule,
     ],
-    controllers: [EmployeesController, DepartmentsController, AuthController, AppController],
-    providers: [DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
+    controllers: [
+        CustomersController, EmployeesController, DepartmentsController, AuthController, AppController],
+    providers: [
+        CustomersService, DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
 })
 export class AppModule {}

@@ -217,7 +217,7 @@ export class EmployeesService {
                 if (!current) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
 
                 // 2) Update employee chính
-                console.log('Updating employee', id, data)
+                // console.log('Updating employee', id, data)
                 const emp = await tx.employee.update({
                     where: { id },
                     data,
