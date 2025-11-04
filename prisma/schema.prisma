@@ -419,6 +419,7 @@ model ContactPerson {
 model Contract {
   id                  String         @id @default(uuid())
   code                String         @unique
+  name                String
   customerId          String         
   customer            Customer       @relation(fields: [customerId], references: [id])
   type                ContractType
