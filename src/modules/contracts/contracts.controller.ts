@@ -1,9 +1,14 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Post, Query, UseInterceptors } from '@nestjs/common'
 import { ContractsService } from './contracts.service'
 import { ContractListQueryDto } from './dto/contract-list-query.dto'
 import { CreateContractDto } from './dto/create-contract.dto'
 import { UpdateContractDto } from './dto/update-contract.dto'
+import { MODULE_CODES } from 'src/common/constants/modules'
+import { AuditInterceptor } from 'src/audit/audit.interceptor'
+import { ModuleName } from 'src/common/decorators/module-name.decorator'
 
+@UseInterceptors(AuditInterceptor)
+@ModuleName(MODULE_CODES.CONTRACT)
 @Controller('contracts')
 export class ContractsController {
     constructor(private readonly service: ContractsService) {}

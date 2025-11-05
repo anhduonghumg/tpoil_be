@@ -1,12 +1,17 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Req } from '@nestjs/common'
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Req, UseInterceptors } from '@nestjs/common'
 import { CustomersService } from './customers.service'
 import { CreateCustomerDto } from './dto/create-customer.dto'
 import { UpdateCustomerDto } from './dto/update-customer.dto'
 import { QueryCustomerDto } from './dto/query-customer.dto'
 import { paged, success } from 'src/common/http/http.response.util'
+import { ModuleName } from 'src/common/decorators/module-name.decorator'
+import { AuditInterceptor } from 'src/audit/audit.interceptor'
+import { MODULE_CODES } from 'src/common/constants/modules'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
+@UseInterceptors(AuditInterceptor)
+@ModuleName(MODULE_CODES.CUSTOMER)
 @Controller('customers')
 export class CustomersController {
     constructor(private readonly service: CustomersService) {}
