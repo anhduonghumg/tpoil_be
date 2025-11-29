@@ -6,6 +6,7 @@ export const MODULE_CODES = {
     INVENTORY: 'Kho',
     CUSTOMER: 'Khách hàng',
     CONTRACT: 'Hợp đồng',
+    CONTRACTTYPE: 'Loại hợp đồng',
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]

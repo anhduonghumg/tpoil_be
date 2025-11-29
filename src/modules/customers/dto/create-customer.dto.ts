@@ -1,42 +1,38 @@
-// dto/create-customer.dto.ts
-import { IsArray, IsEmail, IsEnum, IsInt, IsOptional, IsString, IsUppercase, IsNumber, Min, ArrayUnique } from 'class-validator'
 import { Type } from 'class-transformer'
-
-export enum CustomerType {
-    B2B = 'B2B',
-    B2C = 'B2C',
-    Distributor = 'Distributor',
-    Other = 'Other',
-}
-export enum CustomerRole {
-    Agent = 'Agent',
-    Retail = 'Retail',
-    Wholesale = 'Wholesale',
-    Other = 'Other',
-}
-export enum CustomerStatus {
-    Active = 'Active',
-    Inactive = 'Inactive',
-    Blacklisted = 'Blacklisted',
-}
+import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
+import { CustomerRole, CustomerStatus, CustomerType, TaxSource } from '@prisma/client'
 
 export class CreateCustomerDto {
     @IsOptional()
     @IsString()
-    @IsUppercase()
+    @MaxLength(50)
     code?: string
 
     @IsString()
+    @MaxLength(255)
     name!: string
 
     @IsOptional()
     @IsString()
+    @MaxLength(50)
     taxCode?: string
 
+    @IsOptional()
+    @IsBoolean()
+    taxVerified?: boolean
+
+    @IsOptional()
+    @IsEnum(TaxSource)
+    taxSource?: TaxSource
+
+    @IsOptional()
+    @Type(() => Date)
+    @IsDate()
+    taxSyncedAt?: Date
+
     @IsArray()
-    @ArrayUnique()
     @IsEnum(CustomerRole, { each: true })
-    roles: CustomerRole[] = []
+    roles!: CustomerRole[]
 
     @IsEnum(CustomerType)
     type!: CustomerType
@@ -64,7 +60,42 @@ export class CreateCustomerDto {
 
     @IsOptional()
     @Type(() => Number)
+    @IsNumber()
+    tempLimit?: number
+
+    @IsOptional()
+    @Type(() => Date)
+    @IsDate()
+    tempFrom?: Date
+
+    @IsOptional()
+    @Type(() => Date)
+    @IsDate()
+    tempTo?: Date
+
+    @IsOptional()
+    @Type(() => Number)
     @IsInt()
     @Min(0)
     paymentTermDays?: number
+
+    @IsOptional()
+    @IsEnum(CustomerStatus)
+    status?: CustomerStatus
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    @IsOptional()
+    @IsString()
+    salesOwnerEmpId?: string
+
+    @IsOptional()
+    @IsString()
+    accountingOwnerEmpId?: string
+
+    @IsOptional()
+    @IsString()
+    legalOwnerEmpId?: string
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards, UseInterceptors } from '@nestjs/common'
 import { EmployeesService } from './employees.service'
 import { MODULE_CODES } from 'src/common/constants/modules'
 import { ModuleName } from 'src/common/decorators/module-name.decorator'
@@ -6,9 +6,11 @@ import { AuditInterceptor } from 'src/audit/audit.interceptor'
 import { CreateEmployeeDto } from './dto/create-employee.dto'
 import { created, paged, success } from 'src/common/http/http.response.util'
 import { UpdateEmployeeDto } from './dto/update-employee.dto'
+import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
+@UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.EMPLOYEE)
 @Controller('employees')
@@ -27,6 +29,12 @@ export class EmployeesController {
             limit: Number(q.size ?? q.limit),
         })
         return paged(rs.items, rs.page, rs.limit, rs.total, 'OK', getReqId(req))
+    }
+
+    @Get('select')
+    async getForSelectOption(@Req() req: Request) {
+        const rs = await this.svc.select()
+        return success(rs, 'OK', 200, getReqId(req))
     }
 
     @Get('roles')
@@ -56,7 +64,7 @@ export class EmployeesController {
 
     @Patch(':id')
     async update(@Req() req: Request, @Param('id') id: string, @Body() dto: Partial<UpdateEmployeeDto>) {
-        console.log('UpdateEmployeeDto', dto)
+        // console.log('UpdateEmployeeDto', dto)
         const emp = await this.svc.update(id, dto)
         return success(emp, 'Updated', 200, getReqId(req))
     }

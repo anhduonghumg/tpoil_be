@@ -376,4 +376,20 @@ export class EmployeesService {
             })),
         }
     }
+
+    async select() {
+        return await this.prisma.employee.findMany({
+            where: {
+                deletedAt: null,
+                status: 'active',
+            },
+            select: {
+                id: true,
+                fullName: true,
+            },
+            orderBy: {
+                fullName: 'asc',
+            },
+        })
+    }
 }

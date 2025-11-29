@@ -1,6 +1,11 @@
-import { CustomersModule } from './modules/customers/customers.module';
-import { CustomersController } from './modules/customers/customers.controller'
-import { CustomersService } from './modules/customers/customers.service'
+import { Module } from '@nestjs/common'
+import { ScheduleModule } from '@nestjs/schedule'
+import { LookupsModule } from './modules/lookups/lookups.module'
+import { LookupsController } from './modules/lookups/lookups.controller'
+import { ContractTypesModule } from './modules/contract-types/contract-types.module'
+import { ContractTypesController } from './modules/contract-types/contract-types.controller'
+import { ContractTypesService } from './modules/contract-types/contract-types.service'
+import { CustomersModule } from './modules/customers/customers.module'
 import { EmployeesModule } from './modules/employees/employees.module'
 import { EmployeesController } from './modules/employees/employees.controller'
 import { DepartmentsModule } from './modules/departments/departments.module'
@@ -12,7 +17,6 @@ import { RbacModule } from './rbac/rbac.module'
 import { PrismaModule } from './infra/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { AuthController } from './modules/auth/auth.controller'
-import { Module } from '@nestjs/common'
 import { AppController } from './app.controller'
 import { AppService } from './app.service'
 import { AppLoggingModule } from './infra/logging/logging.module'
@@ -22,13 +26,17 @@ import { DepartmentsService } from './modules/departments/departments.service'
 import { ServeStaticModule } from '@nestjs/serve-static'
 import { join } from 'path'
 import { UploadModule } from './modules/uploads/uploads.module'
-import { ContractsController } from './modules/contracts/contracts.controller'
-import { ContractsService } from './modules/contracts/contracts.service'
 import { ContractsModule } from './modules/contracts/contracts.module'
+import { AppModule as AppFeatureModule } from './modules/app/app.module'
+import { CronModule } from './modules/cron/cron.module'
 
 @Module({
     imports: [
-        CustomersModule, 
+        ScheduleModule.forRoot(),
+        AppFeatureModule,
+        LookupsModule,
+        ContractTypesModule,
+        CustomersModule,
         ServeStaticModule.forRoot(
             // {
             //     rootPath: join(__dirname, '..', 'client'),
@@ -52,8 +60,9 @@ import { ContractsModule } from './modules/contracts/contracts.module'
         PrismaModule,
         AuthModule,
         AppLoggingModule,
+        CronModule,
     ],
-    controllers: [ContractsController, CustomersController, EmployeesController, DepartmentsController, AuthController, AppController],
-    providers: [ContractsService, CustomersService, DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
+    controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
+    providers: [ContractTypesService, DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
 })
 export class AppModule {}

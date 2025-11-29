@@ -1,40 +1,34 @@
-import { IsDateString, IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator'
-import { ContractStatus, ContractType, RiskLevel } from '@prisma/client'
+import { IsString, IsUUID, IsOptional, IsEnum, IsInt, IsDateString, IsJSON } from 'class-validator'
+import { ContractStatus, RiskLevel } from '@prisma/client'
 
 export class CreateContractDto {
-    @IsOptional()
-    @IsString()
-    code?: string
-
-    @IsNotEmpty()
-    @IsString()
-    customerId!: string
-
-    @IsEnum(ContractType)
-    type!: ContractType
-
-    @IsNotEmpty()
     @IsString()
     name: string
 
-    @IsDateString()
-    startDate!: string
-
-    @IsDateString()
-    endDate!: string
+    @IsString()
+    code: string
 
     @IsOptional()
+    @IsUUID()
+    customerId?: string
+
+    @IsUUID()
+    contractTypeId: string
+
+    @IsDateString()
+    startDate: string
+
+    @IsDateString()
+    endDate: string
+
     @IsEnum(ContractStatus)
-    status?: ContractStatus
+    status: ContractStatus
 
     @IsOptional()
-    @IsNumber()
-    @Min(0)
+    @IsInt()
     paymentTermDays?: number
 
     @IsOptional()
-    @IsNumber()
-    @Min(0)
     creditLimitOverride?: number
 
     @IsOptional()
@@ -43,9 +37,12 @@ export class CreateContractDto {
     @IsOptional()
     deliveryScope?: any
 
-    @IsOptional()
     @IsEnum(RiskLevel)
-    riskLevel?: RiskLevel
+    riskLevel: RiskLevel
+
+    @IsOptional()
+    @IsUUID()
+    renewalOfId?: string
 
     @IsOptional()
     @IsString()

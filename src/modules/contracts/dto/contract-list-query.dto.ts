@@ -1,7 +1,6 @@
-// lọc + phân trang danh sách HĐ
-import { Transform } from 'class-transformer'
-import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator'
-import { ContractStatus, ContractType } from '@prisma/client'
+import { IsOptional, IsUUID, IsEnum, IsInt, IsDateString, IsString } from 'class-validator'
+import { ContractStatus, RiskLevel } from '@prisma/client'
+import { Type } from 'class-transformer'
 
 export class ContractListQueryDto {
     @IsOptional()
@@ -9,16 +8,16 @@ export class ContractListQueryDto {
     keyword?: string
 
     @IsOptional()
-    @IsString()
+    @IsUUID()
     customerId?: string
-
-    @IsOptional()
-    @IsEnum(ContractType)
-    type?: ContractType
 
     @IsOptional()
     @IsEnum(ContractStatus)
     status?: ContractStatus
+
+    @IsOptional()
+    @IsEnum(RiskLevel)
+    riskLevel?: RiskLevel
 
     @IsOptional()
     @IsDateString()
@@ -29,14 +28,20 @@ export class ContractListQueryDto {
     startTo?: string
 
     @IsOptional()
-    @Transform(({ value }) => parseInt(value, 10))
-    @IsInt()
-    @Min(1)
-    page?: number = 1
+    @IsDateString()
+    endFrom?: string
 
     @IsOptional()
-    @Transform(({ value }) => parseInt(value, 10))
+    @IsDateString()
+    endTo?: string
+
+    @Type(() => Number)
+    @IsOptional()
     @IsInt()
-    @Min(1)
+    page?: number = 1
+
+    @Type(() => Number)
+    @IsOptional()
+    @IsInt()
     pageSize?: number = 20
 }

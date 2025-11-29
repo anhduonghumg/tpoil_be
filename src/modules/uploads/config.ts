@@ -9,5 +9,7 @@ export const defaultUploadConfig = (): UploadModuleOptions => ({
         baseUrl: '/static',
     },
     limits: { fileSize: 5 * 1024 * 1024 },
+    limitfileSize: { fileSize: 20 * 1024 * 1024 },
     accept: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'],
+    acceptFileTypes: ['application/pdf', 'application/msword', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'],
 })

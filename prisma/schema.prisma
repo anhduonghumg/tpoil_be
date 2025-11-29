@@ -93,20 +93,11 @@ enum TaxSource {
   Other
 }
 
-enum ContractType {
-  Supply
-  Service
-  Framework
-  Other
-}
-
 enum ContractStatus {
   Draft
-  PendingApproval
-  Approved
+  Pending
   Active
-  Suspended
-  Expired
+  Terminated
   Cancelled
 }
 
@@ -127,6 +118,53 @@ enum RiskSource {
   Manual
   AutoRule
   Overdue
+}
+
+enum CronJobType {
+  CONTRACT_EXPIRY_DAILY
+}
+
+enum CronJobStatus {
+  SUCCESS
+  FAILED
+}
+
+// =======================================
+// Cron Jobs
+// =======================================
+
+model CronJob {
+  id      String      @id @default(uuid()) @db.Uuid
+  type    CronJobType @unique
+  name    String
+  enabled Boolean     @default(true)
+  config  Json?
+
+  runs CronJobRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CronJobRun {
+  id String @id @default(uuid()) @db.Uuid
+
+  jobId String  @db.Uuid
+  job   CronJob @relation(fields: [jobId], references: [id])
+
+  runDate DateTime
+
+  startedAt  DateTime
+  finishedAt DateTime?
+
+  status CronJobStatus
+
+  metrics Json?
+  error   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([jobId, runDate])
 }
 
 // =======================================
@@ -197,6 +235,10 @@ model Employee {
 
   memberships  EmployeeDepartment[]
   managerRoles DepartmentManager[]
+
+  customersSalesOwner      Customer[] @relation("customer_sales_owner_emp")
+  customersAccountingOwner Customer[] @relation("customer_accounting_owner_emp")
+  customersLegalOwner      Customer[] @relation("customer_legal_owner_emp")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -376,11 +418,11 @@ model UserRoleBinding {
 }
 
 model Customer {
-  id              String               @id @default(uuid())
-  code            String               @unique
+  id              String         @id @default(uuid()) @db.Uuid
+  code            String         @unique
   name            String
   taxCode         String?
-  taxVerified     Boolean              @default(false)
+  taxVerified     Boolean        @default(false)
   taxSource       TaxSource?
   taxSyncedAt     DateTime?
   roles           CustomerRole[]
@@ -394,20 +436,37 @@ model Customer {
   tempFrom        DateTime?
   tempTo          DateTime?
   paymentTermDays Int?
-  status          CustomerStatus       @default(Active)
+  status          CustomerStatus @default(Active)
   note            String?
+
+  // 👇 NHÂN VIÊN PHỤ TRÁCH (gắn với Employee)
+  salesOwnerEmpId      String? @db.Uuid
+  accountingOwnerEmpId String? @db.Uuid
+  legalOwnerEmpId      String? @db.Uuid
+
+  salesOwnerEmp      Employee? @relation("customer_sales_owner_emp", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  accountingOwnerEmp Employee? @relation("customer_accounting_owner_emp", fields: [accountingOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  legalOwnerEmp      Employee? @relation("customer_legal_owner_emp", fields: [legalOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
   contacts        ContactPerson[]
   contracts       Contract[]
   riskFlags       RiskFlag[]
   creditHistories CreditLimitHistory[]
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  deletedAt       DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([name])
+  @@index([taxCode])
+  @@index([salesOwnerEmpId])
+  @@index([accountingOwnerEmpId])
+  @@index([legalOwnerEmpId])
 }
 
 model ContactPerson {
-  id         String   @id @default(uuid())
-  customerId String   
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @db.Uuid
   customer   Customer @relation(fields: [customerId], references: [id])
   fullName   String
   position   String?
@@ -417,14 +476,19 @@ model ContactPerson {
 }
 
 model Contract {
-  id                  String         @id @default(uuid())
-  code                String         @unique
-  name                String
-  customerId          String         
-  customer            Customer       @relation(fields: [customerId], references: [id])
-  type                ContractType
-  startDate           DateTime
-  endDate             DateTime
+  id   String @id @default(uuid()) @db.Uuid
+  code String @unique
+  name String
+
+  customerId String?   @db.Uuid
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  contractTypeId String       @db.Uuid
+  contractType   ContractType @relation(fields: [contractTypeId], references: [id])
+
+  startDate DateTime
+  endDate   DateTime
+
   status              ContractStatus @default(Draft)
   paymentTermDays     Int?
   creditLimitOverride Decimal?
@@ -433,6 +497,10 @@ model Contract {
   riskLevel           RiskLevel      @default(Low)
   approvalRequestId   String?
 
+  renewalOfId String?    @db.Uuid
+  renewalOf   Contract?  @relation("ContractRenewal", fields: [renewalOfId], references: [id])
+  renewals    Contract[] @relation("ContractRenewal")
+
   items       ContractItem[]
   appendices  ContractAppendix[]
   attachments ContractAttachment[]
@@ -440,13 +508,43 @@ model Contract {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+
+  @@index([customerId])
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([renewalOfId])
+}
+
+model ContractType {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+  sortOrder   Int?
+
+  contracts Contract[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
+model ContractAttachment {
+  id          String             @id @default(uuid()) @db.Uuid
+  contractId  String             @db.Uuid
+  contract    Contract           @relation(fields: [contractId], references: [id])
+  fileName    String
+  fileUrl     String?
+  externalUrl String?
+  category    AttachmentCategory
 }
 
 model ContractItem {
-  id         String   @id @default(uuid())
-  contractId String   
+  id         String   @id @default(uuid()) @db.Uuid
+  contractId String   @db.Uuid
   contract   Contract @relation(fields: [contractId], references: [id])
-  productId  String   
+  productId  String   @db.Uuid
   uom        String
   price      Decimal
   minQty     Decimal?
@@ -457,8 +555,8 @@ model ContractItem {
 }
 
 model ContractAppendix {
-  id            String   @id @default(uuid())
-  contractId    String   
+  id            String   @id @default(uuid()) @db.Uuid
+  contractId    String   @db.Uuid
   contract      Contract @relation(fields: [contractId], references: [id])
   code          String
   effectiveDate DateTime
@@ -466,18 +564,9 @@ model ContractAppendix {
   docUrl        String?
 }
 
-model ContractAttachment {
-  id         String             @id @default(uuid())
-  contractId String            
-  contract   Contract           @relation(fields: [contractId], references: [id])
-  fileName   String
-  fileUrl    String
-  category   AttachmentCategory
-}
-
 model CreditLimitHistory {
-  id         String    @id @default(uuid())
-  customerId String    
+  id         String    @id @default(uuid()) @db.Uuid
+  customerId String    @db.Uuid
   customer   Customer  @relation(fields: [customerId], references: [id])
   oldLimit   Decimal?
   newLimit   Decimal?
@@ -490,8 +579,8 @@ model CreditLimitHistory {
 }
 
 model RiskFlag {
-  id         String     @id @default(uuid())
-  customerId String     
+  id         String     @id @default(uuid()) @db.Uuid
+  customerId String     @db.Uuid
   customer   Customer   @relation(fields: [customerId], references: [id])
   level      RiskLevel
   source     RiskSource
@@ -508,9 +597,9 @@ model AuditLog {
   id String @id @default(uuid()) @db.Uuid
 
   // request-level
-  requestId  String?
+  requestId  String?  @db.Uuid
   at         DateTime @default(now())
-  userId     String?
+  userId     String?  @db.Uuid
   ip         String?
   ua         String?
   method     String?
@@ -521,9 +610,9 @@ model AuditLog {
   moduleCode String?
   permission String?
   action     String?
-  entityId   String?
+  entityId   String?    @db.Uuid
   scopeType  ScopeType?
-  scopeId    String?
+  scopeId    String?    @db.Uuid
 
   // data snapshots
   before Json?

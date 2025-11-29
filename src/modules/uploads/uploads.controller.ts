@@ -2,7 +2,7 @@
 import { BadRequestException, Body, Controller, Post, UploadedFile, UseInterceptors, Req } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { diskStorage } from 'multer'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import type { Request } from 'express'
 import { FileValidationPipe } from './file-validation.pipe'
 import { defaultUploadConfig } from './config'
@@ -37,6 +37,32 @@ export class UploadController {
     ) {
         if (!file) throw new BadRequestException('Không có file')
         const rs = await this.service.saveLocal(file, folder || 'employee')
+        const requestId = (req.headers['x-request-id'] as string) || (req as any).requestId
+        return success({ url: rs.url }, 'Uploaded', 200, requestId)
+    }
+
+    @Post('file')
+    @UseInterceptors(
+        FileInterceptor('file', {
+            storage: diskStorage({
+                destination: (_req, _file, cb) => {
+                    // tạm ghi vào /uploads/tmp, sau đó service sẽ move đúng folder
+                    const dest = join(cfg.local.root, 'tmp')
+                    cb(null, dest)
+                },
+                filename: (_req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
+            }),
+            limits: { fileSize: cfg.limitfileSize?.fileSize },
+        }),
+    )
+    async uploadFile(
+        @Req() req: Request,
+        @UploadedFile(new FileValidationPipe(cfg.acceptFileTypes, cfg.limitfileSize?.fileSize))
+        file: Express.Multer.File,
+        @Body('folder') folder?: string,
+    ) {
+        if (!file) throw new BadRequestException('Không có file')
+        const rs = await this.service.saveLocal(file, folder || 'contract')
         const requestId = (req.headers['x-request-id'] as string) || (req as any).requestId
         return success({ url: rs.url }, 'Uploaded', 200, requestId)
     }

@@ -10,5 +10,9 @@ export interface UploadModuleOptions {
     limits?: {
         fileSize?: number
     }
+    limitfileSize?: {
+        fileSize?: number
+    }
     accept?: string[]
+    acceptFileTypes?: string[]
 }
