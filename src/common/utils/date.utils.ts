@@ -23,3 +23,10 @@ export function diffInDays(a: Date, b: Date): number {
     const bStart = startOfDay(b).getTime()
     return Math.round((aStart - bStart) / msPerDay)
 }
+
+export function formatDate(value?: Date): string | Date | null {
+    if (!value) return ''
+    const d = typeof value === 'string' ? new Date(value) : value
+    if (isNaN(d.getTime())) return ''
+    return d.toISOString().slice(0, 10)
+}

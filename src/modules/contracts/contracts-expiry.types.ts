@@ -41,10 +41,10 @@ export interface ContractExpiryListItem {
 }
 
 export interface ContractExpiryListParams {
-    referenceDate?: Date
+    referenceDate?: string | Date
     status?: ContractExpiryFilterStatus
-    page?: number
-    pageSize?: number
+    page?: number | string
+    pageSize?: number | string
 }
 
 export interface ContractExpiryListResult {

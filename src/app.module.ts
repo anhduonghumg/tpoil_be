@@ -29,6 +29,7 @@ import { UploadModule } from './modules/uploads/uploads.module'
 import { ContractsModule } from './modules/contracts/contracts.module'
 import { AppModule as AppFeatureModule } from './modules/app/app.module'
 import { CronModule } from './modules/cron/cron.module'
+import { MailModule } from './mail/mail.module'
 
 @Module({
     imports: [
@@ -61,6 +62,7 @@ import { CronModule } from './modules/cron/cron.module'
         AuthModule,
         AppLoggingModule,
         CronModule,
+        MailModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],

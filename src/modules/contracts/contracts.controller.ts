@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UseGuards, UseInterceptors } from '@nestjs/common'
 import { ContractsService } from './contracts.service'
 import { ContractListQueryDto } from './dto/contract-list-query.dto'
 import { CreateContractDto } from './dto/create-contract.dto'
@@ -9,10 +9,12 @@ import { ModuleName } from 'src/common/decorators/module-name.decorator'
 import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 // import { success } from 'src/common/http/http.response.util'
 
+import type { Response } from 'express'
+import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 // const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
-// @UseGuards(LoggedInGuard)
-// @UseInterceptors(AuditInterceptor)
+@UseGuards(LoggedInGuard)
+@UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.CONTRACT)
 @Controller('contracts')
 export class ContractsController {
@@ -36,7 +38,29 @@ export class ContractsController {
     // contracts.controller.ts
     @Get('expiry-report')
     getExpiryReport(@Query() query: any) {
-        return this.service.getContractExpiryList()
+        return this.service.getContractExpiryList(query)
+    }
+
+    @Get('expiry-report/export')
+    async exportExpiryReport(@Query() query: any, @Res() res: Response) {
+        const { referenceDate, status } = query
+
+        const { buffer } = await this.service.generateContractExpiryExcel({
+            referenceDate,
+            status,
+        })
+
+        const filename = `contract-expiry-${referenceDate || 'today'}.xlsx`
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+
+        return res.send(buffer)
+    }
+
+    @Post('expiry-report/resend-email')
+    resendExpiryEmail(@Body() body: ContractExpiryEmailDto) {
+        return this.service.sendContractExpiryEmail(body)
     }
 
     @Get(':id')

@@ -6,13 +6,19 @@ import { ContractListQueryDto } from './dto/contract-list-query.dto'
 import { ContractStatus, Prisma } from '@prisma/client'
 import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
 import { AssignCustomerToContractDto } from './dto/assign-customer.dto'
-import { addDays, diffInDays, startOfDay, subDays } from 'src/common/utils/date.utils'
+import { addDays, diffInDays, startOfDay, subDays, formatDate } from 'src/common/utils/date.utils'
 import { CONTRACT_EXPIRED_WITHIN_DAYS, CONTRACT_EXPIRING_IN_DAYS } from 'src/common/constants/constants'
 import { ContractExpiryCounts, ContractExpiryListItem, ContractExpiryListParams, ContractExpiryListResult } from './contracts-expiry.types'
+import * as ExcelJS from 'exceljs'
+import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
+import { MailService } from 'src/mail/mail.service'
 
 @Injectable()
 export class ContractsService {
-    constructor(private prisma: PrismaService) {}
+    constructor(
+        private prisma: PrismaService,
+        private readonly mailService: MailService,
+    ) {}
 
     private async getContractOrThrow(contractId: string) {
         const contract = await this.prisma.contract.findUnique({
@@ -398,7 +404,19 @@ export class ContractsService {
      * - Gửi email (cron & resend)
      */
     async getContractExpiryList(params: ContractExpiryListParams = {}): Promise<ContractExpiryListResult> {
-        const { referenceDate = new Date(), status = 'all', page = 1, pageSize = 20 } = params
+        let { referenceDate, status = 'all', page = 1, pageSize = 20 } = params
+        if (!referenceDate) {
+            referenceDate = new Date()
+        } else if (typeof referenceDate === 'string') {
+            referenceDate = new Date(referenceDate)
+        }
+
+        if (!(referenceDate instanceof Date) || isNaN(referenceDate.getTime())) {
+            throw new BadRequestException('Invalid referenceDate')
+        }
+
+        page = Number(page) || 1
+        pageSize = Number(pageSize) || 20
 
         const ref = startOfDay(referenceDate)
         const expiringEnd = addDays(ref, CONTRACT_EXPIRING_IN_DAYS)
@@ -530,6 +548,9 @@ export class ContractsService {
             }
         })
 
+        // console.log('status', status)
+        // console.log('Contract expiry list generated with:', items)
+
         return {
             referenceDate: ref,
             status,
@@ -544,143 +565,116 @@ export class ContractsService {
     }
 
     // TÌM HĐ SẮP HẾT HẠN / ĐÃ HẾT HẠN
-    /*
-    async findExpirySummary(referenceDate: Date = new Date()): Promise<ContractsExpirySummary> {
-        const ref = startOfDay(referenceDate)
+    async generateContractExpiryExcel(params: ContractExpiryListParams = {}) {
+        // Lấy full list, bỏ paging (hoặc cho pageSize rất lớn)
+        const result = await this.getContractExpiryList({
+            ...params,
+            page: 1,
+            pageSize: 10_000,
+        })
 
-        const expiringThreshold = addDays(ref, CONTRACT_EXPIRING_IN_DAYS)
-        const expiredThreshold = subDays(ref, CONTRACT_EXPIRED_WITHIN_DAYS)
+        const workbook = new ExcelJS.Workbook()
+        const sheet = workbook.addWorksheet('Expiry Report')
 
-        // Nếu enum ContractStatus khác thì sửa lại dòng này
-        const activeStatus = ContractStatus.Active
+        sheet.columns = [
+            { header: 'Mã HĐ', key: 'contractCode', width: 18 },
+            { header: 'Tên hợp đồng', key: 'contractName', width: 40 },
+            { header: 'Khách hàng', key: 'customerName', width: 30 },
+            { header: 'Loại HĐ', key: 'contractTypeName', width: 18 },
+            { header: 'Ngày hiệu lực', key: 'startDate', width: 15 },
+            { header: 'Ngày hết hạn', key: 'endDate', width: 15 },
+            { header: 'Trạng thái hạn', key: 'derivedStatusLabel', width: 18 },
+            { header: 'Sales phụ trách', key: 'salesOwnerName', width: 25 },
+            { header: 'Kế toán phụ trách', key: 'accountingOwnerName', width: 25 },
+        ]
 
-        const baseInclude = {
-            customer: {
+        for (const item of result.items) {
+            sheet.addRow({
+                contractCode: item.contractCode,
+                contractName: item.contractName,
+                customerName: item.customerName,
+                contractTypeName: item.contractTypeName,
+                startDate: formatDate(item.startDate),
+                endDate: formatDate(item.endDate),
+                derivedStatusLabel:
+                    item.derivedStatus === 'expiring'
+                        ? `Sắp hết hạn${item.daysToEnd != null ? ` (${item.daysToEnd} ngày nữa)` : ''}`
+                        : `Đã quá hạn${item.daysSinceEnd != null ? ` (${item.daysSinceEnd} ngày)` : ''}`,
+                salesOwnerName: item.salesOwnerName,
+                accountingOwnerName: item.accountingOwnerName,
+            })
+        }
+
+        const buffer = await workbook.xlsx.writeBuffer()
+        return { buffer, result }
+    }
+
+    async sendContractExpiryEmail(payload: ContractExpiryEmailDto) {
+        const { referenceDate, status = 'all', to, cc = [], replyTo } = payload
+
+        // 1. Tạo báo cáo + file Excel
+        const { buffer, result } = await this.generateContractExpiryExcel({
+            referenceDate,
+            status,
+        })
+
+        const refDateLabel = referenceDate ? formatDate(typeof referenceDate === 'string' ? new Date(referenceDate) : referenceDate) : formatDate(new Date())
+
+        // 2. Lấy danh sách customerId trong report
+        const customerIds = Array.from(new Set(result.items.map((x) => x.customerId).filter((x): x is string => !!x)))
+
+        // 3. Query Email người phụ trách (sales + kế toán)
+        let ownerEmails: string[] = []
+        if (customerIds.length) {
+            const owners = await this.prisma.customer.findMany({
+                where: { id: { in: customerIds } },
                 select: {
-                    id: true,
-                    code: true,
-                    name: true,
-                    taxCode: true,
-                    salesOwnerEmp: {
-                        select: {
-                            fullName: true,
-                            workEmail: true,
-                        },
-                    },
-                    accountingOwnerEmp: {
-                        select: {
-                            fullName: true,
-                            workEmail: true,
-                        },
-                    },
+                    salesOwnerEmp: { select: { workEmail: true } },
+                    accountingOwnerEmp: { select: { workEmail: true } },
                 },
-            },
-            contractType: {
-                select: {
-                    name: true,
+            })
+
+            ownerEmails = owners.flatMap((o) => [o.salesOwnerEmp?.workEmail, o.accountingOwnerEmp?.workEmail]).filter((e): e is string => !!e)
+        }
+
+        const mergedCc = Array.from(new Set<string>([...cc, ...ownerEmails])).filter((e) => !to.includes(e))
+        const subject = `Báo cáo hợp đồng sắp/đã hết hạn - ngày ${refDateLabel}`
+        const text = `Ngày ${refDateLabel}: Có ${result.expiringCount} hợp đồng sắp hết hạn, ${result.expiredCount} hợp đồng đã quá hạn.\nChi tiết xem file đính kèm.`
+
+        const html = `
+                    <p>Chào anh/chị,</p>
+                    <p>Ngày <b>${refDateLabel}</b>:</p>
+                    <ul>
+                        <li><b>${result.expiringCount}</b> hợp đồng sắp hết hạn</li>
+                        <li><b>${result.expiredCount}</b> hợp đồng đã quá hạn</li>
+                    </ul>
+                    <p>Chi tiết xem file Excel đính kèm.</p>
+                    `
+
+        await this.mailService.sendMail({
+            to,
+            cc: mergedCc,
+            replyTo,
+            subject,
+            text,
+            html,
+            attachments: [
+                {
+                    filename: `Bao_cao_hop_dong_het_han_${refDateLabel}.xlsx`,
+                    content: buffer as any,
+                    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 },
-            },
-        } as const
-
-        // HĐ sắp hết hạn
-        const expiringContracts = await this.prisma.contract.findMany({
-            where: {
-                deletedAt: null,
-                status: activeStatus,
-                endDate: {
-                    gte: ref,
-                    lte: expiringThreshold,
-                },
-            },
-            include: baseInclude,
-            orderBy: {
-                endDate: 'asc',
-            },
-        })
-
-        // HĐ đã hết hạn gần đây
-        const expiredContracts = await this.prisma.contract.findMany({
-            where: {
-                deletedAt: null,
-                status: activeStatus,
-                endDate: {
-                    lt: ref,
-                    gte: expiredThreshold,
-                },
-            },
-            include: baseInclude,
-            orderBy: {
-                endDate: 'asc',
-            },
-        })
-
-        const expiring: ContractExpiryItem[] = expiringContracts.map((c) => {
-            const daysToEnd = diffInDays(c.endDate, ref)
-
-            return {
-                contractId: c.id,
-                customerId: c.customerId ?? null,
-
-                contractCode: c.code,
-                contractName: c.name,
-                contractTypeName: c.contractType?.name ?? null,
-
-                startDate: c.startDate,
-                endDate: c.endDate,
-                status: c.status,
-                riskLevel: c.riskLevel,
-                paymentTermDays: c.paymentTermDays ?? null,
-
-                customerCode: c.customer?.code ?? null,
-                customerName: c.customer?.name ?? null,
-                customerTaxCode: c.customer?.taxCode ?? null,
-
-                salesOwnerName: c.customer?.salesOwnerEmp?.fullName ?? null,
-                salesOwnerEmail: c.customer?.salesOwnerEmp?.workEmail ?? null,
-                accountingOwnerName: c.customer?.accountingOwnerEmp?.fullName ?? null,
-                accountingOwnerEmail: c.customer?.accountingOwnerEmp?.workEmail ?? null,
-
-                derivedStatus: 'expiring',
-                daysToEnd,
-            }
-        })
-
-        const expired: ContractExpiryItem[] = expiredContracts.map((c) => {
-            const daysSinceEnd = diffInDays(ref, c.endDate)
-
-            return {
-                contractId: c.id,
-                customerId: c.customerId ?? null,
-
-                contractCode: c.code,
-                contractName: c.name,
-                contractTypeName: c.contractType?.name ?? null,
-
-                startDate: c.startDate,
-                endDate: c.endDate,
-                status: c.status,
-                riskLevel: c.riskLevel,
-                paymentTermDays: c.paymentTermDays ?? null,
-
-                customerCode: c.customer?.code ?? null,
-                customerName: c.customer?.name ?? null,
-                customerTaxCode: c.customer?.taxCode ?? null,
-
-                salesOwnerName: c.customer?.salesOwnerEmp?.fullName ?? null,
-                salesOwnerEmail: c.customer?.salesOwnerEmp?.workEmail ?? null,
-                accountingOwnerName: c.customer?.accountingOwnerEmp?.fullName ?? null,
-                accountingOwnerEmail: c.customer?.accountingOwnerEmp?.workEmail ?? null,
-
-                derivedStatus: 'expired',
-                daysSinceEnd,
-            }
+            ],
         })
 
         return {
-            referenceDate: ref,
-            expiring,
-            expired,
+            sentTo: to,
+            cc: mergedCc,
+            summary: {
+                referenceDate: result.referenceDate,
+                expiringCount: result.expiringCount,
+                expiredCount: result.expiredCount,
+            },
         }
     }
-    */
 }
