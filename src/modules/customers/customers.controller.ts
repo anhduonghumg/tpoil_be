@@ -12,6 +12,7 @@ import { CustomerOverviewService } from './customer-overview.service'
 import { ContractsService } from '../contracts/contracts.service'
 import { AssignContractsToCustomerDto } from './dto/assign-contracts.dto'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
+import { UnassignContractsDto } from './dto/unassign-contracts.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
@@ -75,10 +76,10 @@ export class CustomersController {
         return success(rs, 'Created', 200, getReqId(req))
     }
 
-    @Delete(':id/contracts/:contractId')
-    async unassignContract(@Param('id') customerId: string, @Param('contractId') contractId: string, @Req() req: Request) {
-        const rs = await this.contractsService.unassignContractFromCustomer(customerId, contractId)
-        return success(rs, 'Updated', 200, getReqId(req))
+    @Post(':id/contracts/unassign')
+    async unassignContracts(@Param('id') id: string, @Body() dto: { contractIds: string[] }, @Req() req: Request) {
+        const rs = await this.contractsService.unassignContractsFromCustomer(id, dto.contractIds)
+        return success(rs, 'Created', 200, getReqId(req))
     }
 
     // ---- Overview ----

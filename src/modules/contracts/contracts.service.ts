@@ -12,6 +12,7 @@ import { ContractExpiryCounts, ContractExpiryListItem, ContractExpiryListParams,
 import * as ExcelJS from 'exceljs'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 import { MailService } from 'src/mail/mail.service'
+import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
 
 @Injectable()
 export class ContractsService {
@@ -135,7 +136,7 @@ export class ContractsService {
 
                     if (overlaps.length > 0) {
                         const o = overlaps[0]
-                        throw new ConflictException(`Contract period overlaps with ${o.code} (${o.startDate.toISOString()} – ${o.endDate.toISOString()})`)
+                        throw new ConflictException(`Hợp đồng đã được gán cho khách hàng khác ${o.code} (${o.startDate.toISOString()} – ${o.endDate.toISOString()})`)
                     }
 
                     await tx.contract.update({
@@ -144,6 +145,56 @@ export class ContractsService {
                     })
                 })
 
+                assigned.push(contractId)
+            } catch (e: any) {
+                failed.push({
+                    contractId,
+                    code: e?.name || 'không xác định',
+                    reason: e?.message || 'Lỗi Không xác định',
+                })
+            }
+        }
+
+        return {
+            customerId: customer.id,
+            assigned,
+            failed,
+        }
+    }
+
+    /**
+     * Gỡ gán 1 HĐ khỏi 1 KH (màn Customer)
+     */
+    async unassignContractsFromCustomer(customerId: string, contractIds: string[]) {
+        const customer = await this.getCustomerOrThrow(customerId)
+
+        const assigned: string[] = []
+        const failed: { contractId: string; code: string; reason: string }[] = []
+
+        for (const contractId of contractIds) {
+            try {
+                await this.prisma.$transaction(async (tx) => {
+                    const contract = await tx.contract.findUnique({
+                        where: { id: contractId },
+                    })
+
+                    if (!contract || contract.deletedAt) {
+                        throw new NotFoundException('Không tìm thấy hợp đồng')
+                    }
+
+                    if (contract.customerId !== customer.id) {
+                        throw new BadRequestException('Hợp đồng không thuộc khách hàng này')
+                    }
+
+                    if (contract.status === ContractStatus.Cancelled) {
+                        throw new BadRequestException('Không thể gỡ hợp đồng đã hủy')
+                    }
+
+                    await tx.contract.update({
+                        where: { id: contract.id },
+                        data: { customerId: null },
+                    })
+                })
                 assigned.push(contractId)
             } catch (e: any) {
                 failed.push({
@@ -159,24 +210,6 @@ export class ContractsService {
             assigned,
             failed,
         }
-    }
-
-    /**
-     * Gỡ gán 1 HĐ khỏi 1 KH (màn Customer)
-     */
-    async unassignContractFromCustomer(customerId: string, contractId: string) {
-        const contract = await this.getContractOrThrow(contractId)
-
-        if (contract.customerId !== customerId) {
-            throw new NotFoundException('Hợp đồng không thuộc khách hàng này')
-        }
-
-        const updated = await this.prisma.contract.update({
-            where: { id: contract.id },
-            data: { customerId: null },
-        })
-
-        return updated
     }
 
     // LIST
@@ -676,5 +709,73 @@ export class ContractsService {
                 expiredCount: result.expiredCount,
             },
         }
+    }
+
+    async listByCustomer(customerId: string) {
+        return this.prisma.contract.findMany({
+            where: { customerId, deletedAt: null },
+            orderBy: { startDate: 'desc' },
+            select: {
+                id: true,
+                code: true,
+                name: true,
+                startDate: true,
+                endDate: true,
+                status: true,
+                riskLevel: true,
+            },
+        })
+    }
+
+    async listAttachableContracts(params: { customerId: string; keyword?: string; page?: number; pageSize?: number }) {
+        const { keyword = '', page = 1, pageSize = 20 } = params
+
+        const where: any = {
+            deletedAt: null,
+            customerId: null,
+        }
+
+        if (keyword) {
+            where.OR = [{ code: { contains: keyword, mode: 'insensitive' } }, { name: { contains: keyword, mode: 'insensitive' } }]
+        }
+
+        const [items, total] = await this.prisma.$transaction([
+            this.prisma.contract.findMany({
+                where,
+                orderBy: { startDate: 'desc' },
+                skip: (page - 1) * pageSize,
+                take: pageSize,
+                select: {
+                    id: true,
+                    code: true,
+                    name: true,
+                    startDate: true,
+                    endDate: true,
+                    status: true,
+                    riskLevel: true,
+                    contractType: { select: { name: true } },
+                },
+            }),
+            this.prisma.contract.count({ where }),
+        ])
+
+        console.log('listAttachableContracts data:', items)
+
+        return { items, total, page, pageSize }
+    }
+
+    async attachContracts(customerId: string, contractIds: string[]) {
+        if (!contractIds.length) return { updated: 0 }
+
+        const rs = await this.prisma.contract.updateMany({
+            where: {
+                id: { in: contractIds },
+                deletedAt: null,
+                customerId: null,
+            },
+            data: { customerId },
+        })
+
+        return { updated: rs.count }
     }
 }

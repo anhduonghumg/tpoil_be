@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UseGuards, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards, UseInterceptors } from '@nestjs/common'
 import { ContractsService } from './contracts.service'
 import { ContractListQueryDto } from './dto/contract-list-query.dto'
 import { CreateContractDto } from './dto/create-contract.dto'
@@ -11,7 +11,10 @@ import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 
 import type { Response } from 'express'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
-// const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
+import { success } from 'src/common/http/http.response.util'
+import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
+import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
+const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
 @UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
@@ -63,6 +66,16 @@ export class ContractsController {
         return this.service.sendContractExpiryEmail(body)
     }
 
+    @Get('attachable')
+    getAttachableContracts(@Query('customerId') customerId: string, @Query('keyword') keyword?: string, @Query('page') page = '1', @Query('pageSize') pageSize = '20') {
+        return this.service.listAttachableContracts({
+            customerId,
+            keyword,
+            page: +page || 1,
+            pageSize: +pageSize || 20,
+        })
+    }
+
     @Get(':id')
     detail(@Param('id') id: string) {
         return this.service.detail(id)
@@ -70,13 +83,18 @@ export class ContractsController {
 
     @Patch(':id')
     update(@Param('id') id: string, @Body() dto: UpdateContractDto) {
-        // console.log('Updating contract with ID:', id, 'using DTO:', dto)
         return this.service.update(id, dto)
     }
 
     @Delete(':id')
     delete(@Param('id') id: string) {
         return this.service.remove(id)
+    }
+
+    @Get(':id/contracts')
+    async getCustomerContracts(@Param('id') id: string, @Req() req: Request) {
+        const contracts = await this.service.listByCustomer(id)
+        return success(contracts, 'OK', 200, getReqId(req))
     }
 }
 

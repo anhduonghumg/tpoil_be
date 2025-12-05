@@ -38,6 +38,8 @@ export class ContractAttachmentsService {
         })
     }
 
+    
+
     async delete(id: string) {
         return this.prisma.contractAttachment.delete({ where: { id } })
         // const att = await this.prisma.contractAttachment.findUnique(...)
