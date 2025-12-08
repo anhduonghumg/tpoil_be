@@ -12,7 +12,8 @@ import { ContractExpiryCounts, ContractExpiryListItem, ContractExpiryListParams,
 import * as ExcelJS from 'exceljs'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 import { MailService } from 'src/mail/mail.service'
-import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
+// import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
+import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
 
 @Injectable()
 export class ContractsService {
@@ -266,6 +267,7 @@ export class ContractsService {
                             externalUrl: true,
                         },
                     },
+                    renewalOf: { select: { id: true, code: true } },
                 },
             }),
             this.prisma.contract.count({ where }),
@@ -297,29 +299,101 @@ export class ContractsService {
             creditLimitOverride: c.creditLimitOverride,
 
             attachments: c.attachments ?? [],
+            renewalOfId: c.renewalOfId ?? null,
+            renewalOfCode: c.renewalOf?.code ?? null,
         }))
 
         return { items, total, page, pageSize }
     }
 
     // CREATE
+    // async create(dto: CreateContractDto) {
+    //     return this.prisma.contract.create({
+    //         data: {
+    //             code: dto.code,
+    //             name: dto.name,
+    //             startDate: new Date(dto.startDate),
+    //             endDate: new Date(dto.endDate),
+    //             status: dto.status,
+    //             paymentTermDays: dto.paymentTermDays,
+    //             creditLimitOverride: dto.creditLimitOverride,
+    //             sla: dto.sla,
+    //             deliveryScope: dto.deliveryScope,
+    //             riskLevel: dto.riskLevel,
+    //             approvalRequestId: dto.approvalRequestId,
+    //             customer: dto.customerId ? { connect: { id: dto.customerId } } : undefined,
+    //             contractType: { connect: { id: dto.contractTypeId } },
+    //             renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : undefined,
+    //         },
+    //     })
+    // }
+
     async create(dto: CreateContractDto) {
-        return this.prisma.contract.create({
+        return this.prisma.$transaction(async (tx) => {
+            let origin: { id: string; customerId: string | null; endDate: Date } | null = null
+
+            if (dto.renewalOfId) {
+                origin = await tx.contract.findUnique({
+                    where: { id: dto.renewalOfId },
+                    select: { id: true, customerId: true, endDate: true },
+                })
+
+                if (!origin) {
+                    throw new NotFoundException('Hợp đồng gốc không tồn tại')
+                }
+
+                // check cùng customer nếu cả hai đều có customerId
+                if (dto.customerId && origin.customerId && dto.customerId !== origin.customerId) {
+                    throw new BadRequestException('Gia hạn phải cùng khách hàng với hợp đồng gốc')
+                }
+
+                // check không chồng ngày: yêu cầu startDate mới > endDate cũ
+                const newStart = new Date(dto.startDate)
+                if (newStart <= origin.endDate) {
+                    throw new BadRequestException('Ngày bắt đầu của hợp đồng gia hạn phải sau ngày kết thúc của hợp đồng gốc')
+                }
+            }
+
+            const newContract = await tx.contract.create({
+                data: {
+                    customerId: dto.customerId ?? null,
+                    contractTypeId: dto.contractTypeId,
+                    code: dto.code,
+                    name: dto.name,
+                    startDate: new Date(dto.startDate),
+                    endDate: new Date(dto.endDate),
+                    status: dto.status ?? ContractStatus.Active,
+                    paymentTermDays: dto.paymentTermDays ?? null,
+                    creditLimitOverride: dto.creditLimitOverride ?? null,
+                    riskLevel: dto.riskLevel,
+                    sla: dto.sla ?? null,
+                    deliveryScope: dto.deliveryScope ?? null,
+                    renewalOfId: dto.renewalOfId ?? null,
+                    approvalRequestId: dto.approvalRequestId ?? null,
+                },
+            })
+
+            // Nếu là gia hạn -> tự động kết thúc HĐ gốc
+            if (origin) {
+                await tx.contract.update({
+                    where: { id: origin.id },
+                    data: { status: ContractStatus.Terminated },
+                })
+            }
+
+            return newContract
+        })
+    }
+
+    async createAttachment(dto: CreateContractAttachmentDto) {
+        // check quyền, check contractId tồn tại...
+        return this.prisma.contractAttachment.create({
             data: {
-                code: dto.code,
-                name: dto.name,
-                startDate: new Date(dto.startDate),
-                endDate: new Date(dto.endDate),
-                status: dto.status,
-                paymentTermDays: dto.paymentTermDays,
-                creditLimitOverride: dto.creditLimitOverride,
-                sla: dto.sla,
-                deliveryScope: dto.deliveryScope,
-                riskLevel: dto.riskLevel,
-                approvalRequestId: dto.approvalRequestId,
-                customer: dto.customerId ? { connect: { id: dto.customerId } } : undefined,
-                contractType: { connect: { id: dto.contractTypeId } },
-                renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : undefined,
+                contractId: dto.contractId,
+                fileName: dto.fileName,
+                fileUrl: dto.fileUrl,
+                category: dto.category ?? null,
+                externalUrl: dto.externalUrl ?? null,
             },
         })
     }
@@ -342,43 +416,175 @@ export class ContractsService {
     }
 
     // UPDATE
-    async update(id: string, dto: UpdateContractDto) {
-        const existing = await this.prisma.contract.findFirst({
-            where: { id, deletedAt: null },
-        })
-        if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
+    // async update(id: string, dto: UpdateContractDto) {
+    //     const existing = await this.prisma.contract.findFirst({
+    //         where: { id, deletedAt: null },
+    //     })
+    //     if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
 
-        return this.prisma.contract.update({
-            where: { id },
-            data: {
-                code: dto.code ?? undefined,
-                name: dto.name ?? undefined,
-                startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-                endDate: dto.endDate ? new Date(dto.endDate) : undefined,
-                status: dto.status ?? undefined,
-                paymentTermDays: dto.paymentTermDays,
-                creditLimitOverride: dto.creditLimitOverride !== undefined ? dto.creditLimitOverride : undefined,
-                sla: dto.sla,
-                deliveryScope: dto.deliveryScope,
-                riskLevel: dto.riskLevel,
-                approvalRequestId: dto.approvalRequestId,
-                customer: dto.customerId ? { connect: { id: dto.customerId } } : dto.customerId === null ? { disconnect: true } : undefined,
-                contractType: dto.contractTypeId ? { connect: { id: dto.contractTypeId } } : undefined,
-                renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : dto.renewalOfId === null ? { disconnect: true } : undefined,
-            },
+    //     return this.prisma.contract.update({
+    //         where: { id },
+    //         data: {
+    //             code: dto.code ?? undefined,
+    //             name: dto.name ?? undefined,
+    //             startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+    //             endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+    //             status: dto.status ?? undefined,
+    //             paymentTermDays: dto.paymentTermDays,
+    //             creditLimitOverride: dto.creditLimitOverride !== undefined ? dto.creditLimitOverride : undefined,
+    //             sla: dto.sla,
+    //             deliveryScope: dto.deliveryScope,
+    //             riskLevel: dto.riskLevel,
+    //             approvalRequestId: dto.approvalRequestId,
+    //             customer: dto.customerId ? { connect: { id: dto.customerId } } : dto.customerId === null ? { disconnect: true } : undefined,
+    //             contractType: dto.contractTypeId ? { connect: { id: dto.contractTypeId } } : undefined,
+    //             renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : dto.renewalOfId === null ? { disconnect: true } : undefined,
+    //         },
+    //     })
+    // }
+
+    async update(id: string, dto: UpdateContractDto) {
+        return this.prisma.$transaction(async (tx) => {
+            const existing = await tx.contract.findUnique({
+                where: { id },
+            })
+
+            if (!existing) {
+                throw new NotFoundException('Contract not found')
+            }
+
+            const oldRenewalOfId = existing.renewalOfId
+            const newRenewalOfId = dto.renewalOfId ?? null
+
+            const newCustomerId = dto.customerId ?? existing.customerId
+            const newStartDate = dto.startDate ?? existing.startDate
+            // const newEndDate = dto.endDate ?? existing.endDate
+
+            // ===== 1. Nếu có HĐ gốc mới -> validate & Terminate gốc mới =====
+            if (newRenewalOfId) {
+                const newOrigin = await tx.contract.findUnique({
+                    where: { id: newRenewalOfId },
+                })
+                if (!newOrigin) {
+                    throw new NotFoundException('Origin contract not found')
+                }
+
+                if (newOrigin.customerId !== newCustomerId) {
+                    throw new BadRequestException('Renewal must be within the same customer')
+                }
+
+                const startDate = new Date(newStartDate)
+                const originEnd = new Date(newOrigin.endDate)
+                if (startDate <= originEnd) {
+                    throw new BadRequestException('New contract startDate must be after origin endDate')
+                }
+
+                // Đặt HĐ gốc mới sang Terminated
+                await tx.contract.update({
+                    where: { id: newOrigin.id },
+                    data: { status: ContractStatus.Terminated },
+                })
+            }
+
+            // ===== 2. Nếu đổi HĐ gốc / bỏ gia hạn -> có thể re-open HĐ gốc cũ =====
+            if (oldRenewalOfId && oldRenewalOfId !== newRenewalOfId) {
+                const hasOtherRenewals = await tx.contract.findFirst({
+                    where: {
+                        renewalOfId: oldRenewalOfId,
+                        id: { not: id },
+                    },
+                })
+
+                if (!hasOtherRenewals) {
+                    // Nếu không còn HĐ con nào khác, mở lại HĐ gốc cũ
+                    await tx.contract.update({
+                        where: { id: oldRenewalOfId },
+                        data: { status: ContractStatus.Active },
+                    })
+                }
+            }
+
+            // ===== 3. Update chính HĐ này =====
+            const updated = await tx.contract.update({
+                where: { id },
+                data: {
+                    customerId: newCustomerId,
+                    contractTypeId: dto.contractTypeId ?? existing.contractTypeId,
+                    code: dto.code ?? existing.code,
+                    name: dto.name ?? existing.name,
+                    startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+                    endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+                    status: dto.status ?? existing.status,
+                    paymentTermDays: dto.paymentTermDays !== undefined ? dto.paymentTermDays : existing.paymentTermDays,
+                    creditLimitOverride: dto.creditLimitOverride !== undefined ? dto.creditLimitOverride : existing.creditLimitOverride,
+                    riskLevel: dto.riskLevel ?? existing.riskLevel,
+                    sla: dto.sla ?? existing.sla,
+                    deliveryScope: dto.deliveryScope ?? existing.deliveryScope,
+                    renewalOfId: newRenewalOfId,
+                    approvalRequestId: dto.approvalRequestId ?? existing.approvalRequestId,
+                },
+            })
+
+            if (updated.renewalOfId && updated.status === 'Active') {
+                await tx.contract.update({
+                    where: { id: updated.renewalOfId },
+                    data: { status: 'Terminated' },
+                })
+            }
+
+            return updated
         })
     }
 
     // REMOVE
-    async remove(id: string) {
-        const existing = await this.prisma.contract.findFirst({
-            where: { id, deletedAt: null },
-        })
-        if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
+    // async remove(id: string) {
+    //     const existing = await this.prisma.contract.findFirst({
+    //         where: { id, deletedAt: null },
+    //     })
+    //     if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
 
-        return this.prisma.contract.update({
-            where: { id },
-            data: { deletedAt: new Date() },
+    //     return this.prisma.contract.update({
+    //         where: { id },
+    //         data: { deletedAt: new Date() },
+    //     })
+    // }
+
+    async remove(id: string) {
+        return this.prisma.$transaction(async (tx) => {
+            const existing = await tx.contract.findUnique({
+                where: { id },
+            })
+
+            if (!existing) {
+                throw new NotFoundException('Contract not found')
+            }
+
+            const originId = existing.renewalOfId
+
+            await tx.contractAttachment.deleteMany({
+                where: { contractId: id },
+            })
+
+            await tx.contract.delete({
+                where: { id },
+            })
+
+            if (originId) {
+                const hasOtherRenewals = await tx.contract.findFirst({
+                    where: {
+                        renewalOfId: originId,
+                    },
+                })
+
+                if (!hasOtherRenewals) {
+                    await tx.contract.update({
+                        where: { id: originId },
+                        data: { status: ContractStatus.Active },
+                    })
+                }
+            }
+
+            return { success: true }
         })
     }
 

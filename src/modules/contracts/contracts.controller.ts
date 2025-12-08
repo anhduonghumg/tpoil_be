@@ -12,8 +12,7 @@ import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 import type { Response } from 'express'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 import { success } from 'src/common/http/http.response.util'
-import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
-import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
+import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
 @UseGuards(LoggedInGuard)
@@ -74,6 +73,11 @@ export class ContractsController {
             page: +page || 1,
             pageSize: +pageSize || 20,
         })
+    }
+
+    @Post('attachments')
+    createAttachment(@Body() dto: CreateContractAttachmentDto) {
+        return this.service.createAttachment(dto)
     }
 
     @Get(':id')
