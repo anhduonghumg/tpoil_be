@@ -13,6 +13,7 @@ import type { Response } from 'express'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 import { success } from 'src/common/http/http.response.util'
 import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
+import { ImportContractsDto } from './dto/import-contracts.dto'
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
 @UseGuards(LoggedInGuard)
@@ -30,6 +31,16 @@ export class ContractsController {
     @Post()
     create(@Body() dto: CreateContractDto) {
         return this.service.create(dto)
+    }
+
+    @Post('import')
+    async importFromExcel(@Body() dto: ImportContractsDto, @Req() req: Request) {
+        const result = await this.service.importFromExcel(dto)
+        return success(result, 'OK', 200, getReqId(req))
+        // return {
+        //     success: true,
+        //     data: result,
+        // }
     }
 
     @Get('expiry-counts')

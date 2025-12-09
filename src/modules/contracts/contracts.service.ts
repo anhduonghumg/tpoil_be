@@ -12,8 +12,9 @@ import { ContractExpiryCounts, ContractExpiryListItem, ContractExpiryListParams,
 import * as ExcelJS from 'exceljs'
 import { ContractExpiryEmailDto } from './dto/contract-expiry-email.dto'
 import { MailService } from 'src/mail/mail.service'
-// import { UnassignContractsDto } from '../customers/dto/unassign-contracts.dto'
 import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
+import { ImportContractsDto, ImportContractsResult, ImportContractsResultItem } from './dto/import-contracts.dto'
+import dayjs from 'dayjs'
 
 @Injectable()
 export class ContractsService {
@@ -306,28 +307,6 @@ export class ContractsService {
         return { items, total, page, pageSize }
     }
 
-    // CREATE
-    // async create(dto: CreateContractDto) {
-    //     return this.prisma.contract.create({
-    //         data: {
-    //             code: dto.code,
-    //             name: dto.name,
-    //             startDate: new Date(dto.startDate),
-    //             endDate: new Date(dto.endDate),
-    //             status: dto.status,
-    //             paymentTermDays: dto.paymentTermDays,
-    //             creditLimitOverride: dto.creditLimitOverride,
-    //             sla: dto.sla,
-    //             deliveryScope: dto.deliveryScope,
-    //             riskLevel: dto.riskLevel,
-    //             approvalRequestId: dto.approvalRequestId,
-    //             customer: dto.customerId ? { connect: { id: dto.customerId } } : undefined,
-    //             contractType: { connect: { id: dto.contractTypeId } },
-    //             renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : undefined,
-    //         },
-    //     })
-    // }
-
     async create(dto: CreateContractDto) {
         return this.prisma.$transaction(async (tx) => {
             let origin: { id: string; customerId: string | null; endDate: Date } | null = null
@@ -414,34 +393,6 @@ export class ContractsService {
         if (!contract) throw new NotFoundException('Không tìm thấy hợp đồng')
         return contract
     }
-
-    // UPDATE
-    // async update(id: string, dto: UpdateContractDto) {
-    //     const existing = await this.prisma.contract.findFirst({
-    //         where: { id, deletedAt: null },
-    //     })
-    //     if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
-
-    //     return this.prisma.contract.update({
-    //         where: { id },
-    //         data: {
-    //             code: dto.code ?? undefined,
-    //             name: dto.name ?? undefined,
-    //             startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-    //             endDate: dto.endDate ? new Date(dto.endDate) : undefined,
-    //             status: dto.status ?? undefined,
-    //             paymentTermDays: dto.paymentTermDays,
-    //             creditLimitOverride: dto.creditLimitOverride !== undefined ? dto.creditLimitOverride : undefined,
-    //             sla: dto.sla,
-    //             deliveryScope: dto.deliveryScope,
-    //             riskLevel: dto.riskLevel,
-    //             approvalRequestId: dto.approvalRequestId,
-    //             customer: dto.customerId ? { connect: { id: dto.customerId } } : dto.customerId === null ? { disconnect: true } : undefined,
-    //             contractType: dto.contractTypeId ? { connect: { id: dto.contractTypeId } } : undefined,
-    //             renewalOf: dto.renewalOfId ? { connect: { id: dto.renewalOfId } } : dto.renewalOfId === null ? { disconnect: true } : undefined,
-    //         },
-    //     })
-    // }
 
     async update(id: string, dto: UpdateContractDto) {
         return this.prisma.$transaction(async (tx) => {
@@ -535,19 +486,6 @@ export class ContractsService {
             return updated
         })
     }
-
-    // REMOVE
-    // async remove(id: string) {
-    //     const existing = await this.prisma.contract.findFirst({
-    //         where: { id, deletedAt: null },
-    //     })
-    //     if (!existing) throw new NotFoundException('Không tìm thấy hợp đồng')
-
-    //     return this.prisma.contract.update({
-    //         where: { id },
-    //         data: { deletedAt: new Date() },
-    //     })
-    // }
 
     async remove(id: string) {
         return this.prisma.$transaction(async (tx) => {
@@ -983,5 +921,210 @@ export class ContractsService {
         })
 
         return { updated: rs.count }
+    }
+
+    /**
+     * Import hợp đồng từ Excel
+     * - Map customerCode -> customerId
+     * - Map contractTypeCode -> contractTypeId
+     * - Map renewalOfCode -> contractId
+     * - Tạo HĐ mới
+     * - Nếu có renewalOfId -> tự động set status = Terminated cho HĐ gốc
+     */
+    async importFromExcel(dto: ImportContractsDto): Promise<ImportContractsResult> {
+        const rows = dto.rows ?? []
+
+        if (!rows.length) {
+            return {
+                total: 0,
+                successCount: 0,
+                failureCount: 0,
+                items: [],
+            }
+        }
+
+        // ===== 1. Chuẩn bị dữ liệu lookup (code -> entity) =====
+        const customerCodes = Array.from(new Set(rows.map((r) => r.customerCode).filter(Boolean)))
+        const contractTypeCodes = Array.from(new Set(rows.map((r) => r.contractTypeCode).filter(Boolean)))
+        const renewalCodes = Array.from(new Set(rows.map((r) => r.renewalOfCode).filter((c): c is string => !!c && c.trim().length > 0)))
+
+        const [customers, contractTypes, originContracts] = await Promise.all([
+            this.prisma.customer.findMany({
+                where: { code: { in: customerCodes } },
+                select: { id: true, code: true },
+            }),
+            this.prisma.contractType.findMany({
+                where: { code: { in: contractTypeCodes } },
+                select: { id: true, code: true },
+            }),
+            renewalCodes.length
+                ? this.prisma.contract.findMany({
+                      where: { code: { in: renewalCodes } },
+                      select: { id: true, code: true, status: true },
+                  })
+                : Promise.resolve([] as { id: string; code: string; status: string }[]),
+        ])
+
+        const customerMap = new Map(customers.map((c) => [c.code, c]))
+        const contractTypeMap = new Map(contractTypes.map((t) => [t.code, t]))
+        // Map code -> originContractId (khỏi phải origin?.id)
+        const originContractMap = new Map<string, string>()
+        originContracts.forEach((c) => {
+            originContractMap.set(c.code, c.id)
+        })
+
+        // ===== 2. Helper parse date =====
+        const parseDate = (value: string): Date | null => {
+            if (!value) return null
+
+            const trimmed = value.trim()
+
+            // Thử DD/MM/YYYY
+            let d = dayjs(trimmed, 'DD/MM/YYYY', true)
+            if (d.isValid()) return d.toDate()
+
+            // Thử YYYY-MM-DD
+            d = dayjs(trimmed, 'YYYY-MM-DD', true)
+            if (d.isValid()) return d.toDate()
+
+            return null
+        }
+
+        const resultItems: ImportContractsResultItem[] = []
+
+        const validPayloads: {
+            rowIndex: number
+            code: string
+            data: Prisma.ContractUncheckedCreateInput
+            originContractId?: string // để auto Terminated
+        }[] = []
+
+        // ===== 3. Validate từng dòng & build payload =====
+        rows.forEach((row, index) => {
+            const rowLabel = row.code || `row-${index + 1}`
+
+            const errors: string[] = []
+
+            const customer = customerMap.get(row.customerCode)
+            if (!customer) {
+                errors.push(`Không tìm thấy khách hàng với mã: ${row.customerCode}`)
+            }
+
+            const contractType = contractTypeMap.get(row.contractTypeCode)
+            if (!contractType) {
+                errors.push(`Không tìm thấy loại hợp đồng với mã: ${row.contractTypeCode}`)
+            }
+
+            const startDate = parseDate(row.startDate)
+            const endDate = parseDate(row.endDate)
+            if (!startDate) errors.push(`Ngày bắt đầu không hợp lệ: ${row.startDate}`)
+            if (!endDate) errors.push(`Ngày kết thúc không hợp lệ: ${row.endDate}`)
+            if (startDate && endDate && endDate < startDate) {
+                errors.push('Ngày kết thúc phải >= ngày bắt đầu')
+            }
+
+            let originContractId: string | undefined = undefined
+            if (row.renewalOfCode) {
+                const originId = originContractMap.get(row.renewalOfCode)
+                if (!originId) {
+                    errors.push(`Không tìm thấy hợp đồng gốc với mã: ${row.renewalOfCode}`)
+                } else {
+                    originContractId = originId
+                }
+            }
+
+            if (errors.length) {
+                resultItems.push({
+                    index,
+                    code: rowLabel,
+                    success: false,
+                    error: errors.join('; '),
+                })
+                return
+            }
+
+            // Build payload cho Prisma
+            const data: Prisma.ContractUncheckedCreateInput = {
+                customerId: customer!.id,
+                contractTypeId: contractType!.id,
+                code: row.code,
+                name: row.name,
+                startDate: startDate!,
+                endDate: endDate!,
+                status: row.status,
+                paymentTermDays: typeof row.paymentTermDays === 'number' ? row.paymentTermDays : null,
+                creditLimitOverride: typeof row.creditLimitOverride === 'number' ? row.creditLimitOverride : null,
+                riskLevel: row.riskLevel,
+                sla: row.sla ?? undefined,
+                deliveryScope: row.deliveryScope ?? undefined,
+                renewalOfId: originContractId ?? null,
+                approvalRequestId: null,
+            }
+
+            validPayloads.push({
+                rowIndex: index,
+                code: row.code,
+                data,
+                originContractId,
+            })
+        })
+
+        if (!validPayloads.length) {
+            const failureCount = resultItems.length
+            return {
+                total: rows.length,
+                successCount: 0,
+                failureCount,
+                items: resultItems,
+            }
+        }
+
+        // ===== 4. Ghi DB trong transaction =====
+        const createdResults = await this.prisma.$transaction(async (tx) => {
+            const items: ImportContractsResultItem[] = [...resultItems]
+
+            for (const payload of validPayloads) {
+                try {
+                    const created = await tx.contract.create({
+                        data: payload.data,
+                    })
+
+                    // Nếu là hợp đồng gia hạn từ HĐ khác -> set Terminated cho HĐ gốc
+                    if (payload.originContractId) {
+                        await tx.contract.update({
+                            where: { id: payload.originContractId },
+                            data: { status: 'Terminated' },
+                        })
+                    }
+
+                    items.push({
+                        index: payload.rowIndex,
+                        code: payload.code,
+                        success: true,
+                    })
+                } catch (e: any) {
+                    items.push({
+                        index: payload.rowIndex,
+                        code: payload.code,
+                        success: false,
+                        error: e?.message || 'Lỗi không xác định khi ghi DB',
+                    })
+                }
+            }
+
+            return items
+        })
+
+        const successCount = createdResults.filter((i) => i.success).length
+        const failureCount = createdResults.filter((i) => !i.success).length
+
+        const result: ImportContractsResult = {
+            total: rows.length,
+            successCount,
+            failureCount,
+            items: createdResults,
+        }
+
+        return result
     }
 }
