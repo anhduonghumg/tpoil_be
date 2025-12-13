@@ -12,8 +12,6 @@ import { DepartmentsModule } from './modules/departments/departments.module'
 import { DepartmentsController } from './modules/departments/departments.controller'
 import { AuditModule } from './audit/audit.module'
 import { AuditService } from './audit/audit.service'
-import { PolicyService } from './rbac/policy.service'
-import { RbacModule } from './rbac/rbac.module'
 import { PrismaModule } from './infra/prisma/prisma.module'
 import { AuthModule } from './modules/auth/auth.module'
 import { AuthController } from './modules/auth/auth.controller'
@@ -30,6 +28,7 @@ import { ContractsModule } from './modules/contracts/contracts.module'
 import { AppModule as AppFeatureModule } from './modules/app/app.module'
 import { CronModule } from './modules/cron/cron.module'
 import { MailModule } from './mail/mail.module'
+import { UsersModule } from './modules/users/users.module'
 
 @Module({
     imports: [
@@ -53,11 +52,11 @@ import { MailModule } from './mail/mail.module'
             },
         ),
         UploadModule,
+        UsersModule,
         EmployeesModule,
         ContractsModule,
         DepartmentsModule,
         AuditModule,
-        RbacModule,
         PrismaModule,
         AuthModule,
         AppLoggingModule,
@@ -65,6 +64,6 @@ import { MailModule } from './mail/mail.module'
         MailModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
-    providers: [ContractTypesService, DepartmentsService, AuditService, PolicyService, AppService, LoggingInterceptor, AllExceptionsFilter],
+    providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],
 })
 export class AppModule {}

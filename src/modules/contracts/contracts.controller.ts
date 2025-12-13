@@ -37,10 +37,16 @@ export class ContractsController {
     async importFromExcel(@Body() dto: ImportContractsDto, @Req() req: Request) {
         const result = await this.service.importFromExcel(dto)
         return success(result, 'OK', 200, getReqId(req))
-        // return {
-        //     success: true,
-        //     data: result,
-        // }
+    }
+
+    @Get('import/template')
+    async downloadImportTemplate(@Res() res: Response) {
+        const buffer = await this.service.generateImportTemplate()
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', 'attachment; filename="contracts-import-template.xlsx"')
+
+        res.end(buffer)
     }
 
     @Get('expiry-counts')

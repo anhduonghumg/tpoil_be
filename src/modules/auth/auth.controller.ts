@@ -5,7 +5,6 @@ import { AuthService } from './auth.service'
 import { AuthGuard } from '@nestjs/passport'
 import { PinoLogger } from 'nestjs-pino'
 // import path from 'path'
-import { AppException } from 'src/common/errors/app-exception'
 
 @Controller('auth')
 export class AuthController {
@@ -30,6 +29,17 @@ export class AuthController {
         await this.auth.recordAttempt(dto.email, true, req.ip, req.headers['user-agent'] as string)
         await this.auth.updateLastLogin(req.user.id)
         // this.logger.info({ msg: "Đăng nhập thành công!", userId: req.user.id, email: dto.email });
+
+        try {
+            const authSession = await this.auth.buildAuthSession(req.user.id)
+            if (req.session) {
+                req.session.auth = authSession
+            }
+        } catch (e) {
+            this.logger.error({ msg: 'build_auth_session_failed', userId: req.user.id, err: e?.message })
+            throw e
+        }
+
         return { user: req.user }
     }
 
@@ -40,22 +50,9 @@ export class AuthController {
         await new Promise<void>((resolve) => req.logout(() => resolve()))
         await new Promise<void>((resolve) => req.session?.destroy(() => resolve()))
         // Xoá cookie phía client (khớp option trong main.ts)
-        res.clearCookie(sidName, { httpOnly: true, sameSite: 'lax', secure: false })
+        res?.clearCookie(sidName, { httpOnly: true, sameSite: 'lax', secure: false })
         return { ok: true }
     }
-
-    // @Post('logout')
-    // @HttpCode(200)
-    // async logout(@Req() req, @Res({ passthrough: true }) res: any) {
-    //     await new Promise<void>((resolve, reject) => req.logout((e) => (e ? reject(e) : resolve())))
-    //     await new Promise<void>((resolve, reject) => req.session.destroy((e) => (e ? reject(e) : resolve())))
-    //     res.clearCookie('connect.sid', {
-    //         httpOnly: true,
-    //         secure: false,
-    //         sameSite: 'lax',
-    //     })
-    //     return { ok: true }
-    // }
 
     @UseGuards(LoggedInGuard)
     @Get('me')

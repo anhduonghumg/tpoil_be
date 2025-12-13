@@ -32,9 +32,12 @@ export class EmployeesController {
     }
 
     @Get('select')
-    async getForSelectOption(@Req() req: Request) {
-        const rs = await this.svc.select()
-        return success(rs, 'OK', 200, getReqId(req))
+    select(@Query('keyword') keyword?: string, @Query('page') page?: string, @Query('pageSize') pageSize?: string) {
+        return this.svc.select({
+            keyword: keyword?.trim(),
+            page: Number(page ?? 1),
+            pageSize: Number(pageSize ?? 50),
+        })
     }
 
     @Get('roles')

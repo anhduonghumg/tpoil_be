@@ -903,7 +903,7 @@ export class ContractsService {
             this.prisma.contract.count({ where }),
         ])
 
-        console.log('listAttachableContracts data:', items)
+        // console.log('listAttachableContracts data:', items)
 
         return { items, total, page, pageSize }
     }
@@ -967,7 +967,6 @@ export class ContractsService {
 
         const customerMap = new Map(customers.map((c) => [c.code, c]))
         const contractTypeMap = new Map(contractTypes.map((t) => [t.code, t]))
-        // Map code -> originContractId (khỏi phải origin?.id)
         const originContractMap = new Map<string, string>()
         originContracts.forEach((c) => {
             originContractMap.set(c.code, c.id)
@@ -1089,7 +1088,6 @@ export class ContractsService {
                         data: payload.data,
                     })
 
-                    // Nếu là hợp đồng gia hạn từ HĐ khác -> set Terminated cho HĐ gốc
                     if (payload.originContractId) {
                         await tx.contract.update({
                             where: { id: payload.originContractId },
@@ -1126,5 +1124,77 @@ export class ContractsService {
         }
 
         return result
+    }
+
+    async generateImportTemplate(): Promise<Buffer> {
+        const workbook = new ExcelJS.Workbook()
+
+        const sheet = workbook.addWorksheet('Nhập hợp đồng')
+
+        sheet.columns = [
+            { header: 'Mã HĐ', key: 'code', width: 18 },
+            { header: 'Tên hợp đồng', key: 'name', width: 40 },
+            { header: 'Mã KH', key: 'customerCode', width: 18 },
+            { header: 'Mã loại HĐ', key: 'contractTypeCode', width: 18 },
+            { header: 'Ngày bắt đầu', key: 'startDate', width: 20 },
+            { header: 'Ngày kết thúc', key: 'endDate', width: 20 },
+            { header: 'Trạng thái', key: 'status', width: 20 },
+            { header: 'Kỳ thanh toán (ngày)', key: 'paymentTermDays', width: 22 },
+            { header: 'Hạn mức tín dụng override', key: 'creditLimitOverride', width: 26 },
+            { header: 'Rủi ro', key: 'riskLevel', width: 16 },
+            { header: 'SLA', key: 'sla', width: 30 },
+            { header: 'Phạm vi giao hàng', key: 'deliveryScope', width: 30 },
+            { header: 'Mã HĐ gốc (gia hạn)', key: 'renewalOfCode', width: 24 },
+        ]
+
+        sheet.getRow(1).font = { bold: true }
+
+        // Ví dụ 1
+        sheet.addRow({
+            code: 'HD-2025-001',
+            name: 'Hợp đồng cung cấp xăng dầu năm 2025',
+            customerCode: 'CUST001',
+            contractTypeCode: 'TERM',
+            startDate: '01/01/2025',
+            endDate: '31/12/2025',
+            status: 'Active',
+            paymentTermDays: 30,
+            creditLimitOverride: 1000000000,
+            riskLevel: 'Medium',
+            sla: '{"deliveryTime":"24h","support":"24/7"}',
+            deliveryScope: '{"region":"Miền Bắc"}',
+            renewalOfCode: '',
+        })
+
+        // Ví dụ 2
+        sheet.addRow({
+            code: 'HD-2025-002',
+            name: 'Hợp đồng khung phân phối dầu DO',
+            customerCode: 'CUST002',
+            contractTypeCode: 'FRAME',
+            startDate: '2025-02-01',
+            endDate: '2026-01-31',
+            status: 'Draft',
+            paymentTermDays: 45,
+            creditLimitOverride: '',
+            riskLevel: 'High',
+            sla: '',
+            deliveryScope: '',
+            renewalOfCode: 'HD-2024-010',
+        })
+
+        const guide = workbook.addWorksheet('Hướng dẫn')
+        guide.addRow(['Các cột bắt buộc:', 'Mã HĐ', 'Tên hợp đồng', 'Mã KH', 'Mã loại HĐ', 'Ngày bắt đầu', 'Ngày kết thúc', 'Trạng thái', 'Rủi ro'])
+        guide.addRow([])
+        guide.addRow(['Trạng thái hợp lệ:', 'Draft', 'Pending', 'Active', 'Terminated', 'Cancelled'])
+        guide.addRow(['Rủi ro hợp lệ:', 'Low', 'Medium', 'High'])
+        guide.addRow([])
+        guide.addRow(['Lưu ý:'])
+        guide.addRow(['- Ngày hỗ trợ 2 dạng: DD/MM/YYYY hoặc YYYY-MM-DD.'])
+        guide.addRow(['- "Mã HĐ gốc (gia hạn)" là mã hợp đồng cũ nếu đây là hợp đồng gia hạn, hệ thống sẽ tự set Terminated cho HĐ gốc.'])
+        guide.addRow(['- Nếu không dùng hạn mức override, để trống "Hạn mức tín dụng override".'])
+
+        const data = await workbook.xlsx.writeBuffer()
+        return Buffer.from(data)
     }
 }

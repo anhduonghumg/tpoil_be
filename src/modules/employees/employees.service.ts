@@ -377,19 +377,47 @@ export class EmployeesService {
         }
     }
 
-    async select() {
-        return await this.prisma.employee.findMany({
-            where: {
-                deletedAt: null,
-                status: 'active',
-            },
-            select: {
-                id: true,
-                fullName: true,
-            },
-            orderBy: {
-                fullName: 'asc',
-            },
-        })
+    // async select() {
+    //     return await this.prisma.employee.findMany({
+    //         where: {
+    //             deletedAt: null,
+    //             status: 'active',
+    //         },
+    //         select: {
+    //             id: true,
+    //             fullName: true,
+    //         },
+    //         orderBy: {
+    //             fullName: 'asc',
+    //         },
+    //     })
+    // }
+
+    async select(dto: { keyword?: string; page: number; pageSize: number }) {
+        const page = Math.max(1, dto.page || 1)
+        const take = Math.min(200, Math.max(1, dto.pageSize || 50))
+        const skip = (page - 1) * take
+
+        const where: Prisma.EmployeeWhereInput = {
+            deletedAt: null,
+            ...(dto.keyword
+                ? {
+                      OR: [{ fullName: { contains: dto.keyword, mode: 'insensitive' } }, { code: { contains: dto.keyword, mode: 'insensitive' } }],
+                  }
+                : {}),
+        }
+
+        const [total, items] = await Promise.all([
+            this.prisma.employee.count({ where }),
+            this.prisma.employee.findMany({
+                where,
+                skip,
+                take,
+                orderBy: { code: 'asc' },
+                select: { id: true, fullName: true },
+            }),
+        ])
+
+        return { items, total, page, pageSize: take }
     }
 }
