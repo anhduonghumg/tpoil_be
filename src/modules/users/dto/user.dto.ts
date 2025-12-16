@@ -43,3 +43,9 @@ export class SetUserRolesDto {
 export class SetUserEmployeeDto {
     employeeId!: string | null
 }
+
+export class ResetPasswordDto {
+    @IsString()
+    @MinLength(6)
+    password!: string
+}

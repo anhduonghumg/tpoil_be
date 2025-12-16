@@ -26,7 +26,7 @@ export class AuthController {
             })
         })
 
-        await this.auth.recordAttempt(dto.email, true, req.ip, req.headers['user-agent'] as string)
+        await this.auth.recordAttempt(dto.identifier, true, dto.identifier, req.ip, req.headers['user-agent'] as string)
         await this.auth.updateLastLogin(req.user.id)
         // this.logger.info({ msg: "Đăng nhập thành công!", userId: req.user.id, email: dto.email });
 

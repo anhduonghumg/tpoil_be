@@ -7,12 +7,12 @@ import { AppException } from 'src/common/errors/app-exception'
 @Injectable()
 export class LocalStrategy extends PassportStrategy(Strategy) {
     constructor(private auth: AuthService) {
-        super({ usernameField: 'email' })
+        super({ usernameField: 'identifier' })
     }
 
-    async validate(email: string, password: string) {
-        const user = await this.auth.validateUser(email, password)
-        if (!user) throw AppException.unauthorized('Invalid credentials', { email })
+    async validate(identifier: string, password: string) {
+        const user = await this.auth.validateUser(identifier, password)
+        if (!user) throw AppException.unauthorized('Invalid credentials', { identifier })
         return user
     }
 }

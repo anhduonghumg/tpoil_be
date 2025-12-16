@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common'
-import { CreateUserDto, SetUserEmployeeDto, SetUserRolesDto, UpdateUserDto } from './dto/user.dto'
+import { CreateUserDto, ResetPasswordDto, SetUserEmployeeDto, SetUserRolesDto, UpdateUserDto } from './dto/user.dto'
 import { UsersService } from './users.service'
 
 @Controller('users')
@@ -44,5 +44,10 @@ export class UsersController {
     @Delete(':id')
     remove(@Param('id') id: string) {
         return this.service.remove(id)
+    }
+
+    @Put(':id/password')
+    resetPassword(@Param('id') id: string, @Body() dto: ResetPasswordDto) {
+        return this.service.resetPassword(id, dto)
     }
 }

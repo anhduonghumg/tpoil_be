@@ -19,19 +19,39 @@ export class AuthService {
     /**
      * Được LocalStrategy gọi để validate tài khoản đăng nhập
      */
-    async validateUser(email: string, password: string): Promise<{ id: string; email: string; name: string | null } | null> {
-        const user = await this.prisma.user.findUnique({ where: { email } })
+    // async validateUser(identifier: string, password: string): Promise<{ id: string; email: string; name: string | null } | null> {
+    //     const user = await this.prisma.user.findUnique({ where: { identifier } })
 
-        if (!user || !user.isActive) {
-            return null
-        }
+    //     if (!user || !user.isActive) {
+    //         return null
+    //     }
+
+    //     const ok = await bcrypt.compare(password, user.password)
+    //     if (!ok) {
+    //         return null
+    //     }
+
+    //     // Chỉ trả thông tin cơ bản cho Passport, không nhét quyền vào đây
+    //     return { id: user.id, email: user.email, name: user.name }
+    // }
+
+    async validateUser(identifier: string, password: string): Promise<{ id: string; email: string; name: string | null } | null> {
+        const idf = identifier?.trim()
+        if (!idf) return null
+
+        const user = await this.prisma.user.findFirst({
+            where: {
+                OR: [{ email: idf }, { username: idf }],
+            },
+            select: { id: true, email: true, username: true, name: true, password: true, isActive: true },
+        })
+
+        if (!user || !user.isActive) return null
 
         const ok = await bcrypt.compare(password, user.password)
-        if (!ok) {
-            return null
-        }
+        if (!ok) return null
 
-        // Chỉ trả thông tin cơ bản cho Passport, không nhét quyền vào đây
+        // Passport session: trả tối thiểu
         return { id: user.id, email: user.email, name: user.name }
     }
 
@@ -52,14 +72,31 @@ export class AuthService {
         return user
     }
 
-    async recordAttempt(email: string, ok: boolean, ip?: string, ua?: string): Promise<void> {
+    async recordAttempt(email: string, ok: boolean, username: string, ip?: string, ua?: string): Promise<void> {
         try {
-            await this.prisma.loginAttempt.create({ data: { email, ok, ip, ua } })
+            await this.prisma.loginAttempt.create({ data: { email, ok, ip, ua, username } })
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : String(e)
             this.logger.warn({ msg: 'record_attempt_failed', email, err: message })
         }
     }
+
+    // async recordAttempt(identifier: string, ok: boolean, ip?: string, ua?: string): Promise<void> {
+    //     try {
+    //         await this.prisma.loginAttempt.create({
+    //             data: {
+    //                 username: identifier,
+    //                 email: identifier,
+    //                 ok,
+    //                 ip,
+    //                 ua,
+    //             },
+    //         })
+    //     } catch (e: unknown) {
+    //         const message = e instanceof Error ? e.message : String(e)
+    //         this.logger.warn({ msg: 'record_attempt_failed', identifier, err: message })
+    //     }
+    // }
 
     async updateLastLogin(userId: string): Promise<void> {
         try {

@@ -1,6 +1,6 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import { Prisma, ScopeType } from '@prisma/client'
-import { CreateUserDto, UpdateUserDto } from './dto/user.dto'
+import { CreateUserDto, ResetPasswordDto, UpdateUserDto } from './dto/user.dto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import * as bcrypt from 'bcrypt'
 
@@ -215,5 +215,28 @@ export class UsersService {
         })
 
         return { ok: true }
+    }
+
+    async resetPassword(userId: string, dto: ResetPasswordDto) {
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true },
+        })
+        if (!user) throw new NotFoundException('User not found')
+
+        const password = dto.password?.trim()
+        if (!password || password?.length < 6) {
+            throw new BadRequestException('Password must be at least 6 characters')
+        }
+
+        const saltRounds = 10
+        const hashed = await bcrypt.hash(password, saltRounds)
+
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: { password: hashed },
+        })
+
+        return { userId, ok: true }
     }
 }
