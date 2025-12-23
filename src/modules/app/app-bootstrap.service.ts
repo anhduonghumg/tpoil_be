@@ -4,6 +4,8 @@ import { ContractsService } from '../contracts/contracts.service'
 import { AppBootstrapResponse } from './app-bootstrap.types'
 import { EmployeesService } from '../employees/employees.service'
 
+type AnyAuthSession = { permissions?: string[]; roles?: any[] } | null | undefined
+
 @Injectable()
 export class AppBootstrapService {
     constructor(
@@ -16,7 +18,7 @@ export class AppBootstrapService {
      * Hiện tại mới trả notifications.contracts,
      * user, menus, birthdays...
      */
-    async bootstrap(): Promise<AppBootstrapResponse> {
+    async bootstrap(authSession?: AnyAuthSession): Promise<AppBootstrapResponse> {
         const now = new Date()
         const month = now.getMonth() + 1
 
@@ -36,6 +38,9 @@ export class AppBootstrapService {
                         dob: item.dob ? item.dob.toISOString().split('T')[0] : '',
                     })),
                 },
+            },
+            auth: {
+                permissions: authSession?.permissions ?? [],
             },
         }
     }

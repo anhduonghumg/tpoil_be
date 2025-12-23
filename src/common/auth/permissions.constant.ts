@@ -22,4 +22,13 @@ export const PERMISSIONS = {
         update: 'employees.update',
         delete: 'employees.delete',
     },
+    users: {
+        view: 'users.view',
+        create: 'users.create',
+        update: 'users.update',
+        delete: 'users.delete',
+        assignRoles: 'users.assign_roles',
+        assignEmployee: 'users.assign_employee',
+        resetPassword: 'users.reset_password',
+    },
 } as const

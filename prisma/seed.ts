@@ -11,7 +11,6 @@ async function main() {
     const adminUser = await prisma.user.upsert({
         where: { email: 'admin@tpoil.com' },
         update: {
-            // nếu muốn update thêm name hay isActive có thể set ở đây
             name: 'Admin',
             isActive: true,
         },
@@ -31,7 +30,8 @@ async function main() {
         { code: 'contracts', name: 'Hợp đồng' },
         { code: 'customers', name: 'Khách hàng' },
         { code: 'employees', name: 'Nhân viên' },
-        { code: 'system', name: 'Hệ thống' }, // 👈 thêm module System
+        { code: 'users', name: 'Tài khoản' }, // 👈 NEW
+        { code: 'system', name: 'Hệ thống' }, // RBAC admin, v.v.
     ]
 
     for (const m of modulesData) {
@@ -64,13 +64,22 @@ async function main() {
         { moduleCode: 'customers', code: 'customers.update', name: 'Sửa khách hàng' },
         { moduleCode: 'customers', code: 'customers.delete', name: 'Xoá khách hàng' },
 
-        // Employees (chuẩn bị cho User/Employee module)
+        // Employees
         { moduleCode: 'employees', code: 'employees.view', name: 'Xem nhân viên' },
         { moduleCode: 'employees', code: 'employees.create', name: 'Tạo nhân viên' },
         { moduleCode: 'employees', code: 'employees.update', name: 'Sửa nhân viên' },
         { moduleCode: 'employees', code: 'employees.delete', name: 'Xoá nhân viên' },
 
-        // System (RBAC admin, v.v.)
+        // Users 👇 NEW
+        { moduleCode: 'users', code: 'users.view', name: 'Xem tài khoản' },
+        { moduleCode: 'users', code: 'users.create', name: 'Tạo tài khoản' },
+        { moduleCode: 'users', code: 'users.update', name: 'Sửa tài khoản' },
+        { moduleCode: 'users', code: 'users.delete', name: 'Xoá tài khoản' },
+        { moduleCode: 'users', code: 'users.assign_roles', name: 'Gán quyền cho tài khoản' },
+        { moduleCode: 'users', code: 'users.assign_employee', name: 'Gán nhân viên cho tài khoản' },
+        { moduleCode: 'users', code: 'users.reset_password', name: 'Cấp mật khẩu mới' },
+
+        // System
         {
             moduleCode: 'system',
             code: 'system.rbac.admin',
@@ -121,7 +130,7 @@ async function main() {
 
     console.log('✅ Seed role system-admin xong')
 
-    // Gán toàn bộ permission cho system-admin (bao gồm system.rbac.admin)
+    // Gán toàn bộ permission cho system-admin (bao gồm users.*)
     await prisma.rolePermission.createMany({
         data: allPermissions.map((p) => ({
             roleId: adminRole.id,

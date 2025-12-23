@@ -21,4 +21,8 @@ export interface AppBootstrapResponse {
             }[]
         }
     }
+    auth?: {
+        permissions: string[]
+        roles?: string[]
+    }
 }

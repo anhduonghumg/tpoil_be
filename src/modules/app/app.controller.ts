@@ -1,5 +1,5 @@
 // src/modules/app/app.controller.ts
-import { Controller, Get, UseGuards } from '@nestjs/common'
+import { Controller, Get, Req, UseGuards } from '@nestjs/common'
 import { AppBootstrapService } from './app-bootstrap.service'
 import { LoggedInGuard } from '../auth/guards/logged-in.guard'
 
@@ -9,7 +9,7 @@ export class AppController {
     constructor(private readonly appBootstrapService: AppBootstrapService) {}
 
     @Get('bootstrap')
-    async bootstrap() {
-        return this.appBootstrapService.bootstrap()
+    async bootstrap(@Req() req) {
+        return this.appBootstrapService.bootstrap(req.session?.auth)
     }
 }

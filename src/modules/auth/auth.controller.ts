@@ -34,6 +34,8 @@ export class AuthController {
             const authSession = await this.auth.buildAuthSession(req.user.id)
             if (req.session) {
                 req.session.auth = authSession
+
+                await new Promise<void>((resolve, reject) => req.session.save((err) => (err ? reject(err) : resolve())))
             }
         } catch (e) {
             this.logger.error({ msg: 'build_auth_session_failed', userId: req.user.id, err: e?.message })

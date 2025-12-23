@@ -3,6 +3,7 @@ import { Prisma, ScopeType } from '@prisma/client'
 import { CreateUserDto, ResetPasswordDto, UpdateUserDto } from './dto/user.dto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import * as bcrypt from 'bcrypt'
+import { AppException } from 'src/common/errors/app-exception'
 
 @Injectable()
 export class UsersService {
@@ -102,6 +103,7 @@ export class UsersService {
         return { items: roles }
     }
 
+    /*
     async create(dto: CreateUserDto) {
         const passwordHash = await bcrypt.hash(dto.password, 10)
 
@@ -123,7 +125,62 @@ export class UsersService {
             throw e
         }
     }
+        */
 
+    async create(dto: CreateUserDto) {
+        const roleIds = Array.from(new Set(dto.roleIds ?? []))
+        const employeeId = dto.employeeId ?? null
+
+        if (roleIds.length) {
+            const roles = await this.prisma.role.findMany({ where: { id: { in: roleIds } }, select: { id: true } })
+            if (roles.length !== roleIds.length) throw AppException.badRequest('Some roles do not exist')
+        }
+
+        if (employeeId) {
+            const emp = await this.prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true } })
+            if (!emp) throw AppException.notFound('Employee not found', { employeeId })
+        }
+
+        const hashed = await bcrypt.hash(dto.password, 10)
+
+        return this.prisma.$transaction(async (tx) => {
+            const user = await tx.user.create({
+                data: {
+                    username: dto.username.trim(),
+                    email: dto.email.trim(),
+                    name: dto.name ?? null,
+                    isActive: dto.isActive ?? true,
+                    password: hashed,
+                },
+                select: { id: true, username: true, email: true, name: true, isActive: true },
+            })
+
+            if (employeeId) {
+                await tx.employee.updateMany({ where: { userId: user.id }, data: { userId: null } })
+                await tx.employee.update({
+                    where: { id: employeeId },
+                    data: { userId: user.id },
+                })
+            }
+
+            if (roleIds.length) {
+                await tx.userRoleBinding.createMany({
+                    data: roleIds.map((roleId) => ({
+                        userId: user.id,
+                        roleId,
+                        scopeType: ScopeType.global,
+                        scopeId: null,
+                        startAt: new Date(),
+                    })),
+                    skipDuplicates: true,
+                })
+            }
+
+            return user
+        })
+    }
+
+    /*
     async update(id: string, dto: UpdateUserDto) {
         const exists = await this.prisma.user.findUnique({ where: { id }, select: { id: true } })
         if (!exists) throw new NotFoundException('User not found')
@@ -142,6 +199,72 @@ export class UsersService {
             if (e?.code === 'P2002') throw new ConflictException('Email already exists')
             throw e
         }
+    }
+        */
+
+    async update(id: string, dto: UpdateUserDto) {
+        const roleIds = dto.roleIds ? Array.from(new Set(dto.roleIds)) : undefined
+        const employeeId = dto.employeeId ?? undefined
+
+        const existed = await this.prisma.user.findUnique({ where: { id }, select: { id: true } })
+        if (!existed) throw AppException.notFound('User not found', { id })
+
+        if (roleIds) {
+            if (roleIds.length) {
+                const roles = await this.prisma.role.findMany({ where: { id: { in: roleIds } }, select: { id: true } })
+                if (roles.length !== roleIds.length) throw AppException.badRequest('Some roles do not exist')
+            }
+        }
+
+        // validate employee exists if provided (null is allowed => unassign)
+        if (employeeId !== undefined && employeeId !== null) {
+            const emp = await this.prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true } })
+            if (!emp) throw AppException.notFound('Employee not found', { employeeId })
+        }
+
+        return this.prisma.$transaction(async (tx) => {
+            const user = await tx.user.update({
+                where: { id },
+                data: {
+                    email: dto.email?.trim(),
+                    name: dto.name ?? undefined,
+                    isActive: dto.isActive ?? undefined,
+                },
+                select: { id: true, username: true, email: true, name: true, isActive: true },
+            })
+
+            if (employeeId !== undefined) {
+                await tx.employee.updateMany({ where: { userId: id }, data: { userId: null } })
+
+                if (employeeId) {
+                    await tx.employee.update({
+                        where: { id: employeeId },
+                        data: { userId: id },
+                    })
+                }
+            }
+
+            if (roleIds !== undefined) {
+                await tx.userRoleBinding.deleteMany({
+                    where: { userId: id, scopeType: ScopeType.global, OR: [{ scopeId: null }, { scopeId: '' }] },
+                })
+
+                if (roleIds.length) {
+                    await tx.userRoleBinding.createMany({
+                        data: roleIds.map((roleId) => ({
+                            userId: id,
+                            roleId,
+                            scopeType: ScopeType.global,
+                            scopeId: null,
+                            startAt: new Date(),
+                        })),
+                        skipDuplicates: true,
+                    })
+                }
+            }
+
+            return user
+        })
     }
 
     async setGlobalRoles(userId: string, roleIds: string[]) {

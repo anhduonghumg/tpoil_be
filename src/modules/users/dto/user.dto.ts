@@ -1,46 +1,66 @@
-import { IsBoolean, IsEmail, IsOptional, IsString, MinLength } from 'class-validator'
+import { IsArray, IsBoolean, IsEmail, IsOptional, IsString, IsUUID, MinLength } from 'class-validator'
 
 export class CreateUserDto {
-    @IsString() username!: string
+    @IsString()
+    username!: string
 
-    @IsEmail() email!: string
+    @IsEmail()
+    email!: string
+
+    @IsOptional()
+    @IsString()
+    name?: string | null
+
+    @IsBoolean()
+    isActive!: boolean
 
     @IsString()
     @MinLength(6)
     password!: string
 
     @IsOptional()
-    @IsString()
-    name?: string
+    @IsUUID()
+    employeeId?: string | null
 
     @IsOptional()
-    @IsBoolean()
-    isActive?: boolean
+    @IsArray()
+    @IsUUID(undefined, { each: true })
+    roleIds?: string[]
 }
 
 export class UpdateUserDto {
+    @IsOptional()
     @IsEmail()
-    email!: string
+    email?: string
 
     @IsOptional()
     @IsString()
-    name?: string
+    name?: string | null
 
     @IsOptional()
     @IsBoolean()
     isActive?: boolean
 
     @IsOptional()
-    @IsString()
-    @MinLength(6)
-    password?: string
+    @IsUUID()
+    employeeId?: string | null
+
+    @IsOptional()
+    @IsArray()
+    @IsUUID(undefined, { each: true })
+    roleIds?: string[]
 }
 
 export class SetUserRolesDto {
-    roleIds!: string[]
+    @IsOptional()
+    @IsArray()
+    @IsUUID(undefined, { each: true })
+    roleIds?: string[]
 }
 
 export class SetUserEmployeeDto {
+    @IsOptional()
+    @IsUUID(undefined, { each: true })
     employeeId!: string | null
 }
 
