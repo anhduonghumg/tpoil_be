@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer'
 import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
-import { CustomerRole, CustomerStatus, CustomerType, TaxSource } from '@prisma/client'
+import { CustomerRole, CustomerStatus, CustomerType, PartyType, TaxSource } from '@prisma/client'
 
 export class CreateCustomerDto {
     @IsOptional()
@@ -98,4 +98,16 @@ export class CreateCustomerDto {
     @IsOptional()
     @IsString()
     legalOwnerEmpId?: string
+
+    @IsOptional()
+    @IsEnum(PartyType)
+    partyType?: PartyType
+
+    @IsOptional()
+    @IsString()
+    groupId?: string | null
+
+    @IsOptional()
+    @IsString()
+    documentOwnerEmpId?: string | null
 }

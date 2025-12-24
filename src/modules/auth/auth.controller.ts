@@ -51,7 +51,6 @@ export class AuthController {
         const sidName = 'sid'
         await new Promise<void>((resolve) => req.logout(() => resolve()))
         await new Promise<void>((resolve) => req.session?.destroy(() => resolve()))
-        // Xoá cookie phía client (khớp option trong main.ts)
         res?.clearCookie(sidName, { httpOnly: true, sameSite: 'lax', secure: false })
         return { ok: true }
     }

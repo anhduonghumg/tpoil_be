@@ -13,6 +13,13 @@ generator client {
 // =======================================
 // Enums
 // =======================================
+
+enum PartyType {
+  CUSTOMER
+  SUPPLIER
+  INTERNAL
+}
+
 enum EmployeeStatus {
   active
   inactive
@@ -213,7 +220,6 @@ model Employee {
   siteId String? @db.Uuid
   site   Site?   @relation(fields: [siteId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  // Self relation: nhân viên -> quản lý (và quản lý -> danh sách cấp dưới)
   managerId    String?    @db.Uuid
   manager      Employee?  @relation("EmpManagerLine", fields: [managerId], references: [id], onDelete: SetNull)
   subordinates Employee[] @relation("EmpManagerLine")
@@ -239,9 +245,10 @@ model Employee {
   customersSalesOwner      Customer[] @relation("customer_sales_owner_emp")
   customersAccountingOwner Customer[] @relation("customer_accounting_owner_emp")
   customersLegalOwner      Customer[] @relation("customer_legal_owner_emp")
+  customersDocumentOwner   Customer[] @relation("customer_document_owner_emp")
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
   deletedAt DateTime?
 
   @@index([status])
@@ -417,6 +424,21 @@ model UserRoleBinding {
   @@index([startAt, endAt])
 }
 
+model CustomerGroup {
+  id   String  @id @default(uuid()) @db.Uuid
+  code String  @unique
+  name String?
+  note String?
+
+  customers Customer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+  @@index([name])
+}
+
 model Customer {
   id              String         @id @default(uuid()) @db.Uuid
   code            String         @unique
@@ -427,6 +449,9 @@ model Customer {
   taxSyncedAt     DateTime?
   roles           CustomerRole[]
   type            CustomerType
+  partyType       PartyType      @default(CUSTOMER)
+  groupId         String?        @db.Uuid
+  group           CustomerGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   billingAddress  String?
   shippingAddress String?
   contactEmail    String?
@@ -443,25 +468,49 @@ model Customer {
   salesOwnerEmpId      String? @db.Uuid
   accountingOwnerEmpId String? @db.Uuid
   legalOwnerEmpId      String? @db.Uuid
+  documentOwnerEmpId   String? @db.Uuid
 
   salesOwnerEmp      Employee? @relation("customer_sales_owner_emp", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   accountingOwnerEmp Employee? @relation("customer_accounting_owner_emp", fields: [accountingOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   legalOwnerEmp      Employee? @relation("customer_legal_owner_emp", fields: [legalOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  documentOwnerEmp   Employee? @relation("customer_document_owner_emp", fields: [documentOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   contacts        ContactPerson[]
   contracts       Contract[]
   riskFlags       RiskFlag[]
   creditHistories CreditLimitHistory[]
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  addresses CustomerAddress[]
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
 
   @@index([name])
   @@index([taxCode])
+  @@index([groupId])
+  @@index([partyType])
   @@index([salesOwnerEmpId])
   @@index([accountingOwnerEmpId])
   @@index([legalOwnerEmpId])
+  @@index([documentOwnerEmpId])
+}
+
+model CustomerAddress {
+  id          String    @id @default(uuid()) @db.Uuid
+  customerId  String    @db.Uuid
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  addressLine String
+  validFrom   DateTime  @db.Date
+  validTo     DateTime? @db.Date
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, validFrom])
+  @@index([customerId, validTo])
+  @@index([customerId])
 }
 
 model ContactPerson {
@@ -666,7 +715,7 @@ model ImportJob {
 
 model LoginAttempt {
   id        String   @id @default(uuid()) @db.Uuid
-  username  String
+  username  String?
   email     String
   ok        Boolean
   ip        String?

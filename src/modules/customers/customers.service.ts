@@ -134,6 +134,9 @@ export class CustomersService {
             taxSyncedAt: dto.taxSyncedAt,
             roles: dto.roles,
             type: dto.type,
+            partyType: dto.partyType ?? 'CUSTOMER',
+            ...(dto.groupId && { group: { connect: { id: dto.groupId } } }),
+            ...(dto.documentOwnerEmpId && { documentOwnerEmp: { connect: { id: dto.documentOwnerEmpId } } }),
             billingAddress: dto.billingAddress,
             shippingAddress: dto.shippingAddress,
             contactEmail: dto.contactEmail,
@@ -184,6 +187,15 @@ export class CustomersService {
             taxSyncedAt: dto.taxSyncedAt,
             roles: dto.roles,
             type: dto.type,
+            partyType: dto.partyType,
+
+            ...(dto.groupId === null ? { group: { disconnect: true } } : dto.groupId ? { group: { connect: { id: dto.groupId } } } : {}),
+
+            ...(dto.documentOwnerEmpId === null
+                ? { documentOwnerEmp: { disconnect: true } }
+                : dto.documentOwnerEmpId
+                  ? { documentOwnerEmp: { connect: { id: dto.documentOwnerEmpId } } }
+                  : {}),
             billingAddress: dto.billingAddress,
             shippingAddress: dto.shippingAddress,
             contactEmail: dto.contactEmail,

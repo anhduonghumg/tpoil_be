@@ -12,7 +12,6 @@ import { CustomerOverviewService } from './customer-overview.service'
 import { ContractsService } from '../contracts/contracts.service'
 import { AssignContractsToCustomerDto } from './dto/assign-contracts.dto'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
-import { UnassignContractsDto } from './dto/unassign-contracts.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
