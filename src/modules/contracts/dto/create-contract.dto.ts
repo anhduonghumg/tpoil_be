@@ -1,5 +1,5 @@
 import { IsString, IsUUID, IsOptional, IsEnum, IsInt, IsDateString, IsJSON } from 'class-validator'
-import { ContractStatus, RiskLevel } from '@prisma/client'
+import { ContractKind, ContractStatus, RiskLevel } from '@prisma/client'
 
 export class CreateContractDto {
     @IsString()
@@ -47,4 +47,8 @@ export class CreateContractDto {
     @IsOptional()
     @IsString()
     approvalRequestId?: string
+
+    @IsOptional()
+    @IsEnum(ContractKind)
+    kind?: ContractKind
 }

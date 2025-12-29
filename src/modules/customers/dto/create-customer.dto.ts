@@ -104,6 +104,18 @@ export class CreateCustomerDto {
     partyType?: PartyType
 
     @IsOptional()
+    @IsBoolean()
+    isCustomer?: boolean
+
+    @IsOptional()
+    @IsBoolean()
+    isSupplier?: boolean
+
+    @IsOptional()
+    @IsBoolean()
+    isInternal?: boolean
+
+    @IsOptional()
     @IsString()
     groupId?: string | null
 

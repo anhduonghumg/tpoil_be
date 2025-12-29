@@ -1,11 +1,25 @@
 import { Type } from 'class-transformer'
-import { IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator'
+import { PartyType } from '@prisma/client'
+
+export enum CustomerSelectRole {
+    CUSTOMER = 'CUSTOMER',
+    SUPPLIER = 'SUPPLIER',
+    INTERNAL = 'INTERNAL',
+}
 
 export class CustomerSelectQueryDto {
     @IsOptional()
     @IsString()
-    @MaxLength(100)
     keyword?: string
+
+    @IsOptional()
+    @IsEnum(PartyType)
+    partyType?: PartyType
+
+    @IsOptional()
+    @IsEnum(CustomerSelectRole)
+    role?: CustomerSelectRole
 
     @IsOptional()
     @Type(() => Number)
@@ -17,6 +31,5 @@ export class CustomerSelectQueryDto {
     @Type(() => Number)
     @IsInt()
     @Min(1)
-    @Max(100)
     pageSize?: number = 50
 }

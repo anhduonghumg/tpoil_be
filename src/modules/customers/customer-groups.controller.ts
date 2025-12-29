@@ -17,7 +17,7 @@ const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (r
 @UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.CUSTOMER)
-@Controller('customers/groups')
+@Controller('customer-groups')
 export class CustomerGroupsController {
     constructor(private readonly service: CustomerGroupsService) {}
 

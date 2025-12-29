@@ -274,7 +274,6 @@ export class ContractsService {
             this.prisma.contract.count({ where }),
         ])
 
-        // 🔹 Map ra đúng dạng ContractListItem cho FE
         const items = rows.map((c) => ({
             id: c.id,
             code: c.code,
@@ -321,12 +320,10 @@ export class ContractsService {
                     throw new NotFoundException('Hợp đồng gốc không tồn tại')
                 }
 
-                // check cùng customer nếu cả hai đều có customerId
                 if (dto.customerId && origin.customerId && dto.customerId !== origin.customerId) {
                     throw new BadRequestException('Gia hạn phải cùng khách hàng với hợp đồng gốc')
                 }
 
-                // check không chồng ngày: yêu cầu startDate mới > endDate cũ
                 const newStart = new Date(dto.startDate)
                 if (newStart <= origin.endDate) {
                     throw new BadRequestException('Ngày bắt đầu của hợp đồng gia hạn phải sau ngày kết thúc của hợp đồng gốc')
@@ -352,7 +349,6 @@ export class ContractsService {
                 },
             })
 
-            // Nếu là gia hạn -> tự động kết thúc HĐ gốc
             if (origin) {
                 await tx.contract.update({
                     where: { id: origin.id },
@@ -365,7 +361,6 @@ export class ContractsService {
     }
 
     async createAttachment(dto: CreateContractAttachmentDto) {
-        // check quyền, check contractId tồn tại...
         return this.prisma.contractAttachment.create({
             data: {
                 contractId: dto.contractId,
@@ -411,7 +406,6 @@ export class ContractsService {
             const newStartDate = dto.startDate ?? existing.startDate
             // const newEndDate = dto.endDate ?? existing.endDate
 
-            // ===== 1. Nếu có HĐ gốc mới -> validate & Terminate gốc mới =====
             if (newRenewalOfId) {
                 const newOrigin = await tx.contract.findUnique({
                     where: { id: newRenewalOfId },
@@ -437,7 +431,6 @@ export class ContractsService {
                 })
             }
 
-            // ===== 2. Nếu đổi HĐ gốc / bỏ gia hạn -> có thể re-open HĐ gốc cũ =====
             if (oldRenewalOfId && oldRenewalOfId !== newRenewalOfId) {
                 const hasOtherRenewals = await tx.contract.findFirst({
                     where: {
@@ -447,7 +440,6 @@ export class ContractsService {
                 })
 
                 if (!hasOtherRenewals) {
-                    // Nếu không còn HĐ con nào khác, mở lại HĐ gốc cũ
                     await tx.contract.update({
                         where: { id: oldRenewalOfId },
                         data: { status: ContractStatus.Active },
@@ -455,7 +447,6 @@ export class ContractsService {
                 }
             }
 
-            // ===== 3. Update chính HĐ này =====
             const updated = await tx.contract.update({
                 where: { id },
                 data: {
@@ -619,14 +610,12 @@ export class ContractsService {
             },
         } as const
 
-        // Build where tổng cho list
         let where
         if (status === 'expiring') {
             where = expiringWhere
         } else if (status === 'expired') {
             where = expiredWhere
         } else {
-            // all: OR 2 khoảng
             where = {
                 deletedAt: null,
                 status: activeStatus,
@@ -685,7 +674,6 @@ export class ContractsService {
         })
 
         const items: ContractExpiryListItem[] = contracts.map((c) => {
-            // Tự tính derivedStatus lại để chắc chắn
             let derivedStatus: 'expiring' | 'expired'
             if (c.endDate < ref) {
                 derivedStatus = 'expired'
@@ -743,7 +731,6 @@ export class ContractsService {
 
     // TÌM HĐ SẮP HẾT HẠN / ĐÃ HẾT HẠN
     async generateContractExpiryExcel(params: ContractExpiryListParams = {}) {
-        // Lấy full list, bỏ paging (hoặc cho pageSize rất lớn)
         const result = await this.getContractExpiryList({
             ...params,
             page: 1,

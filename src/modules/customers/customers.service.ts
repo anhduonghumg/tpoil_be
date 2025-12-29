@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { CustomerListQueryDto } from './dto/customer-list-query.dto'
 import { CreateCustomerDto } from './dto/create-customer.dto'
 import { UpdateCustomerDto } from './dto/update-customer.dto'
@@ -6,14 +6,23 @@ import { Prisma } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import dayjs from 'dayjs'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
+import { CustomerListRole } from './dto/customer-list-query.dto'
+import { CustomerSelectRole } from './dto/customer-select-query.dto'
 
 @Injectable()
 export class CustomersService {
     constructor(private readonly prisma: PrismaService) {}
-
-    // List + filter + pagination
     async list(query: CustomerListQueryDto) {
-        const { keyword, type, status, salesOwnerEmpId, accountingOwnerEmpId, legalOwnerEmpId, page = 1, pageSize = 20 } = query
+        const { keyword, role, partyType, type, status, salesOwnerEmpId, accountingOwnerEmpId, documentOwnerEmpId, page = 1, pageSize = 20 } = query
+
+        const whereRole: Prisma.CustomerWhereInput =
+            role === CustomerListRole.CUSTOMER
+                ? { isCustomer: true }
+                : role === CustomerListRole.SUPPLIER
+                  ? { isSupplier: true }
+                  : role === CustomerListRole.INTERNAL
+                    ? { isInternal: true }
+                    : {}
 
         const where: Prisma.CustomerWhereInput = {
             deletedAt: null,
@@ -27,11 +36,14 @@ export class CustomersService {
                       ],
                   }
                 : {}),
+            ...whereRole,
+            ...(!role && partyType ? { partyType } : {}),
+            // ...(partyType ? { partyType } : {}),
             ...(type ? { type } : {}),
             ...(status ? { status } : {}),
             ...(salesOwnerEmpId ? { salesOwnerEmpId } : {}),
             ...(accountingOwnerEmpId ? { accountingOwnerEmpId } : {}),
-            ...(legalOwnerEmpId ? { legalOwnerEmpId } : {}),
+            ...(documentOwnerEmpId ? { documentOwnerEmpId } : {}),
         }
 
         const [items, total] = await this.prisma.$transaction([
@@ -40,26 +52,38 @@ export class CustomersService {
                 orderBy: { createdAt: 'desc' },
                 skip: (page - 1) * pageSize,
                 take: pageSize,
+                include: {
+                    salesOwnerEmp: { select: { fullName: true } },
+                    accountingOwnerEmp: { select: { fullName: true } },
+                    documentOwnerEmp: { select: { fullName: true } },
+                },
             }),
             this.prisma.customer.count({ where }),
         ])
 
-        return {
-            items,
-            total,
-            page,
-            pageSize,
-        }
+        const mapped = items.map((it) => ({
+            ...it,
+            salesOwnerName: it.salesOwnerEmp?.fullName ?? null,
+            accountingOwnerName: it.accountingOwnerEmp?.fullName ?? null,
+            documentOwnerName: it.documentOwnerEmp?.fullName ?? null,
+        }))
+
+        return { items: mapped, total, page, pageSize }
     }
 
     async select(query: CustomerSelectQueryDto) {
         const page = query.page ?? 1
         const pageSize = query.pageSize ?? 50
         const keyword = query.keyword?.trim()
+        const partyType = query.partyType
+        const role = query.role
 
-        const where: Prisma.CustomerWhereInput = {
-            deletedAt: null,
-        }
+        const where: Prisma.CustomerWhereInput = { deletedAt: null }
+
+        if (role === CustomerSelectRole.CUSTOMER) where.isCustomer = true
+        else if (role === CustomerSelectRole.SUPPLIER) where.isSupplier = true
+        else if (role === CustomerSelectRole.INTERNAL) where.isInternal = true
+        else if (partyType) where.partyType = partyType
 
         if (keyword) {
             where.OR = [
@@ -72,27 +96,15 @@ export class CustomersService {
         const [items, total] = await this.prisma.$transaction([
             this.prisma.customer.findMany({
                 where,
-                orderBy: {
-                    name: 'asc',
-                },
+                orderBy: { name: 'asc' },
                 skip: (page - 1) * pageSize,
                 take: pageSize,
-                select: {
-                    id: true,
-                    code: true,
-                    name: true,
-                    taxCode: true,
-                },
+                select: { id: true, code: true, name: true, taxCode: true },
             }),
             this.prisma.customer.count({ where }),
         ])
 
-        return {
-            items,
-            total,
-            page,
-            pageSize,
-        }
+        return { items, total, page, pageSize }
     }
 
     async generateCode() {
@@ -125,6 +137,17 @@ export class CustomersService {
             const gen = await this.generateCode()
             code = gen.code
         }
+
+        const inferred = dto.partyType ?? 'CUSTOMER'
+
+        const isCustomer = dto.isCustomer ?? inferred === 'CUSTOMER'
+        const isSupplier = dto.isSupplier ?? inferred === 'SUPPLIER'
+        const isInternal = dto.isInternal ?? inferred === 'INTERNAL'
+
+        if (!isCustomer && !isSupplier && !isInternal) {
+            throw new BadRequestException('Phải chọn ít nhất 1 vai trò (Khách hàng/NCC/Nội bộ).')
+        }
+
         const data: Prisma.CustomerCreateInput = {
             code,
             name: dto.name,
@@ -135,6 +158,9 @@ export class CustomersService {
             roles: dto.roles,
             type: dto.type,
             partyType: dto.partyType ?? 'CUSTOMER',
+            isCustomer,
+            isSupplier,
+            isInternal,
             ...(dto.groupId && { group: { connect: { id: dto.groupId } } }),
             ...(dto.documentOwnerEmpId && { documentOwnerEmp: { connect: { id: dto.documentOwnerEmpId } } }),
             billingAddress: dto.billingAddress,
@@ -179,6 +205,18 @@ export class CustomersService {
         })
         if (!existing) throw new NotFoundException('Không tìm thấy khách hàng')
 
+        const inferred = dto.partyType ?? existing.partyType ?? 'CUSTOMER'
+
+        const nextIsCustomer = dto.isCustomer ?? (dto.partyType ? inferred === 'CUSTOMER' : (existing.isCustomer ?? false))
+
+        const nextIsSupplier = dto.isSupplier ?? (dto.partyType ? inferred === 'SUPPLIER' : (existing.isSupplier ?? false))
+
+        const nextIsInternal = dto.isInternal ?? (dto.partyType ? inferred === 'INTERNAL' : (existing.isInternal ?? false))
+
+        if (!nextIsCustomer && !nextIsSupplier && !nextIsInternal) {
+            throw new BadRequestException('Phải chọn ít nhất 1 vai trò (Khách hàng/NCC/Nội bộ).')
+        }
+
         const data: Prisma.CustomerUpdateInput = {
             name: dto.name,
             taxCode: dto.taxCode,
@@ -188,6 +226,10 @@ export class CustomersService {
             roles: dto.roles,
             type: dto.type,
             partyType: dto.partyType,
+
+            isCustomer: nextIsCustomer,
+            isSupplier: nextIsSupplier,
+            isInternal: nextIsInternal,
 
             ...(dto.groupId === null ? { group: { disconnect: true } } : dto.groupId ? { group: { connect: { id: dto.groupId } } } : {}),
 

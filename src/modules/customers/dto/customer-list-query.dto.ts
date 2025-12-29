@@ -1,11 +1,25 @@
 import { Type } from 'class-transformer'
 import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator'
-import { CustomerStatus, CustomerType } from '@prisma/client'
+import { CustomerStatus, CustomerType, PartyType } from '@prisma/client'
+
+export enum CustomerListRole {
+    CUSTOMER = 'CUSTOMER',
+    SUPPLIER = 'SUPPLIER',
+    INTERNAL = 'INTERNAL',
+}
 
 export class CustomerListQueryDto {
     @IsOptional()
     @IsString()
     keyword?: string
+
+    @IsOptional()
+    @IsEnum(PartyType)
+    partyType?: PartyType
+
+    @IsOptional()
+    @IsEnum(CustomerListRole)
+    role?: CustomerListRole
 
     @IsOptional()
     @IsEnum(CustomerType)
@@ -25,7 +39,7 @@ export class CustomerListQueryDto {
 
     @IsOptional()
     @IsString()
-    legalOwnerEmpId?: string
+    documentOwnerEmpId?: string
 
     @IsOptional()
     @Type(() => Number)

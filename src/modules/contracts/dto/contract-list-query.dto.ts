@@ -1,5 +1,5 @@
 import { IsOptional, IsUUID, IsEnum, IsInt, IsDateString, IsString } from 'class-validator'
-import { ContractStatus, RiskLevel } from '@prisma/client'
+import { ContractKind, ContractStatus, RiskLevel } from '@prisma/client'
 import { Type } from 'class-transformer'
 
 export class ContractListQueryDto {
@@ -18,6 +18,10 @@ export class ContractListQueryDto {
     @IsOptional()
     @IsEnum(RiskLevel)
     riskLevel?: RiskLevel
+
+    @IsOptional()
+    @IsEnum(ContractKind)
+    kind?: ContractKind
 
     @IsOptional()
     @IsDateString()

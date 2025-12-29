@@ -14,6 +14,11 @@ generator client {
 // Enums
 // =======================================
 
+enum ContractKind {
+  SALES
+  PURCHASE
+}
+
 enum PartyType {
   CUSTOMER
   SUPPLIER
@@ -247,8 +252,8 @@ model Employee {
   customersLegalOwner      Customer[] @relation("customer_legal_owner_emp")
   customersDocumentOwner   Customer[] @relation("customer_document_owner_emp")
 
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
   @@index([status])
@@ -464,6 +469,10 @@ model Customer {
   status          CustomerStatus @default(Active)
   note            String?
 
+  isCustomer Boolean @default(true)
+  isSupplier Boolean @default(false)
+  isInternal Boolean @default(false)
+
   // 👇 NHÂN VIÊN PHỤ TRÁCH (gắn với Employee)
   salesOwnerEmpId      String? @db.Uuid
   accountingOwnerEmpId String? @db.Uuid
@@ -482,9 +491,9 @@ model Customer {
 
   addresses CustomerAddress[]
 
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  deletedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
   @@index([name])
   @@index([taxCode])
@@ -494,6 +503,9 @@ model Customer {
   @@index([accountingOwnerEmpId])
   @@index([legalOwnerEmpId])
   @@index([documentOwnerEmpId])
+  @@index([isCustomer])
+  @@index([isSupplier])
+  @@index([isInternal])
 }
 
 model CustomerAddress {
@@ -546,6 +558,8 @@ model Contract {
   riskLevel           RiskLevel      @default(Low)
   approvalRequestId   String?
 
+  kind ContractKind @default(SALES)
+
   renewalOfId String?    @db.Uuid
   renewalOf   Contract?  @relation("ContractRenewal", fields: [renewalOfId], references: [id])
   renewals    Contract[] @relation("ContractRenewal")
@@ -558,7 +572,7 @@ model Contract {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  @@index([customerId])
+  @@index([customerId, kind])
   @@index([status])
   @@index([startDate, endDate])
   @@index([renewalOfId])
