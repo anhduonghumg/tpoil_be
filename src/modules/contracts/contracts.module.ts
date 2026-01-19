@@ -8,12 +8,13 @@ import { ContractAttachmentsController } from './contract-attachments.controller
 import { ContractAttachmentsService } from './contract-attachments.service'
 import { MailModule } from 'src/mail/mail.module'
 import { CronModule } from '../cron/cron.module'
-import { ContractExpiryCronService } from './contract-expiry.cron.service'
+import { ContractExpiryCronService } from './cron/contract-expiry.cron.service'
+import { ContractsCronRegister } from './cron/contracts-cron.register'
 
 @Module({
     imports: [PrismaModule, MailModule, AuditModule, CronModule],
     controllers: [ContractsController, ContractAttachmentsController],
-    providers: [ContractsService, ContractAttachmentsService, ContractExpiryCronService, PrismaService],
+    providers: [ContractsService, ContractAttachmentsService, PrismaService, ContractExpiryCronService, ContractsCronRegister],
     exports: [ContractsService, ContractAttachmentsService],
 })
 export class ContractsModule {}

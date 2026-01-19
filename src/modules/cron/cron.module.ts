@@ -1,13 +1,12 @@
-import { Module } from '@nestjs/common'
+import { Global, Module } from '@nestjs/common'
 import { PrismaModule } from '../../infra/prisma/prisma.module'
 import { CronRunnerService } from './cron-runner.service'
-import { CronJobsService } from './cron-jobs.service'
-import { CronJobsController } from './cron-jobs.controller'
+import { CronRouterService } from './cron-router.service'
 
+@Global()
 @Module({
     imports: [PrismaModule],
-    controllers: [CronJobsController],
-    providers: [CronRunnerService, CronJobsService],
-    exports: [CronRunnerService, CronJobsService],
+    providers: [CronRunnerService, CronRouterService],
+    exports: [CronRunnerService, CronRouterService],
 })
 export class CronModule {}

@@ -29,6 +29,16 @@ import { AppModule as AppFeatureModule } from './modules/app/app.module'
 import { CronModule } from './modules/cron/cron.module'
 import { MailModule } from './mail/mail.module'
 import { UsersModule } from './modules/users/users.module'
+import { BankImportsModule } from './modules/banking/bank-imports/bank-imports.module'
+import { PurchaseOrdersModule } from './modules/purchases/purchase-orders/purchase-orders.module'
+import { GoodsReceiptsModule } from './modules/purchases/goods-receipts/goods-receipts.module'
+import { SupplierInvoicesModule } from './modules/purchases/supplier-invoices/supplier-invoices.module'
+import { SupplierSettlementsModule } from './modules/settlements/supplier-settlements.module'
+import { ProductsModule } from './modules/products/products.module'
+import { SupplierLocationsModule } from './modules/supplier-locations/supplier-locations.module'
+import { PriceBulletinsModule } from './modules/price-bulletins/price-bulletins.module'
+import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.module'
+import { JobArtifactsModule } from './modules/job-artifacts/job-artifacts.module'
 
 @Module({
     imports: [
@@ -62,6 +72,16 @@ import { UsersModule } from './modules/users/users.module'
         AppLoggingModule,
         CronModule,
         MailModule,
+        BankImportsModule,
+        PurchaseOrdersModule,
+        GoodsReceiptsModule,
+        SupplierInvoicesModule,
+        SupplierSettlementsModule,
+        ProductsModule,
+        SupplierLocationsModule,
+        PriceBulletinsModule,
+        BackgroundJobsModule,
+        JobArtifactsModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],

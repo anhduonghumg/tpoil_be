@@ -1,20 +1,18 @@
 import { NestFactory } from '@nestjs/core'
-import { AppModule } from './app.module'
 import { Logger } from 'nestjs-pino'
 import { BadRequestException, ValidationPipe } from '@nestjs/common'
 import { TransformInterceptor } from './common/http/transform.interceptor'
 import { HttpExceptionFilter } from './common/http/http-exception.filter'
-
+import { WebModule } from './web-app.module'
 import session from 'express-session'
 import passport from 'passport'
 import helmet from 'helmet'
 import pgSession from 'connect-pg-simple'
 import { Pool } from 'pg'
-
 import 'dotenv/config'
 
 async function bootstrap() {
-    const app = await NestFactory.create(AppModule, { bufferLogs: true })
+    const app = await NestFactory.create(WebModule, { bufferLogs: true })
     app.setGlobalPrefix('api')
 
     app.enableCors({
@@ -23,12 +21,16 @@ async function bootstrap() {
     })
 
     app.useLogger(app.get(Logger))
-    app.use(helmet())
+
+    app.use(
+        helmet({
+            crossOriginResourcePolicy: { policy: 'cross-origin' },
+            crossOriginEmbedderPolicy: false,
+        }),
+    )
+
     const PgSession = pgSession(session)
-    const pgPool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        // ssl: { rejectUnauthorized: false },
-    })
+    const pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
     app.use(
         session({
             name: 'sid',
@@ -46,8 +48,8 @@ async function bootstrap() {
             rolling: true,
             cookie: {
                 httpOnly: true,
-                secure: false, //process.env.NODE_ENV === "production"
-                sameSite: 'lax', //process.env.NODE_ENV === "production" ? "none" : "lax",
+                secure: false,
+                sameSite: 'lax',
                 maxAge: 30 * 60 * 1000,
             },
         }),
@@ -78,16 +80,6 @@ async function bootstrap() {
     app.useGlobalInterceptors(new TransformInterceptor())
     app.useGlobalFilters(new HttpExceptionFilter())
 
-    app.use(
-        helmet({
-            // Cho phép nhúng resource từ origin khác
-            crossOriginResourcePolicy: { policy: 'cross-origin' },
-            // Nếu bạn có bật COEP, tắt đi để tránh yêu cầu CORP/CORS cho mọi resource nhúng
-            crossOriginEmbedderPolicy: false,
-        }),
-    )
-
     await app.listen(process.env.PORT ?? 3000, '0.0.0.0')
 }
-
 bootstrap()

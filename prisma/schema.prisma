@@ -14,6 +14,28 @@ generator client {
 // Enums
 // =======================================
 
+enum BackgroundJobType {
+  PRICE_BULLETIN_IMPORT_PDF
+}
+
+enum BackgroundJobStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+enum PriceBulletinStatus {
+  DRAFT
+  PUBLISHED
+  VOID
+}
+
+enum PaymentTermType {
+  SAME_DAY
+  NET_DAYS
+}
+
 enum QtyBasis {
   ACTUAL
   V15
@@ -309,6 +331,57 @@ model CronJobRun {
   createdAt DateTime @default(now())
 
   @@index([jobId, runDate])
+}
+
+model BackgroundJob {
+  id      String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  type    BackgroundJobType @unique
+  name    String
+  enabled Boolean           @default(true)
+  config  Json?
+
+  runs BackgroundJobRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BackgroundJobRun {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  jobId String        @db.Uuid
+  job   BackgroundJob @relation(fields: [jobId], references: [id])
+
+  status BackgroundJobStatus @default(PENDING)
+
+  payload Json?
+
+  queuedAt   DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  metrics Json?
+  error   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([jobId, queuedAt])
+  @@index([status, queuedAt])
+}
+
+model JobArtifact {
+  id       String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  runId    String  @db.Uuid
+  kind     String
+  storage  String  @default("DB")
+  content  Json?
+  fileUrl  String?
+  checksum String?
+
+  createdAt DateTime @default(now())
+
+  @@index([runId, kind])
+  @@index([kind, createdAt])
 }
 
 // =======================================
@@ -855,10 +928,11 @@ model Driver {
 }
 
 model Product {
-  id   String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  code String?
-  name String
-  uom  QtyUom  @default(LITER)
+  id       String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code     String?
+  name     String
+  nameMisa String?
+  uom      QtyUom  @default(LITER)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -876,6 +950,7 @@ model Product {
   pricingTemplates   SupplierPricingTemplate[]
   pricingRuns        PurchasePricingRun[]
   costLayers         InventoryCostLayer[]
+  priceBulletinItems PriceBulletinItem[]
 
   @@index([name])
 }
@@ -888,10 +963,11 @@ model SupplierLocation {
   supplierCustomerId String   @db.Uuid
   supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  code     String
-  name     String
-  address  String?
-  isActive Boolean @default(true)
+  code        String
+  name        String
+  nameInvoice String?
+  address     String?
+  isActive    Boolean @default(true)
 
   tankCode String?
   tankName String?
@@ -908,6 +984,7 @@ model SupplierLocation {
   snapshotLines        InventorySnapshotLine[]
   costLayers           InventoryCostLayer[]
   inventoryAdjustments InventoryAdjustment[]
+  purchaseOrders       PurchaseOrder[]
 
   @@unique([supplierCustomerId, code])
   @@index([supplierCustomerId])
@@ -977,9 +1054,19 @@ model PurchaseOrder {
   supplierCustomerId String   @db.Uuid
   supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  supplierLocationId String?           @db.Uuid
+  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  priceRegionId String?      @db.Uuid
+  priceRegion   PriceRegion? @relation(fields: [priceRegionId], references: [id], onDelete: SetNull)
+
   orderType   PurchaseOrderType
   status      PurchaseOrderStatus @default(DRAFT)
   paymentMode PaymentMode
+
+  paymentTermType     PaymentTermType @default(SAME_DAY)
+  paymentTermDays     Int?
+  allowPartialPayment Boolean         @default(true)
 
   orderDate    DateTime
   expectedDate DateTime?
@@ -998,6 +1085,7 @@ model PurchaseOrder {
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
+  @@index([priceRegionId])
 }
 
 model PurchaseOrderLine {
@@ -1606,6 +1694,67 @@ model InventoryCostLayer {
   @@index([supplierLocationId])
   @@index([productId, status, costDate])
   @@index([sourceType, sourceId])
+}
+
+model PriceRegion {
+  id   String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code String  @unique
+  name String
+  note String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items          PriceBulletinItem[]
+  purchaseOrders PurchaseOrder[]
+
+  @@index([isActive])
+}
+
+model PriceBulletin {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  status PriceBulletinStatus @default(PUBLISHED)
+
+  publishedAt   DateTime  @db.Timestamptz
+  effectiveFrom DateTime  @db.Timestamptz
+  effectiveTo   DateTime? @db.Timestamptz
+
+  source       String?
+  fileUrl      String?
+  fileChecksum String?
+  note         String?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items PriceBulletinItem[]
+
+  @@unique([publishedAt])
+  @@unique([fileChecksum])
+  @@index([status, effectiveFrom])
+  @@index([publishedAt])
+}
+
+model PriceBulletinItem {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  bulletinId String @db.Uuid
+  productId  String @db.Uuid
+  regionId   String @db.Uuid
+
+  price Decimal @db.Decimal(18, 2)
+  note  String?
+
+  bulletin PriceBulletin @relation(fields: [bulletinId], references: [id], onDelete: Cascade)
+  product  Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  region   PriceRegion   @relation(fields: [regionId], references: [id], onDelete: Restrict)
+
+  @@unique([bulletinId, productId, regionId])
+  @@index([productId, regionId])
 }
 
 // =======================================

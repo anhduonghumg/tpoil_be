@@ -1,8 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common'
-import { Cron } from '@nestjs/schedule'
-import { CronJobType } from '@prisma/client'
-import { ContractsService } from './contracts.service'
-import { CronRunnerService } from '../cron/cron-runner.service'
+import { ContractsService } from '../contracts.service'
+import { CronRunnerService } from '../../cron/cron-runner.service'
+
+type Payload = {
+    cronRunId: string
+    referenceDate: string
+    status?: 'all' | 'expiring' | 'expired'
+}
 
 @Injectable()
 export class ContractExpiryCronService {
@@ -13,30 +17,30 @@ export class ContractExpiryCronService {
         private readonly contractsService: ContractsService,
     ) {}
 
-    // Chạy lúc 8h sáng mỗi ngày, giờ VN
-    @Cron('0 9 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-    async handleDaily() {
-        const runDate = new Date()
+    async handle(payload: Payload): Promise<void> {
+        const { cronRunId, referenceDate, status = 'all' } = payload
 
-        this.logger.log(`Trigger CONTRACT_EXPIRY_DAILY at ${runDate.toISOString()}`)
-
-        await this.cronRunner.runJob(CronJobType.CONTRACT_EXPIRY_DAILY, runDate, async () => {
-            const ref = runDate.toISOString().slice(0, 10)
-
+        try {
             const summary = await this.contractsService.sendContractExpiryEmail({
-                referenceDate: ref,
-                status: 'all',
+                referenceDate,
+                status,
                 to: this.getDefaultRecipients(),
             })
 
-            return {
+            await this.cronRunner.markSuccess(cronRunId, {
                 referenceDate: summary.summary.referenceDate,
                 expiringCount: summary.summary.expiringCount,
                 expiredCount: summary.summary.expiredCount,
                 to: summary.sentTo,
                 cc: summary.cc,
-            }
-        })
+            })
+
+            this.logger.log(`SUCCESS runId=${cronRunId} ref=${referenceDate}`)
+        } catch (e) {
+            await this.cronRunner.markFailed(cronRunId, e)
+            this.logger.error(`FAILED runId=${cronRunId} ref=${referenceDate}`, e instanceof Error ? e.stack : undefined)
+            throw e
+        }
     }
 
     private getDefaultRecipients(): string[] {

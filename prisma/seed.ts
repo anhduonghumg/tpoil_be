@@ -1,7 +1,9 @@
 // prisma/seed.ts
+
 import { PrismaClient, ScopeType } from '@prisma/client'
 import * as bcrypt from 'bcrypt'
 
+/*
 const prisma = new PrismaClient()
 
 async function main() {
@@ -175,3 +177,29 @@ main()
         process.exit(1)
     })
     .finally(() => prisma.$disconnect())
+*/
+
+const prisma = new PrismaClient()
+
+async function main() {
+    await prisma.priceRegion.upsert({
+        where: { code: 'VUNG_I' },
+        update: { name: 'Vùng I', isActive: true },
+        create: { code: 'VUNG_I', name: 'Vùng I', isActive: true },
+    })
+
+    await prisma.priceRegion.upsert({
+        where: { code: 'VUNG_II' },
+        update: { name: 'Vùng II', isActive: true },
+        create: { code: 'VUNG_II', name: 'Vùng II', isActive: true },
+    })
+}
+
+main()
+    .catch((e) => {
+        console.error(e)
+        process.exit(1)
+    })
+    .finally(async () => {
+        await prisma.$disconnect()
+    })
