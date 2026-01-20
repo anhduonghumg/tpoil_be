@@ -47,7 +47,12 @@ export class ProductMatcher {
         const raw = process.env.PRICE_PDF_PRODUCT_ALIASES_TPOIL
         if (!raw) return {}
         try {
-            return JSON.parse(raw)
+            const parsed = JSON.parse(raw)
+            const normalized: Record<string, string> = {}
+            Object.keys(parsed).forEach((key) => {
+                normalized[normalizeText(key)] = parsed[key]
+            })
+            return normalized
         } catch {
             return {}
         }
@@ -84,20 +89,32 @@ export class ProductMatcher {
             return { ok: false, reason: 'NOT_FOUND', canonicalKey, suggestions: [] }
         }
 
+        // 1. Ưu tiên Alias (Đã được chuẩn hóa Key)
+        const aliases = opts?.source === 'TPOIL' ? this.parseAliasEnv() : {}
+        const aliasVal = aliases[canonicalKey]
+
+        if (aliasVal) {
+            const aliasKey = normalizeText(aliasVal)
+            const byCode = this.codeMap.get(aliasKey)
+            if (byCode) return { ok: true, productId: byCode.id, matchedBy: 'alias', confidence: 1, canonicalKey }
+            const byName = this.nameMap.get(aliasKey)
+            if (byName) return { ok: true, productId: byName.id, matchedBy: 'alias', confidence: 1, canonicalKey }
+        }
+
         const codeHit = this.codeMap.get(canonicalKey)
         if (codeHit) {
             return { ok: true, productId: codeHit.id, matchedBy: 'code', confidence: 1, canonicalKey }
         }
 
-        const aliases = opts?.source === 'TPOIL' ? this.parseAliasEnv() : {}
-        const aliasVal = aliases[rawName] ?? aliases[canonicalKey] ?? aliases[canonicalKey.replace(/\s+/g, ' ')]
-        if (aliasVal) {
-            const aliasKey = normalizeText(aliasVal)
-            const byCode = this.codeMap.get(aliasKey)
-            if (byCode) return { ok: true, productId: byCode.id, matchedBy: 'alias', confidence: 0.95, canonicalKey }
-            const byName = this.nameMap.get(aliasKey)
-            if (byName) return { ok: true, productId: byName.id, matchedBy: 'alias', confidence: 0.9, canonicalKey }
-        }
+        // const aliases = opts?.source === 'TPOIL' ? this.parseAliasEnv() : {}
+        // const aliasVal = aliases[rawName] ?? aliases[canonicalKey] ?? aliases[canonicalKey.replace(/\s+/g, ' ')]
+        // if (aliasVal) {
+        //     const aliasKey = normalizeText(aliasVal)
+        //     const byCode = this.codeMap.get(aliasKey)
+        //     if (byCode) return { ok: true, productId: byCode.id, matchedBy: 'alias', confidence: 0.95, canonicalKey }
+        //     const byName = this.nameMap.get(aliasKey)
+        //     if (byName) return { ok: true, productId: byName.id, matchedBy: 'alias', confidence: 0.9, canonicalKey }
+        // }
 
         const nameHit = this.nameMap.get(canonicalKey)
         if (nameHit) {

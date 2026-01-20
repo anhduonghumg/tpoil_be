@@ -1,13 +1,13 @@
 // price-bulletins.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma, PriceBulletinStatus } from '@prisma/client'
+import { Prisma, PriceBulletinStatus, BackgroundJobType } from '@prisma/client'
 
 import { CreatePriceBulletinDto } from './dto/create-price-bulletin.dto'
 import { UpdatePriceBulletinDto } from './dto/update-price-bulletin.dto'
 import { ListPriceItemsDto } from './dto/list-price-bulletins.dto'
 import { CommitImportDto } from './dto/import-price-bulletin-pdf.dto'
 
-import { ARTIFACT_PRICE_PDF_PREVIEW } from './jobs/price-bulletin-queues'
+import { ARTIFACT_PRICE_PDF_INPUT, ARTIFACT_PRICE_PDF_PREVIEW, QB_PRICE_BULLETIN } from './jobs/price-bulletin-queues'
 
 import { JobArtifactsService } from '../job-artifacts/job-artifacts.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
@@ -15,8 +15,12 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { ProductMatcher } from './matching/product-matcher'
 import { RegionMatcher } from './matching/region-matcher'
 import { PricePdfPreviewLine, PricePdfPreviewResult } from './types/price-pdf-preview'
-
-const pdfParse = require('pdf-parse')
+import { BackgroundJobsService } from '../background-jobs/background-jobs.service'
+import { PricePdfStorage } from './price-file.storage'
+import * as fs from 'fs/promises'
+import pdf = require('pdf-parse')
+// const pdfParse = require('pdf-parse')
+// const pdf = require('pdf-parse')
 // import dayjs from 'dayjs'
 
 type RawLine = { productNameRaw: string; priceV1: number; priceV2: number }
@@ -30,9 +34,65 @@ export class PriceBulletinsService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly artifacts: JobArtifactsService,
+        private readonly bg: BackgroundJobsService,
+        private readonly storage: PricePdfStorage,
         private readonly productMatcher: ProductMatcher,
         private readonly regionMatcher: RegionMatcher,
     ) {}
+
+    async startImportPreview(file: Express.Multer.File) {
+        const { filePath, checksum } = await this.storage.savePdfBuffer({
+            buffer: file.buffer,
+            originalName: file.originalname,
+        })
+
+        const run = await this.bg.createRun({
+            type: BackgroundJobType.PRICE_BULLETIN_IMPORT_PDF,
+            name: `Bóc tách PDF: ${file.originalname}`,
+            payload: { fileName: file.originalname, filePath, checksum },
+        })
+
+        await this.artifacts.upsertArtifact({
+            runId: run.id,
+            kind: ARTIFACT_PRICE_PDF_INPUT,
+            fileUrl: filePath,
+            checksum,
+            content: { fileName: file.originalname },
+        })
+
+        await this.bg.enqueueRun({
+            type: BackgroundJobType.PRICE_BULLETIN_IMPORT_PDF,
+            queueName: QB_PRICE_BULLETIN,
+            runId: run.id,
+            profile: 'pdf_parse',
+        })
+
+        return { runId: run.id, checksum, message: 'Đang xử lý file PDF...' }
+    }
+
+    async handleWorkerJob(runId: string) {
+        await this.bg.markProcessing(runId)
+        try {
+            const input = await this.artifacts.getArtifact(runId, ARTIFACT_PRICE_PDF_INPUT)
+            if (!input?.fileUrl) throw new Error('Không tìm thấy tệp tin PDF')
+
+            const buffer = await fs.readFile(input.fileUrl)
+            const preview = await this.parseAndMapPdf(buffer)
+
+            await this.artifacts.upsertArtifact({
+                runId,
+                kind: ARTIFACT_PRICE_PDF_PREVIEW,
+                content: preview as any,
+                checksum: input.checksum ?? undefined,
+            })
+
+            await this.bg.markSuccess(runId, { stats: preview.stats })
+            return preview
+        } catch (err) {
+            await this.bg.markFailed(runId, err)
+            throw err
+        }
+    }
 
     async list(q: { keyword?: string; status?: PriceBulletinStatus; page?: number; pageSize?: number }) {
         const page = q.page ?? 1
@@ -185,52 +245,32 @@ export class PriceBulletinsService {
     }
 
     private extractTpoilData(text: string): { effectiveFrom: Date; lines: RawLine[] } {
-        const t = (text || '').replace(/\u00A0/g, ' ')
+        const t = text
+            .replace(/\u00A0/g, ' ')
+            .replace(/\r/g, ' ')
+            .replace(/\n/g, ' ')
+            .replace(/\s+/g, ' ')
 
-        const eff = t.match(/hiệu lực từ\s*(\d{1,2})\s*giờ\s*(\d{1,2})\s*phút,?\s*ngày\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i)
-        if (!eff) throw new Error('Không tìm thấy mốc thời gian hiệu lực (Điều 2)')
+        const effMatch = t.match(/hiệu lực từ\s*(\d{1,2})\s*giờ\s*(\d{1,2})\s*phút,?\s*ngày\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i)
+        if (!effMatch) throw new Error('Không tìm thấy mốc thời gian hiệu lực')
+        const [_, hh, mm, dd, MM, yyyy] = effMatch
+        const effectiveFrom = new Date(Date.UTC(Number(yyyy), Number(MM) - 1, Number(dd), Number(hh) - 7, Number(mm)))
 
-        const hh = Number(eff[1])
-        const mm = Number(eff[2])
-        const dd = Number(eff[3])
-        const MM = Number(eff[4])
-        const yyyy = Number(eff[5])
-
-        const effectiveFrom = new Date(Date.UTC(yyyy, MM - 1, dd, hh - 7, mm, 0, 0))
-
-        const headerRe = /SẢN PHẨM\s+Đơn vị tính\s+Vùng I\s+Vùng II/i
-        const startIdx = t.search(headerRe)
-        if (startIdx < 0) throw new Error('Không tìm thấy header bảng giá (SẢN PHẨM / Vùng I / Vùng II)')
-
-        const afterHeader = t.slice(startIdx)
-        let endIdx = afterHeader.search(/\(Giá trên/i)
-        if (endIdx < 0) endIdx = afterHeader.search(/Điều\s*2\./i)
-
-        const tableBlock = endIdx > 0 ? afterHeader.slice(0, endIdx) : afterHeader
+        const lineRegex = /(Xăng|Dầu|Điêzen|Mazut)\s+([^Đ]+?)\s+Đồng\/lít\s+([\d.,]+)\s+([\d.,]+)/gi
 
         const lines: RawLine[] = []
-        const rows = tableBlock
-            .split(/\r?\n/)
-            .map((x) => x.trim())
-            .filter(Boolean)
+        let match
 
-        for (const row of rows) {
-            if (!/Đồng\/lít/i.test(row)) continue
+        while ((match = lineRegex.exec(t)) !== null) {
+            const productNameRaw = `${match[1]} ${match[2]}`.trim()
 
-            const r = row.replace(/\s+/g, ' ')
-            const m = r.match(/^(.+?)\s+Đồng\/lít\s+([\d.,]+)\s+([\d.,]+)\s*$/i)
-            if (!m) continue
+            const priceV1 = this.parseVnNumber(match[3])
+            const priceV2 = this.parseVnNumber(match[4])
 
-            const productNameRaw = m[1].trim()
-            const priceV1 = this.parseVnNumber(m[2])
-            const priceV2 = this.parseVnNumber(m[3])
-
-            if (!Number.isFinite(priceV1) || !Number.isFinite(priceV2) || priceV1 <= 0 || priceV2 <= 0) continue
-
-            lines.push({ productNameRaw, priceV1, priceV2 })
+            if (priceV1 > 0 && priceV2 > 0) {
+                lines.push({ productNameRaw, priceV1, priceV2 })
+            }
         }
-
-        if (!lines.length) throw new Error('Không bóc tách được dòng sản phẩm nào trong bảng giá')
 
         return { effectiveFrom, lines }
     }
@@ -546,7 +586,6 @@ export class PriceBulletinsService {
                 if (!dto.isOverride) {
                     throw new BadRequestException({ code: 'SAME_TIME_EXISTS', message: 'Đã có bảng giá PUBLISHED tại effectiveFrom này' })
                 }
-                // override => void bulletin cũ tại cùng effectiveFrom
                 await tx.priceBulletin.updateMany({
                     where: { effectiveFrom: newFrom, status: PriceBulletinStatus.PUBLISHED },
                     data: { status: PriceBulletinStatus.VOID },
@@ -604,18 +643,16 @@ export class PriceBulletinsService {
     }
 
     async parseAndMapPdf(buffer: Buffer): Promise<PricePdfPreviewResult> {
-        const parsed = await pdfParse(buffer)
-        const text = parsed.text
-
-        const { effectiveFrom, lines: rawLines } = this.extractTpoilData(text)
-
+        const parsed = await pdf(buffer)
+        const rawText = parsed.text
+        const { effectiveFrom, lines: rawLines } = this.extractTpoilData(rawText)
         const r1 = await this.regionMatcher.findByCodeOrName('VÙNG I')
         const r2 = await this.regionMatcher.findByCodeOrName('VÙNG II')
-
         const previewLines: PricePdfPreviewLine[] = []
         const warnings: string[] = []
 
         let rowNo = 0
+
         for (const raw of rawLines) {
             rowNo++
 
@@ -623,11 +660,13 @@ export class PriceBulletinsService {
 
             const pairs: Array<{ region: typeof r1; price: number; label: string }> = [
                 { region: r1, price: raw.priceV1, label: 'VÙNG I' },
+
                 { region: r2, price: raw.priceV2, label: 'VÙNG II' },
             ]
 
             for (const p of pairs) {
                 const issues: any[] = []
+
                 const price = p.price
 
                 if (!Number.isFinite(price) || price <= 0) {
@@ -654,6 +693,7 @@ export class PriceBulletinsService {
                     })
                 } else {
                     const code = match.reason === 'AMBIGUOUS' ? 'PRODUCT_AMBIGUOUS' : 'PRODUCT_NOT_FOUND'
+
                     issues.push({
                         code,
                         message: match.reason === 'AMBIGUOUS' ? 'Tên sản phẩm mơ hồ, cần chọn thủ công' : 'Không tìm thấy sản phẩm trong danh mục',
@@ -675,7 +715,6 @@ export class PriceBulletinsService {
         }
 
         const conflict = await this.checkTimeConflict(effectiveFrom)
-
         const total = previewLines.length
         const withIssues = previewLines.filter((x) => x.issues?.length).length
         const notFound = previewLines.filter((x) => x.issues?.some((i: any) => i.code === 'PRODUCT_NOT_FOUND')).length
@@ -683,6 +722,7 @@ export class PriceBulletinsService {
         const ok = total - withIssues
 
         if (notFound) warnings.push(`Có ${notFound} dòng không map được sản phẩm.`)
+
         if (ambiguous) warnings.push(`Có ${ambiguous} dòng sản phẩm mơ hồ cần chọn thủ công.`)
 
         return {
@@ -693,6 +733,37 @@ export class PriceBulletinsService {
             conflict,
             stats: { total, ok, withIssues, notFound, ambiguous },
         }
+    }
+    async updatePreviewLine(runId: string, rowNo: number, updateDto: any) {
+        const artifact = await this.artifacts.getArtifact(runId, ARTIFACT_PRICE_PDF_PREVIEW)
+        const preview = artifact?.content as any
+
+        preview.lines.forEach((line: any) => {
+            if (line.rowNo === rowNo) {
+                line.productId = updateDto.productId
+                line.issues = (line.issues || []).filter((i: any) => !i.code.startsWith('PRODUCT_'))
+            }
+        })
+
+        const total = preview.lines.length
+        const withIssues = preview.lines.filter((l: any) => l.issues.length > 0).length
+        const ok = total - withIssues
+
+        preview.stats = {
+            ...preview.stats,
+            total,
+            withIssues,
+            ok,
+            notFound: preview.lines.filter((l: any) => l.issues.some((i: any) => i.code === 'PRODUCT_NOT_FOUND')).length,
+            ambiguous: preview.lines.filter((l: any) => l.issues.some((i: any) => i.code === 'PRODUCT_AMBIGUOUS')).length,
+        }
+        await this.artifacts.upsertArtifact({
+            runId,
+            kind: ARTIFACT_PRICE_PDF_PREVIEW,
+            content: preview,
+        })
+
+        return preview
     }
 
     private async getRegionMap() {
@@ -714,7 +785,7 @@ export class PriceBulletinsService {
         const newer = await this.prisma.priceBulletin.findFirst({
             where: { effectiveFrom: { gt: effectiveFrom }, status: 'PUBLISHED' },
         })
-        if (newer) return { type: 'BACKDATED', message: 'Bạn đang import giá cho một thời điểm trong quá khứ.' }
+        if (newer) return { type: 'BACKDATED', message: 'Bạn đang thêm giá cho một thời điểm trong quá khứ.' }
 
         return null
     }
@@ -739,5 +810,12 @@ export class PriceBulletinsService {
             isDone: run.status === 'SUCCESS',
             isFailed: run.status === 'FAILED',
         }
+    }
+
+    async getPreviewData(runId: string) {
+        const a = await this.artifacts.getArtifact(runId, ARTIFACT_PRICE_PDF_PREVIEW)
+        if (!a) throw new NotFoundException('Chưa có dữ liệu preview')
+        console.log(a.content)
+        return a.content
     }
 }

@@ -10,19 +10,22 @@ import { CronWorkerModule } from './modules/cron/cron-worker.module'
 import { MailModule } from './mail/mail.module'
 import { ContractsModule } from './modules/contracts/contracts.module'
 import { CronModule } from './modules/cron/cron.module'
+import { PriceBulletinsWorkerModule } from './modules/price-bulletins/price-bulletins.worker.module'
 
 @Module({
     imports: [
         PrismaModule,
         QueueModule,
         AppLoggingModule,
-        BackgroundJobsModule,
-        JobArtifactsModule,
         PriceBulletinsModule,
         CronWorkerModule,
         CronModule,
         MailModule,
         ContractsModule,
+
+        BackgroundJobsModule,
+        JobArtifactsModule,
+        PriceBulletinsWorkerModule,
     ],
 })
 export class WorkerModule {}
