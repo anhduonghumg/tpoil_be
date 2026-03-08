@@ -11,6 +11,7 @@ import { MailModule } from './mail/mail.module'
 import { ContractsModule } from './modules/contracts/contracts.module'
 import { CronModule } from './modules/cron/cron.module'
 import { PriceBulletinsWorkerModule } from './modules/price-bulletins/price-bulletins.worker.module'
+import { SupplierInvoicesWorkerModule } from './modules/purchases/supplier-invoices/supplier-invoices.worker.module'
 
 @Module({
     imports: [
@@ -22,6 +23,7 @@ import { PriceBulletinsWorkerModule } from './modules/price-bulletins/price-bull
         CronModule,
         MailModule,
         ContractsModule,
+        SupplierInvoicesWorkerModule,
 
         BackgroundJobsModule,
         JobArtifactsModule,

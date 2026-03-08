@@ -4,7 +4,7 @@ import { ListPriceBulletinsDto, ListPriceItemsDto } from './dto/list-price-bulle
 import { PriceBulletinsService } from './price-bulletins.service'
 import { CreatePriceBulletinDto } from './dto/create-price-bulletin.dto'
 import { UpdatePriceBulletinDto } from './dto/update-price-bulletin.dto'
-import { QuotePriceQueryDto, RegionsSelectQueryDto } from './dto/price-bulletins.dto'
+import { QuoteBatchDto, QuotePriceQueryDto, RegionsSelectQueryDto } from './dto/price-bulletins.dto'
 import { CommitImportDto } from './dto/import-price-bulletin-pdf.dto'
 // import { BackgroundJobsService } from '../background-jobs/background-jobs.service'
 import { FileInterceptor } from '@nestjs/platform-express'
@@ -36,6 +36,15 @@ export class PriceBulletinsController {
             productId: q.productId,
             regionCode: q.regionCode,
             onDate: q.onDate,
+        })
+    }
+
+    @Post('quote-batch')
+    quoteBatch(@Body() dto: QuoteBatchDto) {
+        return this.service.quoteBatch({
+            productIds: dto.productIds,
+            regionCode: dto.regionCode,
+            onDate: dto.onDate,
         })
     }
 

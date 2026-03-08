@@ -1,15 +1,141 @@
-// src/modules/purchases/supplier-invoices/supplier-invoices.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { InventoryLedgerSourceType, Prisma, SettlementStatus, SettlementType, SupplierInvoiceStatus } from '@prisma/client'
-import { InventoryService } from '../../inventory/inventory.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { InventoryService } from '../../inventory/inventory.service'
+import { BackgroundJobsService } from 'src/modules/background-jobs/background-jobs.service'
+import { JobArtifactsService } from 'src/modules/job-artifacts/job-artifacts.service'
+import { GoogleDriveService } from 'src/infra/google-drive/google-drive.service'
+import { BackgroundJobType, SupplierInvoiceStatus, SettlementType, SettlementStatus, InventoryLedgerSourceType, Prisma } from '@prisma/client'
+import * as crypto from 'node:crypto'
+import { ARTIFACT_PDF_INPUT, ARTIFACT_PDF_PREVIEW, QB_SUPPLIER_INVOICE } from './jobs/supplier-invoice-queues'
 
 @Injectable()
 export class SupplierInvoicesService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly inventory: InventoryService,
+
+        private readonly bgJobs: BackgroundJobsService,
+        private readonly artifacts: JobArtifactsService,
+        private readonly drive: GoogleDriveService,
     ) {}
+
+    async previewPdfImport(args: { supplierCustomerId: string; file: Express.Multer.File }) {
+        if (!args.file?.buffer?.length) throw new BadRequestException('File is required (multipart field "file")')
+
+        const supplier = await this.prisma.customer.findUnique({
+            where: { id: args.supplierCustomerId },
+            select: { id: true, code: true, name: true, isSupplier: true },
+        })
+        if (!supplier) throw new BadRequestException('Supplier not found')
+        if (!supplier.isSupplier) throw new BadRequestException('Party is not marked as Supplier')
+
+        const checksum = crypto.createHash('sha256').update(args.file.buffer).digest('hex')
+
+        const uploaded = await this.drive.uploadPdf({
+            buffer: args.file.buffer,
+            fileName: args.file.originalname,
+        })
+
+        const run = await this.bgJobs.createRun({
+            type: BackgroundJobType.SUPPLIER_INVOICE_IMPORT_PDF,
+            name: 'Import Supplier Invoice PDF (preview)',
+            payload: { supplierCustomerId: supplier.id, checksum, driveFileId: uploaded.fileId },
+        })
+
+        await this.artifacts.upsertArtifact({
+            runId: run.id,
+            kind: ARTIFACT_PDF_INPUT,
+            content: {
+                supplierCustomerId: supplier.id,
+                supplierName: supplier.name,
+                fileId: uploaded.fileId,
+                fileName: uploaded.fileName,
+                mimeType: uploaded.mimeType,
+                checksum,
+            },
+            fileUrl: uploaded.webViewLink ?? '',
+            checksum,
+        })
+
+        await this.bgJobs.enqueueRun({
+            type: BackgroundJobType.SUPPLIER_INVOICE_IMPORT_PDF,
+            queueName: QB_SUPPLIER_INVOICE,
+            runId: run.id,
+            profile: 'pdf_parse',
+        })
+
+        return {
+            runId: run.id,
+            fileId: uploaded.fileId,
+            fileUrl: uploaded.webViewLink ?? null,
+            checksum,
+            status: 'QUEUED',
+        }
+    }
+
+    async getPreviewResult(runId: string) {
+        const run = await this.prisma.backgroundJobRun.findUnique({
+            where: { id: runId },
+            select: { id: true, status: true, error: true, metrics: true },
+        })
+        if (!run) throw new BadRequestException('Run not found')
+
+        const input = await this.artifacts.getArtifact(runId, ARTIFACT_PDF_INPUT)
+        const preview = await this.artifacts.getArtifact(runId, ARTIFACT_PDF_PREVIEW)
+
+        return {
+            runId,
+            status: run.status,
+            error: run.error ?? null,
+            metrics: run.metrics ?? null,
+            input: input?.content ?? null,
+            preview: preview?.content ?? null,
+            fileUrl: input?.fileUrl ?? null,
+        }
+    }
+
+    async handleWorkerJob(runId: string) {
+        await this.bgJobs.markProcessing(runId)
+
+        try {
+            const input = await this.artifacts.getArtifact(runId, ARTIFACT_PDF_INPUT)
+            if (!input?.content) throw new Error('Missing PDF input artifact')
+
+            const data = (input.content ?? {}) as {
+                supplierCustomerId?: string
+                fileId?: string
+                fileName?: string
+            }
+            const fileId = data.fileId as string
+            if (!fileId) throw new Error('Missing fileId')
+
+            const preview = {
+                detected: {
+                    supplierCustomerId: data.supplierCustomerId ?? null,
+                    invoiceNo: null,
+                    invoiceSymbol: null,
+                    invoiceDate: null,
+                    totalAmount: null,
+                },
+                suggestedLines: [],
+                warnings: ['PDF preview parser not enabled yet. This is a skeleton preview.'],
+            }
+
+            await this.artifacts.upsertArtifact({
+                runId,
+                kind: ARTIFACT_PDF_PREVIEW,
+                fileUrl: input.fileUrl as string,
+                content: preview,
+                checksum: input.checksum ?? undefined,
+            })
+
+            await this.bgJobs.markSuccess(runId, { preview: true })
+            return { ok: true }
+        } catch (err) {
+            await this.bgJobs.markFailed(runId, err)
+            return { ok: false }
+        }
+    }
 
     async create(dto: {
         supplierCustomerId: string
@@ -36,7 +162,7 @@ export class SupplierInvoicesService {
                 invoiceNo: dto.invoiceNo,
                 invoiceSymbol: dto.invoiceSymbol,
                 invoiceTemplate: dto.invoiceTemplate ?? null,
-                invoiceDate: new Date(dto.invoiceDate), // @db.Date
+                invoiceDate: new Date(dto.invoiceDate),
                 status: SupplierInvoiceStatus.DRAFT,
                 note: dto.note ?? null,
                 totalAmount: null,
@@ -83,8 +209,6 @@ export class SupplierInvoicesService {
                     throw new BadRequestException('INVOICE_NOT_DRAFT')
                 }
 
-                // Validate lines + supplierLocation belongs to supplier
-                // + validate goodsReceipt (nếu có) là CONFIRMED và cùng supplier/location/product
                 for (const line of inv.lines) {
                     const loc = await tx.supplierLocation.findUnique({
                         where: { id: line.supplierLocationId },
@@ -185,9 +309,6 @@ export class SupplierInvoicesService {
     }
 
     async void(id: string, payload?: { reason?: string }) {
-        // Policy tối thiểu:
-        // - Chỉ cho VOID khi chưa có allocation vào settlement
-        // - Đảo inventory: Posted -> Pending
         return this.prisma.$transaction(async (tx) => {
             const inv = await tx.supplierInvoice.findUnique({
                 where: { id },

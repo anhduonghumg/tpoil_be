@@ -1,7 +1,9 @@
-// src/modules/purchases/supplier-invoices/supplier-invoices.controller.ts
-import { Body, Controller, Get, Param, Post } from '@nestjs/common'
-import { SupplierInvoicesService } from './supplier-invoices.service'
+import { Body, Controller, Get, Param, Post, UploadedFile, UseInterceptors } from '@nestjs/common'
 import { CreateSupplierInvoiceDto, PostSupplierInvoiceDto, VoidSupplierInvoiceDto } from './dto/supplier-invoice.dto'
+import { SupplierInvoiceImportPdfDto } from './dto/import-pdf.dto'
+import { FileInterceptor } from '@nestjs/platform-express'
+import { memoryStorage } from 'multer'
+import { SupplierInvoicesService } from './supplier-invoices.service'
 
 @Controller('supplier-invoices')
 export class SupplierInvoicesController {
@@ -9,7 +11,21 @@ export class SupplierInvoicesController {
 
     @Post()
     create(@Body() dto: CreateSupplierInvoiceDto) {
-        return this.service.create(dto as any)
+        return this.service.create(dto)
+    }
+
+    @Post('import-pdf/preview')
+    @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
+    previewPdf(@UploadedFile() file: Express.Multer.File, @Body() dto: SupplierInvoiceImportPdfDto) {
+        return this.service.previewPdfImport({
+            supplierCustomerId: dto.supplierCustomerId,
+            file,
+        })
+    }
+
+    @Get('import-pdf/preview/:runId')
+    getPreview(@Param('runId') runId: string) {
+        return this.service.getPreviewResult(runId)
     }
 
     @Get(':id')
@@ -22,8 +38,8 @@ export class SupplierInvoicesController {
         return this.service.post(id, dto)
     }
 
-    @Post(':id/void')
-    void(@Param('id') id: string, @Body() dto: VoidSupplierInvoiceDto) {
-        return this.service.void(id, dto)
-    }
+    // @Post(':id/void')
+    // void(@Param('id') id: string, @Body() dto: VoidSupplierInvoiceDto) {
+    //     return this.service.void(id, dto)
+    // }
 }

@@ -1,7 +1,7 @@
 // src/modules/purchases/purchase-orders/dto/purchase-order.dto.ts
 import { ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
-import { Type } from 'class-transformer'
 import { PaymentMode, PurchaseOrderType } from '@prisma/client'
+import { Type } from 'class-transformer'
 
 export enum PaymentTermType {
     SAME_DAY = 'SAME_DAY',
@@ -9,13 +9,24 @@ export enum PaymentTermType {
 }
 
 export class CreatePurchaseOrderLineDto {
-    @IsUUID()
+    @IsString()
     productId!: string
 
+    @Type(() => Number)
     @IsNumber()
     orderedQty!: number
 
     @IsOptional()
+    @IsString()
+    supplierLocationId?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    discountAmount?: number
+
+    @IsOptional()
+    @Type(() => Number)
     @IsNumber()
     unitPrice?: number
 
@@ -24,66 +35,18 @@ export class CreatePurchaseOrderLineDto {
     taxRate?: number
 }
 
-export class CreatePurchaseOrderDto {
-    @IsString()
-    orderNo!: string
-
-    @IsUUID()
-    supplierCustomerId!: string
-
-    @IsEnum(PurchaseOrderType)
-    orderType!: PurchaseOrderType
-
-    @IsEnum(PaymentMode)
-    paymentMode!: PaymentMode
-
-    @IsOptional()
-    @IsUUID()
-    supplierLocationId?: string
-
-    @IsEnum(PaymentTermType)
-    paymentTermType!: PaymentTermType
-
-    @IsOptional()
-    @IsInt()
-    @Min(1)
-    paymentTermDays?: number
-
-    @IsOptional()
-    @IsBoolean()
-    allowPartialPayment?: boolean
-
-    @IsDateString()
-    orderDate!: string
-
-    @IsOptional()
-    @IsDateString()
-    expectedDate?: string
-
-    @IsOptional()
-    @IsString()
-    note?: string
-
-    @IsArray()
-    @ArrayMinSize(1)
-    @ValidateNested({ each: true })
-    @Type(() => CreatePurchaseOrderLineDto)
-    lines!: CreatePurchaseOrderLineDto[]
-}
-
 export class ApprovePurchaseOrderDto {
     @IsOptional()
     @IsString()
     note?: string
 }
-
 export class ListPurchaseOrdersQueryDto {
     @IsOptional()
     @IsString()
     keyword?: string
 
     @IsOptional()
-    @IsUUID()
+    @IsString()
     supplierCustomerId?: string
 
     @IsOptional()
@@ -103,10 +66,61 @@ export class ListPurchaseOrdersQueryDto {
     dateTo?: string
 
     @IsOptional()
+    @Type(() => Number)
     @IsInt()
     page?: number
 
     @IsOptional()
+    @Type(() => Number)
     @IsInt()
     limit?: number
+}
+
+export class CreatePurchaseOrderDto {
+    @IsString()
+    orderNo!: string
+
+    @IsUUID()
+    supplierCustomerId!: string
+
+    @IsOptional()
+    @IsUUID()
+    supplierLocationId?: string
+
+    @IsEnum(PurchaseOrderType)
+    orderType!: PurchaseOrderType
+
+    @IsEnum(PaymentMode)
+    paymentMode!: PaymentMode
+
+    @IsEnum(PaymentTermType)
+    paymentTermType!: PaymentTermType
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    paymentTermDays?: number
+
+    @IsOptional()
+    @Type(() => Boolean)
+    @IsBoolean()
+    allowPartialPayment?: boolean
+
+    @IsDateString()
+    orderDate!: string
+
+    @IsOptional()
+    @IsDateString()
+    expectedDate?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({ each: true })
+    @Type(() => CreatePurchaseOrderLineDto)
+    lines!: CreatePurchaseOrderLineDto[]
 }

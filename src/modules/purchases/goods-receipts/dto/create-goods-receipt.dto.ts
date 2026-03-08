@@ -1,24 +1,38 @@
-// src/modules/purchases/goods-receipts/dto/create-goods-receipt.dto.ts
-import { IsDateString, IsOptional, IsString, IsUUID, IsNumber } from 'class-validator'
+import { IsDateString, IsInt, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
 
-export class CreateGoodsReceiptDto {
+export class CreateGoodsReceiptAutoConfirmDto {
     @IsUUID()
-    supplierCustomerId!: string
-
-    @IsUUID()
-    supplierLocationId!: string
+    purchaseOrderId: string
 
     @IsUUID()
-    productId!: string
+    purchaseOrderLineId: string
 
     @IsString()
-    receiptNo!: string
+    receiptNo: string
 
     @IsDateString()
-    receiptDate!: string
+    receiptDate: string
 
     @IsNumber()
-    qty!: number
+    @Min(0.0000001)
+    qty: number
+
+    @IsOptional()
+    @IsUUID()
+    supplierLocationId?: string
+
+    @IsOptional()
+    @IsUUID()
+    vehicleId?: string
+
+    @IsOptional()
+    @IsUUID()
+    driverId?: string
+
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    shippingFee?: number
 
     @IsOptional()
     @IsNumber()
@@ -31,24 +45,22 @@ export class CreateGoodsReceiptDto {
     @IsOptional()
     @IsNumber()
     standardQtyV15?: number
+}
 
+export class ListGoodsReceiptsQueryDto {
     @IsOptional()
-    @IsUUID()
-    vehicleId?: string
-
-    @IsOptional()
-    @IsUUID()
-    driverId?: string
-
-    @IsOptional()
-    @IsNumber()
-    shippingFee?: number
-
-    @IsOptional()
-    @IsUUID()
+    @IsString()
     purchaseOrderId?: string
 
     @IsOptional()
-    @IsUUID()
-    purchaseOrderLineId?: string
+    @IsString()
+    supplierCustomerId?: string
+
+    @IsOptional()
+    @IsInt()
+    page?: number
+
+    @IsOptional()
+    @IsInt()
+    limit?: number
 }

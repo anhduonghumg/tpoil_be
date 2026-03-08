@@ -1,154 +1,187 @@
-// src/modules/purchases/goods-receipts/goods-receipts.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { GoodsReceiptStatus, InventoryLedgerSourceType, PurchaseOrderStatus, Prisma } from '@prisma/client'
-import { InventoryService } from '../../inventory/inventory.service'
+import { Prisma, GoodsReceiptStatus, PurchaseOrderStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { CreateGoodsReceiptAutoConfirmDto, ListGoodsReceiptsQueryDto } from './dto/create-goods-receipt.dto'
 
 @Injectable()
 export class GoodsReceiptsService {
-    constructor(
-        private readonly prisma: PrismaService,
-        private readonly inventory: InventoryService,
-    ) {}
+    constructor(private readonly prisma: PrismaService) {}
 
-    async create(dto: {
-        supplierCustomerId: string
-        supplierLocationId: string
-        productId: string
-        receiptNo: string
-        receiptDate: string
-        qty: number
-        tempC?: number
-        density?: number
-        standardQtyV15?: number
-        vehicleId?: string
-        driverId?: string
-        shippingFee?: number
-        purchaseOrderId?: string
-        purchaseOrderLineId?: string
-    }) {
-        return this.prisma.goodsReceipt.create({
-            data: {
-                supplierCustomerId: dto.supplierCustomerId,
-                supplierLocationId: dto.supplierLocationId,
-                productId: dto.productId,
-                receiptNo: dto.receiptNo,
-                receiptDate: new Date(dto.receiptDate),
-                qty: new Prisma.Decimal(dto.qty),
-
-                tempC: dto.tempC == null ? null : new Prisma.Decimal(dto.tempC),
-                density: dto.density == null ? null : new Prisma.Decimal(dto.density),
-                standardQtyV15: dto.standardQtyV15 == null ? null : new Prisma.Decimal(dto.standardQtyV15),
-
-                vehicleId: dto.vehicleId ?? null,
-                driverId: dto.driverId ?? null,
-                shippingFee: dto.shippingFee == null ? new Prisma.Decimal(0) : new Prisma.Decimal(dto.shippingFee),
-
-                purchaseOrderId: dto.purchaseOrderId ?? null,
-                purchaseOrderLineId: dto.purchaseOrderLineId ?? null,
-
-                status: GoodsReceiptStatus.DRAFT,
-            },
-        })
+    private toDateOrThrow(value: string, code: string) {
+        const d = new Date(value)
+        if (Number.isNaN(d.getTime())) throw new BadRequestException(code)
+        return d
     }
 
-    async confirm(id: string, payload?: { note?: string }) {
-        try {
-            return await this.prisma.$transaction(async (tx) => {
-                const gr = await tx.goodsReceipt.findUnique({
-                    where: { id },
-                    include: {
-                        purchaseOrder: { include: { lines: true } },
-                        purchaseOrderLine: true,
-                        supplierLocation: true,
-                    },
-                })
-                if (!gr) throw new NotFoundException('GR_NOT_FOUND')
-                if (gr.status !== GoodsReceiptStatus.DRAFT) {
-                    throw new BadRequestException('GR_NOT_DRAFT')
-                }
-
-                if (gr.supplierLocation.supplierCustomerId !== gr.supplierCustomerId) {
-                    throw new BadRequestException('GR_LOCATION_NOT_BELONG_SUPPLIER')
-                }
-
-                if (gr.purchaseOrderLineId) {
-                    const pol = gr.purchaseOrderLine
-                    const po = gr.purchaseOrder
-
-                    if (!pol || !po) throw new BadRequestException('GR_INVALID_PO_LINK')
-
-                    if (![PurchaseOrderStatus.APPROVED, PurchaseOrderStatus.IN_PROGRESS].includes(po.status as any)) {
-                        throw new BadRequestException('PO_NOT_APPROVED')
-                    }
-
-                    if (pol.purchaseOrderId !== po.id) throw new BadRequestException('GR_INVALID_PO_LINE')
-
-                    const orderedQty = new Prisma.Decimal(pol.orderedQty)
-                    const withdrawnQty = new Prisma.Decimal(pol.withdrawnQty ?? 0)
-                    const grQty = new Prisma.Decimal(gr.qty)
-
-                    if (withdrawnQty.plus(grQty).greaterThan(orderedQty)) {
-                        throw new BadRequestException('PO_LINE_QTY_EXCEEDED')
-                    }
-                }
-
-                const confirmed = await tx.goodsReceipt.update({
-                    where: { id: gr.id },
-                    data: {
-                        status: GoodsReceiptStatus.CONFIRMED,
-                    },
-                })
-
-                await this.inventory.applyDeltaAndAppendLedger({
-                    tx,
-                    supplierLocationId: gr.supplierLocationId,
-                    productId: gr.productId,
-                    delta: { deltaPendingDocQty: gr.qty },
-                    sourceType: InventoryLedgerSourceType.GOODS_RECEIPT,
-                    sourceId: gr.id,
-                    occurredAt: gr.receiptDate,
-                    note: payload?.note ?? null,
-                })
-
-                if (gr.purchaseOrderLineId) {
-                    const poLine = await tx.purchaseOrderLine.update({
-                        where: { id: gr.purchaseOrderLineId },
-                        data: {
-                            withdrawnQty: { increment: gr.qty },
-                        },
-                    })
-
-                    if (gr.purchaseOrderId) {
-                        const po = await tx.purchaseOrder.findUnique({
-                            where: { id: gr.purchaseOrderId },
-                            include: { lines: true },
-                        })
-                        if (po) {
-                            const allDone = po.lines.every((l) => new Prisma.Decimal(l.withdrawnQty ?? 0).greaterThanOrEqualTo(new Prisma.Decimal(l.orderedQty)))
-
-                            await tx.purchaseOrder.update({
-                                where: { id: po.id },
-                                data: {
-                                    status: allDone ? PurchaseOrderStatus.COMPLETED : PurchaseOrderStatus.IN_PROGRESS,
-                                },
-                            })
-                        }
-                    }
-
-                    void poLine
-                }
-
-                return confirmed
+    private async assertLocationBelongsToSupplier(args: { supplierCustomerId: string; supplierLocationId: string }) {
+        const row = await this.prisma.supplierLocation.findFirst({
+            where: { id: args.supplierLocationId, supplierCustomerId: args.supplierCustomerId, isActive: true },
+            select: { id: true },
+        })
+        if (!row) {
+            throw new BadRequestException({
+                code: 'SUPPLIER_LOCATION_INVALID',
+                message: 'Kho NCC không hợp lệ hoặc không thuộc NCC đã chọn.',
+                supplierLocationId: args.supplierLocationId,
             })
-        } catch (e: any) {
-            if (e?.code === 'INVENTORY_NEGATIVE_PENDING') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_PENDING')
-            }
-            if (e?.code === 'INVENTORY_NEGATIVE_POSTED') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_POSTED')
-            }
-            throw e
         }
+    }
+
+    async list(q: ListGoodsReceiptsQueryDto) {
+        const page = Math.max(1, q.page ?? 1)
+        const limit = Math.min(200, Math.max(1, q.limit ?? 20))
+        const skip = (page - 1) * limit
+
+        const where: Prisma.GoodsReceiptWhereInput = {
+            purchaseOrderId: q.purchaseOrderId ?? undefined,
+            supplierCustomerId: q.supplierCustomerId ?? undefined,
+        }
+
+        const [items, total] = await this.prisma.$transaction([
+            this.prisma.goodsReceipt.findMany({
+                where,
+                orderBy: { receiptDate: 'desc' },
+                skip,
+                take: limit,
+                include: {
+                    supplierLocation: { select: { id: true, code: true, name: true } },
+                    product: { select: { id: true, code: true, name: true, uom: true } },
+                },
+            }),
+            this.prisma.goodsReceipt.count({ where }),
+        ])
+
+        return { items, total, page, limit }
+    }
+
+    async createAutoConfirm(dto: CreateGoodsReceiptAutoConfirmDto) {
+        const receiptNo = (dto.receiptNo ?? '').trim()
+        if (!receiptNo) throw new BadRequestException('RECEIPT_NO_REQUIRED')
+
+        const receiptDate = this.toDateOrThrow(dto.receiptDate, 'RECEIPT_DATE_INVALID')
+        const qty = Number(dto.qty) || 0
+        if (qty <= 0) throw new BadRequestException('QTY_INVALID')
+
+        const po = await this.prisma.purchaseOrder.findUnique({
+            where: { id: dto.purchaseOrderId },
+            include: { lines: true },
+        })
+
+        if (!po) throw new NotFoundException('PO_NOT_FOUND')
+        if (po.status !== PurchaseOrderStatus.APPROVED && po.status !== PurchaseOrderStatus.IN_PROGRESS) {
+            throw new BadRequestException('PO_NOT_APPROVED')
+        }
+
+        const line = po.lines.find((x) => x.id === dto.purchaseOrderLineId)
+        if (!line) throw new BadRequestException('PO_LINE_NOT_FOUND')
+
+        const headerLocId = po.supplierLocationId ?? null
+        const resolvedLocId = dto.supplierLocationId ?? line.supplierLocationId ?? headerLocId
+        if (!resolvedLocId) {
+            throw new BadRequestException({
+                code: 'SUPPLIER_LOCATION_REQUIRED',
+                message: 'Phiếu nhận hàng phải có kho nhận (từ dòng hàng / hoặc kho mặc định ở đầu PO).',
+            })
+        }
+
+        await this.assertLocationBelongsToSupplier({
+            supplierCustomerId: po.supplierCustomerId,
+            supplierLocationId: resolvedLocId,
+        })
+
+        const productId = line.productId
+
+        const result = await this.prisma.$transaction(async (tx) => {
+            const receipt = await tx.goodsReceipt.create({
+                data: {
+                    supplierCustomerId: po.supplierCustomerId,
+                    supplierLocationId: resolvedLocId,
+                    productId,
+                    receiptNo,
+                    receiptDate,
+                    qty: new Prisma.Decimal(qty),
+
+                    tempC: dto.tempC == null ? null : new Prisma.Decimal(dto.tempC),
+                    density: dto.density == null ? null : new Prisma.Decimal(dto.density),
+                    standardQtyV15: dto.standardQtyV15 == null ? null : new Prisma.Decimal(dto.standardQtyV15),
+
+                    vehicleId: dto.vehicleId ?? null,
+                    driverId: dto.driverId ?? null,
+                    shippingFee: dto.shippingFee == null ? new Prisma.Decimal(0) : new Prisma.Decimal(dto.shippingFee),
+
+                    status: GoodsReceiptStatus.CONFIRMED,
+
+                    purchaseOrderId: po.id,
+                    purchaseOrderLineId: line.id,
+                },
+                include: {
+                    supplierLocation: { select: { id: true, code: true, name: true } },
+                    product: { select: { id: true, code: true, name: true, uom: true } },
+                },
+            })
+
+            await tx.inventoryBalance.upsert({
+                where: { supplierLocationId_productId: { supplierLocationId: resolvedLocId, productId } },
+                create: {
+                    supplierLocationId: resolvedLocId,
+                    productId,
+                    physicalQty: new Prisma.Decimal(0),
+                    pendingDocQty: new Prisma.Decimal(0),
+                    postedQty: new Prisma.Decimal(0),
+                },
+                update: {},
+            })
+
+            await tx.inventoryBalance.update({
+                where: { supplierLocationId_productId: { supplierLocationId: resolvedLocId, productId } },
+                data: {
+                    physicalQty: { increment: new Prisma.Decimal(qty) },
+                    pendingDocQty: { increment: new Prisma.Decimal(qty) },
+                },
+            })
+
+            const bal = await tx.inventoryBalance.findUnique({
+                where: { supplierLocationId_productId: { supplierLocationId: resolvedLocId, productId } },
+                select: { physicalQty: true, pendingDocQty: true, postedQty: true },
+            })
+            if (!bal) throw new BadRequestException('INVENTORY_BALANCE_NOT_FOUND')
+
+            await tx.inventoryLedger.create({
+                data: {
+                    supplierLocationId: resolvedLocId,
+                    productId,
+
+                    deltaPhysicalQty: new Prisma.Decimal(qty),
+                    deltaPendingDocQty: new Prisma.Decimal(qty),
+                    deltaPostedQty: new Prisma.Decimal(0),
+
+                    afterPhysicalQty: bal.physicalQty,
+                    afterPendingDocQty: bal.pendingDocQty,
+                    afterPostedQty: bal.postedQty,
+
+                    sourceType: 'GOODS_RECEIPT',
+                    sourceId: receipt.id,
+                    note: `GR ${receiptNo}`,
+
+                    occurredAt: receiptDate,
+                },
+            })
+
+            await tx.purchaseOrderLine.update({
+                where: { id: line.id },
+                data: { withdrawnQty: { increment: new Prisma.Decimal(qty) } },
+            })
+
+            if (po.status === PurchaseOrderStatus.APPROVED) {
+                await tx.purchaseOrder.update({
+                    where: { id: po.id },
+                    data: { status: PurchaseOrderStatus.IN_PROGRESS },
+                })
+            }
+
+            return receipt
+        })
+
+        return { receipt: result }
     }
 }

@@ -19,7 +19,7 @@ export class PurchaseOrdersController {
 
     @Post()
     create(@Body() dto: CreatePurchaseOrderDto) {
-        return this.service.create(dto as any)
+        return this.service.create(dto)
     }
 
     @Post(':id/approve')

@@ -33,6 +33,7 @@ import { AppModule as AppFeatureModule } from './modules/app/app.module'
 import { MailModule } from './mail/mail.module'
 import { CronWebModule } from './modules/cron/cron-web.module'
 import { CronModule } from './modules/cron/cron.module'
+import { DevDriveTestModule } from './modules/test/dev-drive-test.module'
 
 @Module({
     imports: [
@@ -71,6 +72,8 @@ import { CronModule } from './modules/cron/cron.module'
         JobArtifactsModule,
         CronWebModule,
         CronModule,
+
+        DevDriveTestModule,
 
         MailModule,
     ],

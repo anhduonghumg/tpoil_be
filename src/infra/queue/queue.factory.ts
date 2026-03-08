@@ -28,7 +28,7 @@ export class QueueFactory implements OnModuleDestroy {
         if (!connection) {
             connection = createRedisConnection()
             this.workerConns.set(name, connection)
-            console.log(`📡 [QueueFactory] Created new Redis connection for Worker: ${name}`)
+            console.log(`[QueueFactory] Created new Redis connection for Worker: ${name}`)
         }
 
         return new Worker<TPayload, TResult, string>(name, processor, {

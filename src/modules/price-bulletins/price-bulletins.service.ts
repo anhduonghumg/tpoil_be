@@ -19,6 +19,7 @@ import { BackgroundJobsService } from '../background-jobs/background-jobs.servic
 import { PricePdfStorage } from './price-file.storage'
 import * as fs from 'fs/promises'
 import pdf = require('pdf-parse')
+import { Decimal } from '@prisma/client/runtime/library'
 // const pdfParse = require('pdf-parse')
 // const pdf = require('pdf-parse')
 // import dayjs from 'dayjs'
@@ -544,6 +545,71 @@ export class PriceBulletinsService {
             region: { code: region.code, name: region.name },
             bulletin: row.bulletin,
             price: row.price,
+        }
+    }
+
+    async quoteBatch(args: { productIds: string[]; regionCode: string; onDate?: string }) {
+        const regionCode = (args.regionCode ?? '').trim()
+        if (!regionCode) {
+            throw new BadRequestException({ code: 'REGION_CODE_REQUIRED', message: 'regionCode is required' })
+        }
+
+        const region = await this.prisma.priceRegion.findUnique({
+            where: { code: regionCode },
+            select: { id: true, code: true, name: true },
+        })
+        if (!region) throw new NotFoundException('PRICE_REGION_NOT_FOUND')
+
+        const on = args.onDate ? new Date(args.onDate) : new Date()
+        if (Number.isNaN(on.getTime())) throw new BadRequestException('INVALID_ON_DATE')
+
+        const rows = await this.prisma.priceBulletinItem.findMany({
+            where: {
+                productId: { in: args.productIds },
+                regionId: region.id,
+                bulletin: {
+                    is: {
+                        status: PriceBulletinStatus.PUBLISHED,
+                        effectiveFrom: { lte: on },
+                        OR: [{ effectiveTo: null }, { effectiveTo: { gt: on } }],
+                    },
+                },
+            },
+            orderBy: [{ bulletin: { effectiveFrom: 'desc' } }],
+            select: {
+                productId: true,
+                price: true,
+                bulletin: {
+                    select: {
+                        id: true,
+                        publishedAt: true,
+                        effectiveFrom: true,
+                        effectiveTo: true,
+                    },
+                },
+            },
+        })
+
+        const priceMap = new Map<string, { price: Decimal; bulletin: any }>()
+        for (const r of rows) {
+            if (!priceMap.has(r.productId)) {
+                priceMap.set(r.productId, {
+                    price: r.price,
+                    bulletin: r.bulletin,
+                })
+            }
+        }
+
+        const firstBulletin = rows[0]?.bulletin
+
+        return {
+            ok: true,
+            region: { code: region.code, name: region.name },
+            bulletin: firstBulletin ?? null,
+            items: args.productIds.map((pid) => ({
+                productId: pid,
+                price: priceMap.get(pid)?.price ?? null,
+            })),
         }
     }
 

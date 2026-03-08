@@ -16,6 +16,7 @@ generator client {
 
 enum BackgroundJobType {
   PRICE_BULLETIN_IMPORT_PDF
+  SUPPLIER_INVOICE_IMPORT_PDF
 }
 
 enum BackgroundJobStatus {
@@ -985,6 +986,7 @@ model SupplierLocation {
   costLayers           InventoryCostLayer[]
   inventoryAdjustments InventoryAdjustment[]
   purchaseOrders       PurchaseOrder[]
+  purchaseOrderLines   PurchaseOrderLine[]
 
   @@unique([supplierCustomerId, code])
   @@index([supplierCustomerId])
@@ -1093,9 +1095,14 @@ model PurchaseOrderLine {
   purchaseOrderId String @db.Uuid
   productId       String @db.Uuid
 
+  supplierLocationId String?           @db.Uuid
+  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
   orderedQty Decimal  @db.Decimal(18, 3)
   unitPrice  Decimal? @db.Decimal(18, 2)
   taxRate    Decimal? @db.Decimal(5, 2)
+
+  discountAmount Decimal @default(0) @db.Decimal(18, 2)
 
   withdrawnQty Decimal @default(0) @db.Decimal(18, 3)
 
@@ -1109,6 +1116,7 @@ model PurchaseOrderLine {
 
   @@index([purchaseOrderId])
   @@index([productId])
+  @@index([supplierLocationId, productId])
 }
 
 // ======================================================
@@ -1663,7 +1671,6 @@ model PurchasePricingPriceDay {
   @@unique([stageId, quoteDate])
 }
 
-// FIFO Layer (giá vốn theo lô nhập) - tạo khi FINAL/POSTED tùy flow TERM
 model InventoryCostLayer {
   id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
 

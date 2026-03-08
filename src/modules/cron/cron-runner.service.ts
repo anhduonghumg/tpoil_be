@@ -1,8 +1,8 @@
 // src/modules/cron/cron-runner.service.ts
 import { Injectable, Logger } from '@nestjs/common'
-import { PrismaService } from '../../infra/prisma/prisma.service'
 import { CronJobStatus, CronJobType, Prisma } from '@prisma/client'
 import { startOfDay } from 'src/common/utils/date.utils'
+import { PrismaService } from 'src/infra/prisma/prisma.service'
 
 type JsonValue = Prisma.InputJsonValue
 const toJson = (v: unknown): JsonValue | undefined => {
