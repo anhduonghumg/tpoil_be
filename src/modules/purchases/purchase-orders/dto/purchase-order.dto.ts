@@ -8,6 +8,13 @@ export enum PaymentTermType {
     NET_DAYS = 'NET_DAYS',
 }
 
+export enum PurchaseOrderStatus {
+    DRAFT = 'DRAFT',
+    APPROVED = 'APPROVED',
+    IN_PROGRESS = 'IN_PROGRESS',
+    COMPLETED = 'COMPLETED',
+    CANCELLED = 'CANCELLED',
+}
 export class CreatePurchaseOrderLineDto {
     @IsString()
     productId!: string
@@ -56,6 +63,10 @@ export class ListPurchaseOrdersQueryDto {
     @IsOptional()
     @IsEnum(PaymentMode)
     paymentMode?: PaymentMode
+
+    @IsOptional()
+    @IsEnum(PurchaseOrderStatus)
+    status?: PurchaseOrderStatus
 
     @IsOptional()
     @IsDateString()

@@ -60,6 +60,8 @@ export class PurchaseOrdersService {
         orderDate: string
         expectedDate?: string
         note?: string
+        totalQty?: number
+        totalAmount?: number
         lines: Array<{
             productId: string
             orderedQty: number
@@ -137,11 +139,12 @@ export class PurchaseOrdersService {
                 allowPartialPayment,
                 orderType: dto.orderType,
                 paymentMode: dto.paymentMode,
-
                 orderDate,
                 expectedDate,
                 note: dto.note?.trim() || null,
                 status: PurchaseOrderStatus.DRAFT,
+                totalQty: dto.totalQty ?? lines.reduce((sum, l) => sum + l.orderedQty, 0),
+                totalAmount: dto.totalAmount ?? lines.reduce((sum, l) => sum + (l.unitPrice ?? 0) * l.orderedQty - l.discountAmount, 0),
 
                 lines: {
                     create: lines.map((l) => ({
@@ -151,7 +154,6 @@ export class PurchaseOrdersService {
                         unitPrice: l.unitPrice == null ? null : new Prisma.Decimal(l.unitPrice),
                         taxRate: l.taxRate == null ? null : new Prisma.Decimal(l.taxRate),
                         discountAmount: new Prisma.Decimal(l.discountAmount ?? 0),
-
                         withdrawnQty: new Prisma.Decimal(0),
                     })),
                 },
@@ -237,7 +239,17 @@ export class PurchaseOrdersService {
         return po
     }
 
-    async list(q: { keyword?: string; supplierCustomerId?: string; orderType?: any; paymentMode?: any; dateFrom?: string; dateTo?: string; page?: number; limit?: number }) {
+    async list(q: {
+        keyword?: string
+        supplierCustomerId?: string
+        orderType?: any
+        status?: PurchaseOrderStatus
+        paymentMode?: any
+        dateFrom?: string
+        dateTo?: string
+        page?: number
+        limit?: number
+    }) {
         const page = Math.max(1, q.page ?? 1)
         const limit = Math.min(200, Math.max(1, q.limit ?? 20))
         const skip = (page - 1) * limit
@@ -246,6 +258,7 @@ export class PurchaseOrdersService {
             supplierCustomerId: q.supplierCustomerId ?? undefined,
             orderType: q.orderType ?? undefined,
             paymentMode: q.paymentMode ?? undefined,
+            status: q.status ?? undefined,
             ...(q.dateFrom || q.dateTo
                 ? {
                       orderDate: {
