@@ -1,6 +1,6 @@
 // src/modules/purchases/purchase-orders/purchase-orders.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma, PurchaseOrderStatus } from '@prisma/client'
+import { Prisma, PurchaseOrderStatus, SupplierInvoiceStatus } from '@prisma/client'
 import { ContractCheckService } from './contract-check.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PaymentTermType } from './dto/purchase-order.dto'
@@ -207,12 +207,30 @@ export class PurchaseOrdersService {
     async cancel(id: string) {
         const po = await this.prisma.purchaseOrder.findUnique({
             where: { id },
-            include: { receipts: true },
+            include: {
+                receipts: true,
+                // invoices: true,        // mở ra khi đã có relation
+                // settlements: true,     // mở ra khi đã có relation
+            },
         })
-        if (!po) throw new NotFoundException('PO_NOT_FOUND')
+
+        if (!po) {
+            throw new NotFoundException('PO_NOT_FOUND')
+        }
+
+        if (po.status === PurchaseOrderStatus.CANCELLED) {
+            throw new BadRequestException('PO_ALREADY_CANCELLED')
+        }
+
+        if (po.status === PurchaseOrderStatus.COMPLETED) {
+            throw new BadRequestException('PO_ALREADY_COMPLETED')
+        }
 
         const hasConfirmedReceipt = (po.receipts ?? []).some((r) => r.status === 'CONFIRMED')
-        if (hasConfirmedReceipt) throw new BadRequestException('PO_HAS_CONFIRMED_RECEIPTS')
+
+        if (hasConfirmedReceipt) {
+            throw new BadRequestException('PO_HAS_CONFIRMED_RECEIPTS')
+        }
 
         return this.prisma.purchaseOrder.update({
             where: { id },
@@ -225,8 +243,23 @@ export class PurchaseOrdersService {
             where: { id },
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
-                supplierLocation: { select: { id: true, code: true, name: true } }, // header default
+                supplierLocation: { select: { id: true, code: true, name: true } },
                 receipts: true,
+                supplierInvoices: {
+                    where: {
+                        status: { not: SupplierInvoiceStatus.VOID },
+                    },
+                    orderBy: { createdAt: 'desc' },
+                    select: {
+                        id: true,
+                        invoiceNo: true,
+                        status: true,
+                        createdAt: true,
+                        sourceFileName: true,
+                        sourceFileUrl: true,
+                        sourceFileChecksum: true,
+                    },
+                },
                 lines: {
                     include: {
                         product: { select: { id: true, code: true, name: true, uom: true } },
@@ -294,6 +327,16 @@ export class PurchaseOrdersService {
                     createdAt: true,
                     updatedAt: true,
                     supplier: { select: { id: true, code: true, name: true } },
+
+                    receipts: {
+                        where: { status: 'CONFIRMED' },
+                        select: { id: true },
+                    },
+
+                    supplierInvoices: {
+                        where: { status: { not: SupplierInvoiceStatus.VOID } },
+                        select: { id: true, status: true },
+                    },
                 },
             }),
             this.prisma.purchaseOrder.count({ where }),

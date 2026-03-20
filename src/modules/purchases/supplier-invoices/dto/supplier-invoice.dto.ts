@@ -1,4 +1,3 @@
-// src/modules/purchases/supplier-invoices/dto/supplier-invoice.dto.ts
 import { ArrayMinSize, IsArray, IsDateString, IsNumber, IsOptional, IsString, IsUUID, ValidateNested } from 'class-validator'
 import { Type } from 'class-transformer'
 
@@ -41,11 +40,16 @@ export class CreateSupplierInvoiceDto {
     @IsUUID()
     supplierCustomerId!: string
 
+    @IsOptional()
+    @IsUUID()
+    purchaseOrderId?: string
+
     @IsString()
     invoiceNo!: string
 
+    @IsOptional()
     @IsString()
-    invoiceSymbol!: string
+    invoiceSymbol?: string
 
     @IsOptional()
     @IsString()
@@ -57,6 +61,22 @@ export class CreateSupplierInvoiceDto {
     @IsOptional()
     @IsString()
     note?: string
+
+    @IsOptional()
+    @IsString()
+    sourceFileId?: string
+
+    @IsOptional()
+    @IsString()
+    sourceFileUrl?: string
+
+    @IsOptional()
+    @IsString()
+    sourceFileName?: string
+
+    @IsOptional()
+    @IsString()
+    sourceFileChecksum?: string
 
     @IsArray()
     @ArrayMinSize(1)

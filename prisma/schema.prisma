@@ -1084,6 +1084,8 @@ model PurchaseOrder {
   lines    PurchaseOrderLine[]
   receipts GoodsReceipt[]
 
+  supplierInvoices SupplierInvoice[] @relation("supplierInvoices")
+
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
@@ -1191,10 +1193,17 @@ model SupplierInvoice {
   payableSettlementId String?             @db.Uuid
   payableSettlement   SupplierSettlement? @relation(fields: [payableSettlementId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
+  sourceFileId       String?
+  sourceFileUrl      String?
+  sourceFileName     String?
+  sourceFileChecksum String?
+
   lines SupplierInvoiceLine[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  purchaseOrder   PurchaseOrder? @relation("supplierInvoices", fields: [purchaseOrderId], references: [id])
+  purchaseOrderId String?        @db.Uuid
 
   @@unique([supplierCustomerId, invoiceSymbol, invoiceNo])
   @@index([invoiceDate])
