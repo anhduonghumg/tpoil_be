@@ -39,6 +39,7 @@ import { SupplierLocationsModule } from './modules/supplier-locations/supplier-l
 import { PriceBulletinsModule } from './modules/price-bulletins/price-bulletins.module'
 import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.module'
 import { JobArtifactsModule } from './modules/job-artifacts/job-artifacts.module'
+import { BankingModule } from './modules/banking/banking.module'
 
 @Module({
     imports: [
@@ -82,6 +83,7 @@ import { JobArtifactsModule } from './modules/job-artifacts/job-artifacts.module
         PriceBulletinsModule,
         BackgroundJobsModule,
         JobArtifactsModule,
+        BankingModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],

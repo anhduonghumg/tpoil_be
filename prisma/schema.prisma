@@ -1491,6 +1491,8 @@ model BankStatementImport {
   template         BankImportTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   bankTransactions BankTransaction[]
 
+  createdBy String? @db.Uuid
+
   @@unique([bankAccountId, fileChecksum])
   @@index([bankAccountId, status])
   @@index([createdAt])
@@ -1514,7 +1516,10 @@ model BankTransaction {
 
   matchStatus BankTxnMatchStatus @default(UNMATCHED)
 
-  raw       Json?
+  raw Json?
+
+  postedDate DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1522,6 +1527,10 @@ model BankTransaction {
   import      BankStatementImport? @relation(fields: [importId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   allocations PaymentAllocation[]
+
+  isConfirmed Boolean   @default(false)
+  confirmedAt DateTime?
+  confirmedBy String?   @db.Uuid
 
   @@unique([bankAccountId, externalRef])
   @@unique([bankAccountId, fingerprint])
@@ -1541,6 +1550,8 @@ model PaymentAllocation {
   isAuto Boolean @default(false)
   score  Int?
   note   String?
+
+  sortOrder Int? @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
