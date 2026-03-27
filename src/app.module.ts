@@ -40,6 +40,7 @@ import { PriceBulletinsModule } from './modules/price-bulletins/price-bulletins.
 import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.module'
 import { JobArtifactsModule } from './modules/job-artifacts/job-artifacts.module'
 import { BankingModule } from './modules/banking/banking.module'
+import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module'
 
 @Module({
     imports: [
@@ -73,7 +74,6 @@ import { BankingModule } from './modules/banking/banking.module'
         AppLoggingModule,
         CronModule,
         MailModule,
-        BankImportsModule,
         PurchaseOrdersModule,
         GoodsReceiptsModule,
         SupplierInvoicesModule,
@@ -84,6 +84,8 @@ import { BankingModule } from './modules/banking/banking.module'
         BackgroundJobsModule,
         JobArtifactsModule,
         BankingModule,
+        BankImportsModule,
+        BankAccountsModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],

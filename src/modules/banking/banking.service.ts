@@ -6,6 +6,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service'
 import { QueryBankTransactionsDto } from './dto/query-bank-transactions.dto'
 import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
+import { BankImportTemplatesService } from '../bank-import-templates/bank-import-templates.service'
 
 type ParsedBankRow = {
     txnDate: Date
@@ -20,7 +21,10 @@ type ParsedBankRow = {
 
 @Injectable()
 export class BankingService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly bankImportTemplatesService: BankImportTemplatesService,
+    ) {}
 
     async listTransactions(query: QueryBankTransactionsDto) {
         const page = query.page ?? 1
@@ -374,14 +378,18 @@ export class BankingService {
         })
     }
 
+    // async listTemplates(bankCode?: string) {
+    //     return this.prisma.bankImportTemplate.findMany({
+    //         where: {
+    //             isActive: true,
+    //             ...(bankCode ? { bankCode } : {}),
+    //         },
+    //         orderBy: [{ bankCode: 'asc' }, { name: 'asc' }, { version: 'desc' }],
+    //     })
+    // }
+
     async listTemplates(bankCode?: string) {
-        return this.prisma.bankImportTemplate.findMany({
-            where: {
-                isActive: true,
-                ...(bankCode ? { bankCode } : {}),
-            },
-            orderBy: [{ bankCode: 'asc' }, { name: 'asc' }, { version: 'desc' }],
-        })
+        return this.bankImportTemplatesService.listActive(bankCode)
     }
 
     async getImportDetail(id: string) {

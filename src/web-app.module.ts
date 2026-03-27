@@ -34,6 +34,9 @@ import { MailModule } from './mail/mail.module'
 import { CronWebModule } from './modules/cron/cron-web.module'
 import { CronModule } from './modules/cron/cron.module'
 import { DevDriveTestModule } from './modules/test/dev-drive-test.module'
+import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module'
+import { BankingModule } from './modules/banking/banking.module'
+import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-import-templates.module'
 
 @Module({
     imports: [
@@ -62,7 +65,10 @@ import { DevDriveTestModule } from './modules/test/dev-drive-test.module'
         SupplierLocationsModule,
         PriceBulletinsModule,
 
+        BankingModule,
         BankImportsModule,
+        BankAccountsModule,
+        BankImportTemplatesModule,
         PurchaseOrdersModule,
         GoodsReceiptsModule,
         SupplierInvoicesModule,
