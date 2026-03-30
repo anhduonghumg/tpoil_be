@@ -150,6 +150,7 @@ export class BankingService {
         }
     }
 
+    /*
     async getMatchSuggestions(id: string) {
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id },
@@ -247,6 +248,118 @@ export class BankingService {
             })
             .filter(Boolean)
             .sort((a: any, b: any) => b.score - a.score || a.remainingAmount - b.remainingAmount)
+
+        return {
+            transaction: {
+                id: txn.id,
+                amount: Number(txn.amount),
+                direction: txn.direction,
+                description: txn.description,
+                counterpartyName: txn.counterpartyName,
+                counterpartyAcc: txn.counterpartyAcc,
+                allocatedAmount,
+                remainingAmount,
+            },
+            suggestions,
+        }
+    }
+    */
+
+    async getMatchSuggestions(id: string) {
+        const txn = await this.prisma.bankTransaction.findUnique({
+            where: { id },
+            include: {
+                allocations: true,
+            },
+        })
+
+        if (!txn) {
+            throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        }
+
+        const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
+        const remainingAmount = Number(txn.amount) - allocatedAmount
+
+        const settlements = await this.prisma.supplierSettlement.findMany({
+            where: {
+                status: {
+                    in: [SettlementStatus.OPEN, SettlementStatus.PARTIAL],
+                },
+                ...(txn.direction === BankTxnDirection.OUT ? {} : { type: 'ADVANCE' }),
+            },
+            include: {
+                supplier: {
+                    select: {
+                        id: true,
+                        code: true,
+                        name: true,
+                        taxCode: true,
+                    },
+                },
+                invoices: {
+                    select: {
+                        id: true,
+                        invoiceNo: true,
+                        invoiceSymbol: true,
+                        invoiceDate: true,
+                        totalAmount: true,
+                    },
+                },
+            },
+            orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+            take: 50,
+        })
+
+        const normalizedDesc = this.normalizeText(txn.description)
+        const normalizedCounterpartyName = this.normalizeText(txn.counterpartyName)
+        const txnDate = txn.txnDate ? new Date(txn.txnDate) : undefined
+
+        const suggestions = settlements
+            .map((s) => {
+                const remainingSettlement = Number(s.amountTotal) - Number(s.amountSettled)
+
+                if (remainingSettlement <= 0) return null
+
+                const score = this.computeSettlementMatchScore({
+                    txnAmount: Number(txn.amount),
+                    txnRemainingAmount: remainingAmount,
+                    txnDate,
+                    txnDescription: normalizedDesc,
+                    txnCounterpartyName: normalizedCounterpartyName,
+                    txnCounterpartyAcc: txn.counterpartyAcc,
+                    settlementRemainingAmount: remainingSettlement,
+                    supplierName: s.supplier?.name,
+                    invoices: s.invoices.map((inv) => ({
+                        invoiceNo: inv.invoiceNo,
+                        invoiceSymbol: inv.invoiceSymbol,
+                        invoiceDate: inv.invoiceDate,
+                    })),
+                })
+
+                return {
+                    settlementId: s.id,
+                    supplier: s.supplier,
+                    invoices: s.invoices.map((inv) => ({
+                        ...inv,
+                        totalAmount: inv.totalAmount ? Number(inv.totalAmount) : 0,
+                    })),
+                    amountTotal: Number(s.amountTotal),
+                    amountSettled: Number(s.amountSettled),
+                    remainingAmount: remainingSettlement,
+                    dueDate: s.dueDate,
+                    score,
+                    suggestedAllocatedAmount: this.computeSuggestedAllocatedAmount(remainingAmount, remainingSettlement),
+                }
+            })
+            .filter(Boolean)
+            .sort((a: any, b: any) => {
+                if (b.score !== a.score) return b.score - a.score
+
+                const aDiff = Math.abs(remainingAmount - a.remainingAmount)
+                const bDiff = Math.abs(remainingAmount - b.remainingAmount)
+
+                return aDiff - bDiff
+            })
 
         return {
             transaction: {
@@ -378,16 +491,6 @@ export class BankingService {
         })
     }
 
-    // async listTemplates(bankCode?: string) {
-    //     return this.prisma.bankImportTemplate.findMany({
-    //         where: {
-    //             isActive: true,
-    //             ...(bankCode ? { bankCode } : {}),
-    //         },
-    //         orderBy: [{ bankCode: 'asc' }, { name: 'asc' }, { version: 'desc' }],
-    //     })
-    // }
-
     async listTemplates(bankCode?: string) {
         return this.bankImportTemplatesService.listActive(bankCode)
     }
@@ -463,8 +566,6 @@ export class BankingService {
                 createdBy: null,
             },
         })
-
-        const t0 = Date.now()
 
         try {
             const parsed = await this.parseXlsxWithExcelJS(file.buffer, template?.columnMap, template?.normalizeRule)
@@ -855,5 +956,237 @@ export class BankingService {
         ].join('|')
 
         return crypto.createHash('sha256').update(payload).digest('hex')
+    }
+
+    // private computeSettlementMatchScore(input: {
+    //     txnAmount: number
+    //     txnRemainingAmount: number
+    //     txnDate?: Date
+    //     txnDescription?: string
+    //     txnCounterpartyName?: string
+    //     txnCounterpartyAcc?: string | null
+    //     settlementRemainingAmount: number
+    //     supplierName?: string | null
+    //     invoices: Array<{
+    //         invoiceNo?: string | null
+    //         invoiceSymbol?: string | null
+    //         invoiceDate?: Date | null
+    //     }>
+    // }) {
+    //     let score = 0
+
+    //     const txnAmount = Number(input.txnAmount || 0)
+    //     const txnRemainingAmount = Number(input.txnRemainingAmount || 0)
+    //     const settlementRemainingAmount = Number(input.settlementRemainingAmount || 0)
+
+    //     // =========================
+    //     // 1. Amount match (ưu tiên cao nhất)
+    //     // =========================
+    //     const diff = Math.abs(txnRemainingAmount - settlementRemainingAmount)
+
+    //     if (diff === 0) {
+    //         score += 60
+    //     } else if (diff <= 1000) {
+    //         score += 55
+    //     } else if (txnRemainingAmount > 0) {
+    //         const ratio = diff / txnRemainingAmount
+    //         if (ratio <= 0.01) score += 45
+    //         else if (ratio <= 0.03) score += 30
+    //         else if (ratio <= 0.05) score += 15
+    //     }
+
+    //     // Match theo tổng transaction nếu transaction đã có phân bổ một phần
+    //     if (txnAmount > 0 && txnAmount !== txnRemainingAmount) {
+    //         const diffByTotal = Math.abs(txnAmount - settlementRemainingAmount)
+    //         if (diffByTotal === 0) score += 8
+    //         else if (diffByTotal <= 1000) score += 6
+    //     }
+
+    //     // =========================
+    //     // 2. Supplier / counterparty name
+    //     // =========================
+    //     const supplierName = this.normalizeCompanyName(input.supplierName)
+    //     const counterpartyName = this.normalizeCompanyName(input.txnCounterpartyName)
+
+    //     if (supplierName && counterpartyName) {
+    //         if (counterpartyName === supplierName) {
+    //             score += 18
+    //         } else if (counterpartyName.includes(supplierName) || supplierName.includes(counterpartyName)) {
+    //             score += 12
+    //         }
+    //     }
+
+    //     // =========================
+    //     // 3. Invoice number / symbol in description
+    //     // =========================
+    //     const desc = input.txnDescription || ''
+    //     for (const inv of input.invoices) {
+    //         const invoiceNo = this.normalizeText(inv.invoiceNo)
+    //         const invoiceSymbol = this.normalizeText(inv.invoiceSymbol)
+
+    //         if (invoiceNo && desc.includes(invoiceNo)) score += 20
+    //         if (invoiceSymbol && desc.includes(invoiceSymbol)) score += 10
+    //     }
+
+    //     // =========================
+    //     // 4. Time proximity
+    //     // =========================
+    //     if (input.txnDate) {
+    //         let bestDaysDiff: number | null = null
+
+    //         for (const inv of input.invoices) {
+    //             if (!inv.invoiceDate) continue
+
+    //             const invDate = new Date(inv.invoiceDate)
+    //             const days = Math.abs((input.txnDate.getTime() - invDate.getTime()) / (1000 * 60 * 60 * 24))
+
+    //             if (bestDaysDiff === null || days < bestDaysDiff) {
+    //                 bestDaysDiff = days
+    //             }
+    //         }
+
+    //         if (bestDaysDiff !== null) {
+    //             if (bestDaysDiff <= 3) score += 10
+    //             else if (bestDaysDiff <= 7) score += 6
+    //             else if (bestDaysDiff <= 15) score += 3
+    //         }
+    //     }
+
+    //     // =========================
+    //     // 5. Weak fallback when no description
+    //     // =========================
+    //     if (!desc && supplierName) {
+    //         score += 3
+    //     }
+
+    //     return Math.min(score, 100)
+    // }
+
+    private computeSuggestedAllocatedAmount(txnRemainingAmount: number, settlementRemainingAmount: number) {
+        return Math.min(Number(txnRemainingAmount || 0), Number(settlementRemainingAmount || 0))
+    }
+
+    private computeSettlementMatchScore(input: {
+        txnAmount: number
+        txnRemainingAmount: number
+        txnDate?: Date
+        txnDescription?: string
+        txnCounterpartyName?: string
+        txnCounterpartyAcc?: string | null
+        settlementRemainingAmount: number
+        supplierName?: string | null
+        invoices: Array<{
+            invoiceNo?: string | null
+            invoiceSymbol?: string | null
+            invoiceDate?: Date | null
+        }>
+    }) {
+        let score = 0
+
+        const txnAmount = Number(input.txnAmount || 0)
+        const txnRemainingAmount = Number(input.txnRemainingAmount || 0)
+        const settlementRemainingAmount = Number(input.settlementRemainingAmount || 0)
+
+        // =========================
+        // 1. Amount match (ưu tiên cao nhất)
+        // =========================
+        const diff = Math.abs(txnRemainingAmount - settlementRemainingAmount)
+
+        if (diff === 0) {
+            score += 60
+        } else if (diff <= 1000) {
+            score += 55
+        } else if (txnRemainingAmount > 0) {
+            const ratio = diff / txnRemainingAmount
+            if (ratio <= 0.01) score += 45
+            else if (ratio <= 0.03) score += 30
+            else if (ratio <= 0.05) score += 15
+        }
+
+        // Match theo tổng transaction nếu transaction đã có phân bổ một phần
+        if (txnAmount > 0 && txnAmount !== txnRemainingAmount) {
+            const diffByTotal = Math.abs(txnAmount - settlementRemainingAmount)
+            if (diffByTotal === 0) score += 8
+            else if (diffByTotal <= 1000) score += 6
+        }
+
+        // =========================
+        // 2. Supplier / counterparty name
+        // =========================
+        const supplierName = this.normalizeCompanyName(input.supplierName)
+        const counterpartyName = this.normalizeCompanyName(input.txnCounterpartyName)
+
+        if (supplierName && counterpartyName) {
+            if (counterpartyName === supplierName) {
+                score += 18
+            } else if (counterpartyName.includes(supplierName) || supplierName.includes(counterpartyName)) {
+                score += 12
+            }
+        }
+
+        // =========================
+        // 3. Invoice number / symbol in description
+        // =========================
+        const desc = input.txnDescription || ''
+        for (const inv of input.invoices) {
+            const invoiceNo = this.normalizeText(inv.invoiceNo)
+            const invoiceSymbol = this.normalizeText(inv.invoiceSymbol)
+
+            if (invoiceNo && desc.includes(invoiceNo)) score += 20
+            if (invoiceSymbol && desc.includes(invoiceSymbol)) score += 10
+        }
+
+        // =========================
+        // 4. Time proximity
+        // =========================
+        if (input.txnDate) {
+            let bestDaysDiff: number | null = null
+
+            for (const inv of input.invoices) {
+                if (!inv.invoiceDate) continue
+
+                const invDate = new Date(inv.invoiceDate)
+                const days = Math.abs((input.txnDate.getTime() - invDate.getTime()) / (1000 * 60 * 60 * 24))
+
+                if (bestDaysDiff === null || days < bestDaysDiff) {
+                    bestDaysDiff = days
+                }
+            }
+
+            if (bestDaysDiff !== null) {
+                if (bestDaysDiff <= 3) score += 10
+                else if (bestDaysDiff <= 7) score += 6
+                else if (bestDaysDiff <= 15) score += 3
+            }
+        }
+
+        // =========================
+        // 5. Weak fallback when no description
+        // =========================
+        if (!desc && supplierName) {
+            score += 3
+        }
+
+        return Math.min(score, 100)
+    }
+
+    private normalizeCompanyName(input?: string | null): string {
+        const s = this.normalizeText(input)
+        if (!s) return ''
+
+        return s
+            .replace(/\bcong ty\b/g, '')
+            .replace(/\bco\b/g, '')
+            .replace(/\bltd\b/g, '')
+            .replace(/\btrach nhiem huu han\b/g, '')
+            .replace(/\btnhh\b/g, '')
+            .replace(/\bmot thanh vien\b/g, '')
+            .replace(/\bmtv\b/g, '')
+            .replace(/\bco phan\b/g, '')
+            .replace(/\bcp\b/g, '')
+            .replace(/&/g, ' ')
+            .replace(/[.,\-_/]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
     }
 }

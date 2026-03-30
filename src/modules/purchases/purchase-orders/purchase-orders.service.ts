@@ -62,6 +62,12 @@ export class PurchaseOrdersService {
         note?: string
         totalQty?: number
         totalAmount?: number
+        paymentPlans?: Array<{
+            dueDate: string
+            amount: number
+            note?: string
+            sortOrder?: number
+        }>
         lines: Array<{
             productId: string
             orderedQty: number
@@ -89,6 +95,32 @@ export class PurchaseOrdersService {
             paymentTermDays = null
         }
 
+        const rawPaymentPlans = Array.isArray(dto.paymentPlans) ? dto.paymentPlans : []
+
+        const paymentPlans =
+            dto.paymentMode === 'POSTPAID'
+                ? rawPaymentPlans
+                      .map((p, index) => ({
+                          dueDate: this.toDateOrThrow(p.dueDate, 'PAYMENT_PLAN_DUE_DATE_INVALID'),
+                          amount: Number(p.amount) || 0,
+                          note: p.note?.trim() || null,
+                          sortOrder: p.sortOrder ?? index,
+                      }))
+                      .filter((p) => p.amount > 0)
+                : []
+
+        if (dto.paymentMode === 'POSTPAID') {
+            if (!paymentPlans.length) {
+                throw new BadRequestException('PAYMENT_PLANS_REQUIRED')
+            }
+
+            for (const p of paymentPlans) {
+                if (p.dueDate.getTime() < orderDate.getTime()) {
+                    throw new BadRequestException('PAYMENT_PLAN_DUE_DATE_BEFORE_ORDER_DATE')
+                }
+            }
+        }
+
         const rawLines = Array.isArray(dto.lines) ? dto.lines : []
         if (!rawLines.length) throw new BadRequestException('LINES_REQUIRED')
 
@@ -104,6 +136,36 @@ export class PurchaseOrdersService {
             .filter((l) => Boolean(l.productId) && l.orderedQty > 0)
 
         if (!lines.length) throw new BadRequestException('LINES_INVALID')
+
+        const computedTotalQty = dto.totalQty ?? lines.reduce((sum, l) => sum + l.orderedQty, 0)
+
+        const computedTotalAmount =
+            dto.totalAmount ??
+            lines.reduce((sum, l) => {
+                const qty = l.orderedQty || 0
+                const unitPrice = l.unitPrice ?? 0
+                const unitDiscount = l.discountAmount ?? 0
+                const taxRate = l.taxRate ?? 0
+
+                const lineNet = qty * (unitPrice - unitDiscount)
+                const lineTotal = lineNet * (1 + taxRate / 100)
+
+                return sum + lineTotal
+            }, 0)
+
+        if (dto.paymentMode === 'POSTPAID') {
+            const totalPlanned = paymentPlans.reduce((sum, p) => sum + p.amount, 0)
+            const diff = Math.abs(totalPlanned - computedTotalAmount)
+
+            if (diff > 0.01) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_TOTAL_MISMATCH',
+                    message: 'Tổng kế hoạch thanh toán phải bằng tổng giá trị đơn hàng.',
+                    totalPlanned,
+                    totalAmount: computedTotalAmount,
+                })
+            }
+        }
 
         const headerLocId = dto.supplierLocationId ?? null
 
@@ -143,9 +205,16 @@ export class PurchaseOrdersService {
                 expectedDate,
                 note: dto.note?.trim() || null,
                 status: PurchaseOrderStatus.DRAFT,
-                totalQty: dto.totalQty ?? lines.reduce((sum, l) => sum + l.orderedQty, 0),
-                totalAmount: dto.totalAmount ?? lines.reduce((sum, l) => sum + (l.unitPrice ?? 0) * l.orderedQty - l.discountAmount, 0),
-
+                totalQty: computedTotalQty,
+                totalAmount: computedTotalAmount,
+                paymentPlans: {
+                    create: paymentPlans.map((p) => ({
+                        dueDate: p.dueDate,
+                        amount: new Prisma.Decimal(p.amount),
+                        note: p.note,
+                        sortOrder: p.sortOrder,
+                    })),
+                },
                 lines: {
                     create: lines.map((l) => ({
                         productId: l.productId,
@@ -161,6 +230,9 @@ export class PurchaseOrdersService {
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
                 supplierLocation: { select: { id: true, code: true, name: true } },
+                paymentPlans: {
+                    orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
+                },
                 lines: {
                     include: {
                         supplierLocation: { select: { id: true, code: true, name: true } },
@@ -259,6 +331,9 @@ export class PurchaseOrdersService {
                         sourceFileUrl: true,
                         sourceFileChecksum: true,
                     },
+                },
+                paymentPlans: {
+                    orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
                 },
                 lines: {
                     include: {

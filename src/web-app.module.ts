@@ -37,6 +37,7 @@ import { DevDriveTestModule } from './modules/test/dev-drive-test.module'
 import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module'
 import { BankingModule } from './modules/banking/banking.module'
 import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-import-templates.module'
+import { BankPurposesModule } from './modules/bank-purposes/bank-purposes.module'
 
 @Module({
     imports: [
@@ -66,6 +67,7 @@ import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-
         PriceBulletinsModule,
 
         BankingModule,
+        BankPurposesModule,
         BankImportsModule,
         BankAccountsModule,
         BankImportTemplatesModule,

@@ -87,6 +87,25 @@ export class ListPurchaseOrdersQueryDto {
     limit?: number
 }
 
+export class PurchaseOrderPaymentPlanDto {
+    @IsDateString()
+    dueDate!: string
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0.0001)
+    amount!: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    sortOrder?: number
+}
+
 export class CreatePurchaseOrderDto {
     @IsString()
     orderNo!: string
@@ -134,4 +153,16 @@ export class CreatePurchaseOrderDto {
     @ValidateNested({ each: true })
     @Type(() => CreatePurchaseOrderLineDto)
     lines!: CreatePurchaseOrderLineDto[]
+
+    @IsOptional()
+    @ValidateNested({ each: true })
+    @Type(() => PurchaseOrderPaymentPlanDto)
+    paymentPlans?: PurchaseOrderPaymentPlanDto[]
+}
+
+export type PurchaseOrderPaymentPlanInput = {
+    dueDate: string
+    amount: number
+    note?: string
+    sortOrder?: number
 }

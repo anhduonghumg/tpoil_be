@@ -297,6 +297,13 @@ enum InventoryLedgerSourceType {
   MANUAL
 }
 
+enum CounterpartyType {
+  SUPPLIER
+  CUSTOMER
+  INTERNAL
+  OTHER
+}
+
 // =======================================
 // Cron Jobs
 // =======================================
@@ -1084,7 +1091,8 @@ model PurchaseOrder {
   lines    PurchaseOrderLine[]
   receipts GoodsReceipt[]
 
-  supplierInvoices SupplierInvoice[] @relation("supplierInvoices")
+  supplierInvoices SupplierInvoice[]          @relation("supplierInvoices")
+  paymentPlans     PurchaseOrderPaymentPlan[]
 
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
@@ -1119,6 +1127,26 @@ model PurchaseOrderLine {
   @@index([purchaseOrderId])
   @@index([productId])
   @@index([supplierLocationId, productId])
+}
+
+model PurchaseOrderPaymentPlan {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  purchaseOrderId String        @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  dueDate DateTime
+  amount  Decimal  @db.Decimal(18, 2)
+  note    String?
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseOrderId])
+  @@index([dueDate])
+  @@index([purchaseOrderId, sortOrder])
 }
 
 // ======================================================
@@ -1428,6 +1456,28 @@ model InventorySnapshotLine {
 // ======================================================
 // 10) QUỸ / NGÂN HÀNG - SAO KÊ
 // ======================================================
+
+model BankTransactionPurpose {
+  id               String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code             String            @unique
+  name             String
+  description      String?
+  direction        BankTxnDirection?
+  module           String?
+  counterpartyType CounterpartyType?
+  affectsDebt      Boolean           @default(false)
+  isSystem         Boolean           @default(false)
+  isActive         Boolean           @default(true)
+  sortOrder        Int               @default(0)
+
+  transactions BankTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
 model BankAccount {
   id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   bankCode    String
@@ -1514,6 +1564,13 @@ model BankTransaction {
   externalRef String?
   fingerprint String
 
+  documentCode     String?
+  purposeRaw       String?
+  purposeId        String?           @db.Uuid
+  counterpartyType CounterpartyType?
+  counterpartyId   String?           @db.Uuid
+  note             String?
+
   matchStatus BankTxnMatchStatus @default(UNMATCHED)
 
   raw Json?
@@ -1523,8 +1580,9 @@ model BankTransaction {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  bankAccount BankAccount          @relation(fields: [bankAccountId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  import      BankStatementImport? @relation(fields: [importId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  bankAccount BankAccount             @relation(fields: [bankAccountId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  import      BankStatementImport?    @relation(fields: [importId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  purpose     BankTransactionPurpose? @relation(fields: [purposeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   allocations PaymentAllocation[]
 
@@ -1538,6 +1596,9 @@ model BankTransaction {
   @@index([matchStatus])
   @@index([externalRef])
   @@index([fingerprint])
+  @@index([documentCode])
+  @@index([purposeId])
+  @@index([counterpartyId])
 }
 
 model PaymentAllocation {
