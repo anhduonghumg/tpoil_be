@@ -280,9 +280,18 @@ export class PurchaseOrdersService {
         const po = await this.prisma.purchaseOrder.findUnique({
             where: { id },
             include: {
-                receipts: true,
-                // invoices: true,        // mở ra khi đã có relation
-                // settlements: true,     // mở ra khi đã có relation
+                receipts: {
+                    select: { id: true, status: true },
+                },
+                supplierInvoices: {
+                    where: {
+                        status: { in: [SupplierInvoiceStatus.DRAFT, SupplierInvoiceStatus.POSTED] },
+                    },
+                    select: {
+                        id: true,
+                        status: true,
+                    },
+                },
             },
         })
 
@@ -299,9 +308,13 @@ export class PurchaseOrdersService {
         }
 
         const hasConfirmedReceipt = (po.receipts ?? []).some((r) => r.status === 'CONFIRMED')
-
         if (hasConfirmedReceipt) {
             throw new BadRequestException('PO_HAS_CONFIRMED_RECEIPTS')
+        }
+
+        const hasInvoices = (po.supplierInvoices ?? []).length > 0
+        if (hasInvoices) {
+            throw new BadRequestException('PO_HAS_SUPPLIER_INVOICES')
         }
 
         return this.prisma.purchaseOrder.update({
@@ -330,6 +343,17 @@ export class PurchaseOrdersService {
                         sourceFileName: true,
                         sourceFileUrl: true,
                         sourceFileChecksum: true,
+                        totalAmount: true,
+                        payableSettlementId: true,
+                        payableSettlement: {
+                            select: {
+                                id: true,
+                                status: true,
+                                amountTotal: true,
+                                amountSettled: true,
+                                dueDate: true,
+                            },
+                        },
                     },
                 },
                 paymentPlans: {
@@ -343,8 +367,49 @@ export class PurchaseOrdersService {
                 },
             },
         })
+
         if (!po) throw new NotFoundException('PO_NOT_FOUND')
-        return po
+
+        const confirmedReceiptCount = (po.receipts ?? []).filter((x) => x.status === 'CONFIRMED').length
+        const invoices = po.supplierInvoices ?? []
+
+        const settlements = invoices.map((x) => x.payableSettlement).filter(Boolean)
+
+        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.amountTotal ?? 0), 0)
+        const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s!.amountSettled ?? 0), 0)
+
+
+        let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
+        if (totalSettledAmount > 0 && totalSettledAmount + 0.01 >= totalSettlementAmount && totalSettlementAmount > 0) {
+            paymentStatus = 'PAID'
+        } else if (totalSettledAmount > 0) {
+            paymentStatus = 'PARTIALLY_PAID'
+        }
+
+        const hasInvoice = invoices.length > 0
+
+        const summary = {
+            hasReceipt: confirmedReceiptCount > 0,
+            hasInvoice,
+            paymentStatus,
+            canCancel: !hasInvoice && confirmedReceiptCount === 0 && po.status !== PurchaseOrderStatus.CANCELLED && po.status !== PurchaseOrderStatus.COMPLETED,
+            cancelBlockedReason: hasInvoice
+                ? 'Đơn đã có hóa đơn nhà cung cấp'
+                : confirmedReceiptCount > 0
+                  ? 'Đơn đã có phiếu nhận hàng'
+                  : po.status === PurchaseOrderStatus.CANCELLED
+                    ? 'Đơn đã bị hủy'
+                    : po.status === PurchaseOrderStatus.COMPLETED
+                      ? 'Đơn đã hoàn thành'
+                      : null,
+            totalSettlementAmount,
+            totalSettledAmount,
+        }
+
+        return {
+            ...po,
+            summary,
+        }
     }
 
     async list(q: {
@@ -410,13 +475,83 @@ export class PurchaseOrdersService {
 
                     supplierInvoices: {
                         where: { status: { not: SupplierInvoiceStatus.VOID } },
-                        select: { id: true, status: true },
+                        select: {
+                            id: true,
+                            status: true,
+                            totalAmount: true,
+                            payableSettlementId: true,
+                            payableSettlement: {
+                                select: {
+                                    id: true,
+                                    status: true,
+                                    amountTotal: true,
+                                    amountSettled: true,
+                                },
+                            },
+                        },
                     },
                 },
             }),
             this.prisma.purchaseOrder.count({ where }),
         ])
 
-        return { items, total, page, limit }
+        const mappedItems = items.map((item) => {
+            const confirmedReceiptCount = item.receipts?.length ?? 0
+            const invoices = item.supplierInvoices ?? []
+
+            const hasInvoice = invoices.length > 0
+            const hasPostedInvoice = invoices.some((x) => x.status === SupplierInvoiceStatus.POSTED)
+
+            const settlements = invoices.map((x) => x.payableSettlement).filter(Boolean)
+
+            const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.amountTotal ?? 0), 0)
+            const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s!.amountSettled ?? 0), 0)
+
+            let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
+            if (totalSettledAmount > 0 && totalSettledAmount + 0.01 >= totalSettlementAmount && totalSettlementAmount > 0) {
+                paymentStatus = 'PAID'
+            } else if (totalSettledAmount > 0) {
+                paymentStatus = 'PARTIALLY_PAID'
+            }
+
+            let businessStatus: 'DRAFT' | 'APPROVED' | 'RECEIVED' | 'INVOICED' | 'PARTIALLY_PAID' | 'PAID' | 'CANCELLED' = 'DRAFT'
+
+            if (item.status === PurchaseOrderStatus.CANCELLED) {
+                businessStatus = 'CANCELLED'
+            } else if (paymentStatus === 'PAID') {
+                businessStatus = 'PAID'
+            } else if (paymentStatus === 'PARTIALLY_PAID') {
+                businessStatus = 'PARTIALLY_PAID'
+            } else if (hasInvoice) {
+                businessStatus = 'INVOICED'
+            } else if (confirmedReceiptCount > 0) {
+                businessStatus = 'RECEIVED'
+            } else if (item.status === PurchaseOrderStatus.APPROVED || item.status === PurchaseOrderStatus.IN_PROGRESS || item.status === PurchaseOrderStatus.COMPLETED) {
+                businessStatus = 'APPROVED'
+            }
+
+            return {
+                ...item,
+                summary: {
+                    hasReceipt: confirmedReceiptCount > 0,
+                    hasInvoice,
+                    hasPostedInvoice,
+                    paymentStatus,
+                    businessStatus,
+                    canCancel: !hasInvoice && confirmedReceiptCount === 0 && item.status !== PurchaseOrderStatus.CANCELLED && item.status !== PurchaseOrderStatus.COMPLETED,
+                    cancelBlockedReason: hasInvoice
+                        ? 'Đơn đã có hóa đơn nhà cung cấp'
+                        : confirmedReceiptCount > 0
+                          ? 'Đơn đã có phiếu nhận hàng'
+                          : item.status === PurchaseOrderStatus.CANCELLED
+                            ? 'Đơn đã bị hủy'
+                            : item.status === PurchaseOrderStatus.COMPLETED
+                              ? 'Đơn đã hoàn thành'
+                              : null,
+                },
+            }
+        })
+
+        return { items: mappedItems, total, page, limit }
     }
 }

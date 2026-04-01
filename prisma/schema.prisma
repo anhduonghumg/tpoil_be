@@ -1250,6 +1250,7 @@ model SupplierInvoiceLine {
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   qty Decimal @db.Decimal(18, 3)
+  discountAmount Decimal? @db.Decimal(18, 2)
 
   tempC          Decimal? @db.Decimal(6, 2)
   density        Decimal? @db.Decimal(10, 6)

@@ -7,6 +7,7 @@ import { QueryBankTransactionsDto } from './dto/query-bank-transactions.dto'
 import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
 import { BankImportTemplatesService } from '../bank-import-templates/bank-import-templates.service'
+import { DeleteMultipleBankTransactionsDto } from './dto/delete-multiple-bank-transactions.dto'
 
 type ParsedBankRow = {
     txnDate: Date
@@ -16,6 +17,11 @@ type ParsedBankRow = {
     counterpartyName?: string
     counterpartyAcc?: string
     externalRef?: string
+
+    documentCode?: string
+    purposeRaw?: string
+    purposeId?: string
+
     raw: Record<string, any>
 }
 
@@ -64,6 +70,13 @@ export class BankingService {
                 orderBy: [{ txnDate: 'desc' }, { createdAt: 'desc' }],
                 include: {
                     bankAccount: true,
+                    purpose: {
+                        select: {
+                            id: true,
+                            code: true,
+                            name: true,
+                        },
+                    },
                     allocations: {
                         include: {
                             settlement: {
@@ -95,12 +108,16 @@ export class BankingService {
 
         const data = items.map((item) => {
             const allocatedAmount = item.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
+            const remainingAmount = Number(item.amount) - allocatedAmount
+            const canDelete = item.matchStatus === BankTxnMatchStatus.UNMATCHED && item.isConfirmed !== true && item.allocations.length === 0
 
             return {
                 ...item,
                 amount: Number(item.amount),
                 allocatedAmount,
-                remainingAmount: Number(item.amount) - allocatedAmount,
+                remainingAmount,
+                purposeName: item.purpose?.name ?? null,
+                canDelete,
             }
         })
 
@@ -115,11 +132,80 @@ export class BankingService {
         }
     }
 
+    async remove(id: string) {
+        const item = await this.prisma.bankTransaction.findUnique({
+            where: { id },
+            include: {
+                allocations: {
+                    select: { id: true },
+                    take: 1,
+                },
+            },
+        })
+
+        if (!item) {
+            throw new NotFoundException('Không tìm thấy giao dịch ngân hàng')
+        }
+
+        if (item.matchStatus !== BankTxnMatchStatus.UNMATCHED || item.isConfirmed || item.allocations.length > 0) {
+            throw new BadRequestException('Chỉ được xóa giao dịch chưa khớp và chưa xác nhận')
+        }
+
+        await this.prisma.bankTransaction.delete({
+            where: { id },
+        })
+
+        return { success: true }
+    }
+
+    async deleteMultiple(dto: DeleteMultipleBankTransactionsDto) {
+        const items = await this.prisma.bankTransaction.findMany({
+            where: { id: { in: dto.ids } },
+            select: {
+                id: true,
+                matchStatus: true,
+                isConfirmed: true,
+                allocations: {
+                    select: { id: true },
+                    take: 1,
+                },
+            },
+        })
+
+        if (items.length !== dto.ids.length) {
+            throw new NotFoundException('Một hoặc nhiều giao dịch không tồn tại')
+        }
+
+        const invalid = items.filter((x) => x.matchStatus !== BankTxnMatchStatus.UNMATCHED || x.isConfirmed || x.allocations.length > 0)
+
+        if (invalid.length > 0) {
+            throw new BadRequestException('Danh sách có giao dịch đã khớp hoặc đã xác nhận, không thể xóa')
+        }
+
+        const result = await this.prisma.bankTransaction.deleteMany({
+            where: {
+                id: { in: dto.ids },
+            },
+        })
+
+        return {
+            success: true,
+            count: result.count,
+        }
+    }
+
     async getTransactionDetail(id: string) {
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id },
             include: {
                 bankAccount: true,
+                purpose: {
+                    select: {
+                        id: true,
+                        code: true,
+                        name: true,
+                    },
+                },
                 allocations: {
                     include: {
                         settlement: {
@@ -141,135 +227,31 @@ export class BankingService {
         }
 
         const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
+        const remainingAmount = Number(txn.amount) - allocatedAmount
+        const canDelete = txn.matchStatus === BankTxnMatchStatus.UNMATCHED && txn.isConfirmed !== true && txn.allocations.length === 0
 
         return {
             ...txn,
             amount: Number(txn.amount),
             allocatedAmount,
-            remainingAmount: Number(txn.amount) - allocatedAmount,
+            remainingAmount,
+            purposeName: txn.purpose?.name ?? null,
+            canDelete,
         }
     }
 
-    /*
     async getMatchSuggestions(id: string) {
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id },
             include: {
                 allocations: true,
-            },
-        })
-
-        if (!txn) {
-            throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
-        }
-
-        const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
-        const remainingAmount = Number(txn.amount) - allocatedAmount
-
-        const settlements = await this.prisma.supplierSettlement.findMany({
-            where: {
-                status: {
-                    in: [SettlementStatus.OPEN, SettlementStatus.PARTIAL],
-                },
-                ...(txn.direction === BankTxnDirection.OUT ? {} : { type: 'ADVANCE' }),
-            },
-            include: {
-                supplier: {
+                purpose: {
                     select: {
                         id: true,
                         code: true,
                         name: true,
-                        taxCode: true,
                     },
                 },
-                invoices: {
-                    select: {
-                        id: true,
-                        invoiceNo: true,
-                        invoiceSymbol: true,
-                        invoiceDate: true,
-                        totalAmount: true,
-                    },
-                },
-            },
-            orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
-            take: 50,
-        })
-
-        const normalizedDesc = this.normalizeText(txn.description)
-        const normalizedCounterpartyName = this.normalizeText(txn.counterpartyName)
-
-        const suggestions = settlements
-            .map((s) => {
-                const remainingSettlement = Number(s.amountTotal) - Number(s.amountSettled)
-
-                if (remainingSettlement <= 0) return null
-
-                let score = 0
-
-                if (Number(txn.amount) === remainingSettlement) {
-                    score += 50
-                } else if (Number(txn.amount) > 0) {
-                    const ratio = Math.min(Number(txn.amount), remainingSettlement) / Math.max(Number(txn.amount), remainingSettlement)
-                    if (ratio >= 0.95) score += 35
-                    else if (ratio >= 0.8) score += 20
-                }
-
-                const supplierName = this.normalizeText(s.supplier?.name)
-                if (normalizedCounterpartyName && supplierName && normalizedCounterpartyName.includes(supplierName)) {
-                    score += 25
-                }
-
-                if (supplierName && normalizedDesc && normalizedDesc.includes(supplierName)) {
-                    score += 20
-                }
-
-                for (const inv of s.invoices) {
-                    const invoiceNo = this.normalizeText(inv.invoiceNo)
-                    const invoiceSymbol = this.normalizeText(inv.invoiceSymbol)
-                    if (invoiceNo && normalizedDesc.includes(invoiceNo)) score += 30
-                    if (invoiceSymbol && normalizedDesc.includes(invoiceSymbol)) score += 15
-                }
-
-                return {
-                    settlementId: s.id,
-                    supplier: s.supplier,
-                    invoices: s.invoices.map((inv) => ({
-                        ...inv,
-                        totalAmount: inv.totalAmount ? Number(inv.totalAmount) : 0,
-                    })),
-                    amountTotal: Number(s.amountTotal),
-                    amountSettled: Number(s.amountSettled),
-                    remainingAmount: remainingSettlement,
-                    dueDate: s.dueDate,
-                    score,
-                    suggestedAllocatedAmount: Math.min(remainingAmount, remainingSettlement),
-                }
-            })
-            .filter(Boolean)
-            .sort((a: any, b: any) => b.score - a.score || a.remainingAmount - b.remainingAmount)
-
-        return {
-            transaction: {
-                id: txn.id,
-                amount: Number(txn.amount),
-                direction: txn.direction,
-                description: txn.description,
-                counterpartyName: txn.counterpartyName,
-                counterpartyAcc: txn.counterpartyAcc,
-                allocatedAmount,
-                remainingAmount,
-            },
-            suggestions,
-        }
-    }
-    */
-
-    async getMatchSuggestions(id: string) {
-        const txn = await this.prisma.bankTransaction.findUnique({
-            where: { id },
-            include: {
-                allocations: true,
             },
         })
 
@@ -280,6 +262,137 @@ export class BankingService {
         const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
         const remainingAmount = Number(txn.amount) - allocatedAmount
 
+        if (txn.documentCode) {
+
+            const purchaseOrder = await this.prisma.purchaseOrder.findFirst({
+                where: {
+                    orderNo: txn.documentCode,
+                },
+                select: {
+                    id: true,
+                    orderNo: true,
+                    paymentPlans: {
+                        orderBy: [{ dueDate: 'asc' }, { sortOrder: 'asc' }],
+                        select: {
+                            id: true,
+                            amount: true,
+                            dueDate: true,
+                            sortOrder: true,
+                        },
+                    },
+                },
+            })
+
+            if (purchaseOrder) {
+                const settlements = await this.prisma.supplierSettlement.findMany({
+                    where: {
+                        status: {
+                            in: [SettlementStatus.OPEN, SettlementStatus.PARTIAL],
+                        },
+                        invoices: {
+                            some: {
+                                purchaseOrderId: purchaseOrder.id,
+                            },
+                        },
+                    },
+                    include: {
+                        supplier: {
+                            select: {
+                                id: true,
+                                code: true,
+                                name: true,
+                                taxCode: true,
+                            },
+                        },
+                        invoices: {
+                            select: {
+                                id: true,
+                                invoiceNo: true,
+                                invoiceSymbol: true,
+                                invoiceDate: true,
+                                totalAmount: true,
+                            },
+                        },
+                    },
+                    orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+                })
+
+                if (settlements.length > 0) {
+                    const suggestions = settlements
+                        .map((s) => {
+                            const settlementRemaining = Number(s.amountTotal) - Number(s.amountSettled)
+                            if (settlementRemaining <= 0) return null
+
+                            let score = 100
+
+                            if (Math.abs(remainingAmount - settlementRemaining) <= 0.0001) {
+                                score = 100
+                            } else {
+                                const diff = Math.abs(remainingAmount - settlementRemaining)
+                                if (diff <= 1000) score = 96
+                                else {
+                                    const ratio = Math.min(remainingAmount, settlementRemaining) / Math.max(remainingAmount, settlementRemaining)
+                                    if (ratio >= 0.95) score = 90
+                                    else if (ratio >= 0.8) score = 82
+                                    else score = 72
+                                }
+                            }
+
+                            const matchedPaymentPlan = purchaseOrder.paymentPlans.find((p) => Math.abs(Number(p.amount) - remainingAmount) <= 0.0001) ?? null
+
+                            if (matchedPaymentPlan) {
+                                score = Math.max(score, 98)
+                            }
+
+                            return {
+                                settlementId: s.id,
+                                purchaseOrderId: purchaseOrder.id,
+                                purchaseOrderNo: purchaseOrder.orderNo,
+                                paymentPlanId: matchedPaymentPlan?.id ?? null,
+                                supplier: s.supplier,
+                                invoices: s.invoices.map((inv) => ({
+                                    ...inv,
+                                    totalAmount: inv.totalAmount ? Number(inv.totalAmount) : 0,
+                                })),
+                                amountTotal: Number(s.amountTotal),
+                                amountSettled: Number(s.amountSettled),
+                                remainingAmount: settlementRemaining,
+                                dueDate: s.dueDate,
+                                score,
+                                suggestedAllocatedAmount: this.computeSuggestedAllocatedAmount(remainingAmount, settlementRemaining),
+                                matchedBy: 'DOCUMENT_CODE',
+                            }
+                        })
+                        .filter(Boolean)
+                        .sort((a: any, b: any) => {
+                            if (b.score !== a.score) return b.score - a.score
+                            const aDiff = Math.abs(remainingAmount - a.remainingAmount)
+                            const bDiff = Math.abs(remainingAmount - b.remainingAmount)
+                            return aDiff - bDiff
+                        })
+
+                    return {
+                        transaction: {
+                            id: txn.id,
+                            amount: Number(txn.amount),
+                            direction: txn.direction,
+                            description: txn.description,
+                            counterpartyName: txn.counterpartyName,
+                            counterpartyAcc: txn.counterpartyAcc,
+                            documentCode: txn.documentCode,
+                            purposeRaw: txn.purposeRaw,
+                            purposeId: txn.purposeId,
+                            purposeName: txn.purpose?.name ?? null,
+                            allocatedAmount,
+                            remainingAmount,
+                        },
+                        suggestions,
+                    }
+                }
+            }
+        }
+
+        // fallback logic cũ
         const settlements = await this.prisma.supplierSettlement.findMany({
             where: {
                 status: {
@@ -349,6 +462,7 @@ export class BankingService {
                     dueDate: s.dueDate,
                     score,
                     suggestedAllocatedAmount: this.computeSuggestedAllocatedAmount(remainingAmount, remainingSettlement),
+                    matchedBy: 'FALLBACK_SCORE',
                 }
             })
             .filter(Boolean)
@@ -369,6 +483,10 @@ export class BankingService {
                 description: txn.description,
                 counterpartyName: txn.counterpartyName,
                 counterpartyAcc: txn.counterpartyAcc,
+                documentCode: txn.documentCode,
+                purposeRaw: txn.purposeRaw,
+                purposeId: txn.purposeId,
+                purposeName: txn.purpose?.name ?? null,
                 allocatedAmount,
                 remainingAmount,
             },
@@ -379,82 +497,69 @@ export class BankingService {
     async confirmTransaction(id: string, body: ConfirmBankTransactionDto) {
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id },
-            include: {
-                allocations: true,
-            },
+            include: { allocations: true },
         })
 
-        if (!txn) {
-            throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
-        }
-
-        if (txn.isConfirmed) {
-            throw new BadRequestException('BANK_TRANSACTION_ALREADY_CONFIRMED')
-        }
-
-        if (txn.direction !== BankTxnDirection.OUT) {
-            throw new BadRequestException('ONLY_OUT_TRANSACTION_SUPPORTED_IN_PHASE_1')
-        }
+        if (!txn) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        if (txn.isConfirmed) throw new BadRequestException('BANK_TRANSACTION_ALREADY_CONFIRMED')
+        if (txn.direction !== BankTxnDirection.OUT) throw new BadRequestException('ONLY_OUT_TRANSACTION_SUPPORTED')
 
         const totalAllocated = body.allocations.reduce((sum, item) => sum + Number(item.allocatedAmount), 0)
 
-        if (totalAllocated <= 0) {
-            throw new BadRequestException('TOTAL_ALLOCATED_MUST_BE_GT_ZERO')
-        }
+        if (totalAllocated <= 0) throw new BadRequestException('TOTAL_ALLOCATED_MUST_BE_GT_ZERO')
 
-        if (totalAllocated - Number(txn.amount) > 0.0001) {
-            throw new BadRequestException('ALLOCATED_EXCEEDS_TRANSACTION_AMOUNT')
-        }
+        if (totalAllocated - Number(txn.amount) > 0.0001) throw new BadRequestException('ALLOCATED_EXCEEDS_TRANSACTION_AMOUNT')
 
-        const settlementIds = [...new Set(body.allocations.map((x) => x.settlementId))]
-        if (settlementIds.length !== body.allocations.length) {
-            throw new BadRequestException('DUPLICATE_SETTLEMENT_ALLOCATION')
-        }
-
-        const settlements = await this.prisma.supplierSettlement.findMany({
-            where: {
-                id: { in: settlementIds },
-            },
-            include: {
-                invoices: {
-                    select: { id: true, invoiceNo: true },
-                },
-            },
-        })
-
-        if (settlements.length !== settlementIds.length) {
-            throw new BadRequestException('SETTLEMENT_NOT_FOUND')
-        }
-
-        const settlementMap = new Map(settlements.map((s) => [s.id, s]))
-
+        const seen = new Set<string>()
         for (const item of body.allocations) {
-            const settlement = settlementMap.get(item.settlementId)!
-            const remaining = Number(settlement.amountTotal) - Number(settlement.amountSettled)
-
-            if (item.allocatedAmount - remaining > 0.0001) {
-                throw new BadRequestException(`ALLOCATED_EXCEEDS_SETTLEMENT_REMAINING:${settlement.id}`)
+            if (seen.has(item.settlementId)) {
+                throw new BadRequestException('DUPLICATE_SETTLEMENT_ALLOCATION')
             }
-
-            if (settlement.status !== SettlementStatus.OPEN && settlement.status !== SettlementStatus.PARTIAL) {
-                throw new BadRequestException(`INVALID_SETTLEMENT_STATUS:${settlement.id}`)
-            }
+            seen.add(item.settlementId)
         }
 
         return this.prisma.$transaction(async (trx) => {
             for (const item of body.allocations) {
-                const settlement = settlementMap.get(item.settlementId)!
-                const nextSettled = Number(settlement.amountSettled) + Number(item.allocatedAmount)
-                const total = Number(settlement.amountTotal)
+                const settlement = await trx.supplierSettlement.findUnique({
+                    where: { id: item.settlementId },
+                })
+
+                if (!settlement) throw new BadRequestException('SETTLEMENT_NOT_FOUND')
+
+                const remaining = Number(settlement.amountTotal) - Number(settlement.amountSettled)
+
+                if (item.allocatedAmount - remaining > 0.0001) {
+                    throw new BadRequestException(`ALLOCATED_EXCEEDS_SETTLEMENT_REMAINING:${settlement.id}`)
+                }
+
+                if (settlement.status !== SettlementStatus.OPEN && settlement.status !== SettlementStatus.PARTIAL) {
+                    throw new BadRequestException(`INVALID_SETTLEMENT_STATUS:${settlement.id}`)
+                }
+
+                const updated = await trx.supplierSettlement.update({
+                    where: { id: item.settlementId },
+                    data: {
+                        amountSettled: {
+                            increment: new Prisma.Decimal(item.allocatedAmount),
+                        },
+                    },
+                })
+
+                const nextSettled = Number(updated.amountSettled)
+                const total = Number(updated.amountTotal)
 
                 let nextStatus: SettlementStatus = SettlementStatus.OPEN
-                if (nextSettled <= 0) {
-                    nextStatus = SettlementStatus.OPEN
-                } else if (nextSettled + 0.0001 >= total) {
+
+                if (nextSettled + 0.0001 >= total) {
                     nextStatus = SettlementStatus.SETTLED
-                } else {
+                } else if (nextSettled > 0) {
                     nextStatus = SettlementStatus.PARTIAL
                 }
+
+                await trx.supplierSettlement.update({
+                    where: { id: item.settlementId },
+                    data: { status: nextStatus },
+                })
 
                 await trx.paymentAllocation.create({
                     data: {
@@ -467,14 +572,6 @@ export class BankingService {
                         note: item.note ?? body.note ?? null,
                     },
                 })
-
-                await trx.supplierSettlement.update({
-                    where: { id: item.settlementId },
-                    data: {
-                        amountSettled: new Prisma.Decimal(nextSettled),
-                        status: nextStatus,
-                    },
-                })
             }
 
             await trx.bankTransaction.update({
@@ -483,7 +580,6 @@ export class BankingService {
                     matchStatus: totalAllocated + 0.0001 >= Number(txn.amount) ? BankTxnMatchStatus.MANUAL_MATCHED : BankTxnMatchStatus.PARTIAL_MATCHED,
                     isConfirmed: true,
                     confirmedAt: new Date(),
-                    confirmedBy: null,
                 },
             })
 
@@ -574,7 +670,20 @@ export class BankingService {
                 throw new BadRequestException('BANK_IMPORT_NO_VALID_ROWS')
             }
 
+            const activePurposes = await this.prisma.bankTransactionPurpose.findMany({
+                where: { isActive: true },
+                select: { id: true, code: true, name: true },
+            })
+
+            const purposeMap = new Map<string, string>()
+            for (const p of activePurposes) {
+                purposeMap.set(this.normalizeText(p.code), p.id)
+                purposeMap.set(this.normalizeText(p.name), p.id)
+            }
+
             const prepared = parsed.rows.map((row) => {
+                const purposeId = row.purposeRaw ? this.resolvePurposeId(row.purposeRaw, purposeMap) : undefined
+
                 const fingerprint = this.buildTxnFingerprint({
                     bankAccountId: body.bankAccountId,
                     txnDate: row.txnDate,
@@ -583,10 +692,12 @@ export class BankingService {
                     description: row.description,
                     counterpartyAcc: row.counterpartyAcc,
                     externalRef: row.externalRef,
+                    documentCode: row.documentCode,
                 })
 
                 return {
                     ...row,
+                    purposeId,
                     fingerprint,
                 }
             })
@@ -646,6 +757,9 @@ export class BankingService {
                         counterpartyName: row.counterpartyName ?? null,
                         counterpartyAcc: row.counterpartyAcc ?? null,
                         externalRef: row.externalRef ?? null,
+                        documentCode: row.documentCode ?? null,
+                        purposeRaw: row.purposeRaw ?? null,
+                        purposeId: row.purposeId ?? null,
                         fingerprint: row.fingerprint,
                         matchStatus: BankTxnMatchStatus.UNMATCHED,
                         raw: row.raw,
@@ -668,8 +782,6 @@ export class BankingService {
                     failedCount,
                 },
             })
-
-            // console.log(`[BANK IMPORT] rows=${parsed.rows.length} inserted=${importedCount} dup=${duplicatedCount} failed=${failedCount} time=${t1 - t0}ms`)
 
             return this.getImportDetail(importJob.id)
         } catch (error: any) {
@@ -740,6 +852,8 @@ export class BankingService {
                 counterpartyName: getCell(row, 'counterpartyName'),
                 counterpartyAcc: getCell(row, 'counterpartyAcc'),
                 externalRef: getCell(row, 'externalRef'),
+                documentCode: getCell(row, 'documentCode'),
+                purpose: getCell(row, 'purpose'),
             }
 
             if (this.isEmptyMappedRow(mapped)) {
@@ -754,6 +868,9 @@ export class BankingService {
                 return
             }
 
+            const documentCode = this.cleanOptionalText(mapped.documentCode)?.toUpperCase()
+            const purposeRaw = this.cleanOptionalText(mapped.purpose)
+
             result.push({
                 txnDate,
                 direction: normalized.direction,
@@ -762,6 +879,8 @@ export class BankingService {
                 counterpartyName: this.cleanOptionalText(mapped.counterpartyName),
                 counterpartyAcc: this.cleanOptionalText(mapped.counterpartyAcc),
                 externalRef: this.cleanOptionalText(mapped.externalRef),
+                documentCode,
+                purposeRaw,
                 raw: mapped,
             })
         })
@@ -944,6 +1063,7 @@ export class BankingService {
         description: string
         counterpartyAcc?: string
         externalRef?: string
+        documentCode?: string
     }) {
         const payload = [
             input.bankAccountId,
@@ -953,114 +1073,28 @@ export class BankingService {
             this.normalizeText(input.description),
             (input.counterpartyAcc || '').replace(/\s+/g, ''),
             input.externalRef || '',
+            input.documentCode || '',
         ].join('|')
 
         return crypto.createHash('sha256').update(payload).digest('hex')
     }
 
-    // private computeSettlementMatchScore(input: {
-    //     txnAmount: number
-    //     txnRemainingAmount: number
-    //     txnDate?: Date
-    //     txnDescription?: string
-    //     txnCounterpartyName?: string
-    //     txnCounterpartyAcc?: string | null
-    //     settlementRemainingAmount: number
-    //     supplierName?: string | null
-    //     invoices: Array<{
-    //         invoiceNo?: string | null
-    //         invoiceSymbol?: string | null
-    //         invoiceDate?: Date | null
-    //     }>
-    // }) {
-    //     let score = 0
+    private resolvePurposeId(raw: string, purposeMap: Map<string, string>): string | undefined {
+        const normalized = this.normalizeText(raw)
+        if (!normalized) return undefined
 
-    //     const txnAmount = Number(input.txnAmount || 0)
-    //     const txnRemainingAmount = Number(input.txnRemainingAmount || 0)
-    //     const settlementRemainingAmount = Number(input.settlementRemainingAmount || 0)
+        if (purposeMap.has(normalized)) {
+            return purposeMap.get(normalized)
+        }
 
-    //     // =========================
-    //     // 1. Amount match (ưu tiên cao nhất)
-    //     // =========================
-    //     const diff = Math.abs(txnRemainingAmount - settlementRemainingAmount)
+        for (const [key, value] of purposeMap.entries()) {
+            if (normalized.includes(key) || key.includes(normalized)) {
+                return value
+            }
+        }
 
-    //     if (diff === 0) {
-    //         score += 60
-    //     } else if (diff <= 1000) {
-    //         score += 55
-    //     } else if (txnRemainingAmount > 0) {
-    //         const ratio = diff / txnRemainingAmount
-    //         if (ratio <= 0.01) score += 45
-    //         else if (ratio <= 0.03) score += 30
-    //         else if (ratio <= 0.05) score += 15
-    //     }
-
-    //     // Match theo tổng transaction nếu transaction đã có phân bổ một phần
-    //     if (txnAmount > 0 && txnAmount !== txnRemainingAmount) {
-    //         const diffByTotal = Math.abs(txnAmount - settlementRemainingAmount)
-    //         if (diffByTotal === 0) score += 8
-    //         else if (diffByTotal <= 1000) score += 6
-    //     }
-
-    //     // =========================
-    //     // 2. Supplier / counterparty name
-    //     // =========================
-    //     const supplierName = this.normalizeCompanyName(input.supplierName)
-    //     const counterpartyName = this.normalizeCompanyName(input.txnCounterpartyName)
-
-    //     if (supplierName && counterpartyName) {
-    //         if (counterpartyName === supplierName) {
-    //             score += 18
-    //         } else if (counterpartyName.includes(supplierName) || supplierName.includes(counterpartyName)) {
-    //             score += 12
-    //         }
-    //     }
-
-    //     // =========================
-    //     // 3. Invoice number / symbol in description
-    //     // =========================
-    //     const desc = input.txnDescription || ''
-    //     for (const inv of input.invoices) {
-    //         const invoiceNo = this.normalizeText(inv.invoiceNo)
-    //         const invoiceSymbol = this.normalizeText(inv.invoiceSymbol)
-
-    //         if (invoiceNo && desc.includes(invoiceNo)) score += 20
-    //         if (invoiceSymbol && desc.includes(invoiceSymbol)) score += 10
-    //     }
-
-    //     // =========================
-    //     // 4. Time proximity
-    //     // =========================
-    //     if (input.txnDate) {
-    //         let bestDaysDiff: number | null = null
-
-    //         for (const inv of input.invoices) {
-    //             if (!inv.invoiceDate) continue
-
-    //             const invDate = new Date(inv.invoiceDate)
-    //             const days = Math.abs((input.txnDate.getTime() - invDate.getTime()) / (1000 * 60 * 60 * 24))
-
-    //             if (bestDaysDiff === null || days < bestDaysDiff) {
-    //                 bestDaysDiff = days
-    //             }
-    //         }
-
-    //         if (bestDaysDiff !== null) {
-    //             if (bestDaysDiff <= 3) score += 10
-    //             else if (bestDaysDiff <= 7) score += 6
-    //             else if (bestDaysDiff <= 15) score += 3
-    //         }
-    //     }
-
-    //     // =========================
-    //     // 5. Weak fallback when no description
-    //     // =========================
-    //     if (!desc && supplierName) {
-    //         score += 3
-    //     }
-
-    //     return Math.min(score, 100)
-    // }
+        return undefined
+    }
 
     private computeSuggestedAllocatedAmount(txnRemainingAmount: number, settlementRemainingAmount: number) {
         return Math.min(Number(txnRemainingAmount || 0), Number(settlementRemainingAmount || 0))

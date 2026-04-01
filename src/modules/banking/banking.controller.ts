@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Delete, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { memoryStorage } from 'multer'
 import { BankingService } from './banking.service'
 import { QueryBankTransactionsDto } from './dto/query-bank-transactions.dto'
 import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
+import { DeleteMultipleBankTransactionsDto } from './dto/delete-multiple-bank-transactions.dto'
 
 @Controller('banking')
 export class BankingController {
@@ -51,5 +52,15 @@ export class BankingController {
     )
     createImport(@UploadedFile() file: Express.Multer.File, @Body() body: CreateBankImportDto) {
         return this.bankingService.importStatement(file, body)
+    }
+
+    @Delete('transactions/:id')
+    remove(@Param('id') id: string) {
+        return this.bankingService.remove(id)
+    }
+
+    @Post('transactions/delete-multiple')
+    deleteMultiple(@Body() dto: DeleteMultipleBankTransactionsDto) {
+        return this.bankingService.deleteMultiple(dto)
     }
 }

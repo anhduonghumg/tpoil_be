@@ -373,6 +373,7 @@ export class SupplierInvoicesService {
 
                                 unitPrice: l.unitPrice == null ? null : new Prisma.Decimal(l.unitPrice),
                                 taxRate: l.taxRate == null ? null : new Prisma.Decimal(l.taxRate),
+                                discountAmount: new Prisma.Decimal(l.discountAmount ?? 0),
 
                                 goodsReceiptId: l.goodsReceiptId ?? null,
                             })),
@@ -418,11 +419,29 @@ export class SupplierInvoicesService {
                     }
                 }
 
+                // let total = new Prisma.Decimal(0)
+                // for (const line of created.lines) {
+                //     const qty = new Prisma.Decimal(line.qty)
+                //     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
+                //     total = total.plus(qty.mul(unitPrice))
+                // }
+
                 let total = new Prisma.Decimal(0)
+
                 for (const line of created.lines) {
                     const qty = new Prisma.Decimal(line.qty)
                     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                    total = total.plus(qty.mul(unitPrice))
+                    const discountAmount = line.discountAmount ? new Prisma.Decimal(line.discountAmount) : new Prisma.Decimal(0)
+                    const taxRate = line.taxRate ? new Prisma.Decimal(line.taxRate) : new Prisma.Decimal(0)
+
+                    const netUnitPriceRaw = unitPrice.minus(discountAmount)
+                    const netUnitPrice = netUnitPriceRaw.lessThan(0) ? new Prisma.Decimal(0) : netUnitPriceRaw
+
+                    const lineNet = qty.mul(netUnitPrice)
+                    const lineTax = lineNet.mul(taxRate).div(100)
+                    const lineTotal = lineNet.plus(lineTax)
+
+                    total = total.plus(lineTotal)
                 }
 
                 const settlement = await tx.supplierSettlement.create({
@@ -546,11 +565,29 @@ export class SupplierInvoicesService {
                     }
                 }
 
+                // let total = new Prisma.Decimal(0)
+                // for (const line of inv.lines) {
+                //     const qty = new Prisma.Decimal(line.qty)
+                //     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
+                //     total = total.plus(qty.mul(unitPrice))
+                // }
+
                 let total = new Prisma.Decimal(0)
+
                 for (const line of inv.lines) {
                     const qty = new Prisma.Decimal(line.qty)
                     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                    total = total.plus(qty.mul(unitPrice))
+                    const discountAmount = line.discountAmount ? new Prisma.Decimal(line.discountAmount) : new Prisma.Decimal(0)
+                    const taxRate = line.taxRate ? new Prisma.Decimal(line.taxRate) : new Prisma.Decimal(0)
+
+                    const netUnitPriceRaw = unitPrice.minus(discountAmount)
+                    const netUnitPrice = netUnitPriceRaw.lessThan(0) ? new Prisma.Decimal(0) : netUnitPriceRaw
+
+                    const lineNet = qty.mul(netUnitPrice)
+                    const lineTax = lineNet.mul(taxRate).div(100)
+                    const lineTotal = lineNet.plus(lineTax)
+
+                    total = total.plus(lineTotal)
                 }
 
                 const settlement = await tx.supplierSettlement.create({

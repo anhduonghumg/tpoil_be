@@ -32,6 +32,10 @@ export class CreateSupplierInvoiceLineDto {
     taxRate?: number
 
     @IsOptional()
+    @IsNumber()
+    discountAmount?: number
+
+    @IsOptional()
     @IsUUID()
     goodsReceiptId?: string
 }
