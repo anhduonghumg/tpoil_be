@@ -12,6 +12,7 @@ import { CustomerOverviewService } from './customer-overview.service'
 import { ContractsService } from '../contracts/contracts.service'
 import { AssignContractsToCustomerDto } from './dto/assign-contracts.dto'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
+import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
@@ -65,6 +66,16 @@ export class CustomersController {
     async remove(@Param('id') id: string, @Req() req: Request) {
         const rs = await this.customersService.remove(id)
         return success(rs, 'Deleted', 200, getReqId(req))
+    }
+
+    @Get(':id/purchase-defaults')
+    getPurchaseDefaults(@Param('id') id: string) {
+        return this.customersService.getPurchaseDefaults(id)
+    }
+
+    @Patch(':id/purchase-defaults')
+    updatePurchaseDefaults(@Param('id') id: string, @Body() dto: UpdateCustomerPurchaseDefaultsDto) {
+        return this.customersService.updatePurchaseDefaults(id, dto)
     }
 
     // ---- Assign / Unassign Contracts ----

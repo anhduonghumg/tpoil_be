@@ -17,6 +17,7 @@ generator client {
 enum BackgroundJobType {
   PRICE_BULLETIN_IMPORT_PDF
   SUPPLIER_INVOICE_IMPORT_PDF
+  PURCHASE_ORDER_PRINT_BATCH
 }
 
 enum BackgroundJobStatus {
@@ -700,6 +701,9 @@ model Customer {
   legalOwnerEmpId      String? @db.Uuid
   documentOwnerEmpId   String? @db.Uuid
 
+  defaultPurchaseContractNo String?
+  defaultDeliveryLocation   String?
+
   salesOwnerEmp      Employee? @relation("customer_sales_owner_emp", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   accountingOwnerEmp Employee? @relation("customer_accounting_owner_emp", fields: [accountingOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   legalOwnerEmp      Employee? @relation("customer_legal_owner_emp", fields: [legalOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
@@ -1085,6 +1089,9 @@ model PurchaseOrder {
   totalQty    Decimal? @db.Decimal(18, 3)
   totalAmount Decimal? @db.Decimal(18, 2)
 
+  contractNo       String?
+  deliveryLocation String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1249,7 +1256,7 @@ model SupplierInvoiceLine {
   productId String  @db.Uuid
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  qty Decimal @db.Decimal(18, 3)
+  qty            Decimal  @db.Decimal(18, 3)
   discountAmount Decimal? @db.Decimal(18, 2)
 
   tempC          Decimal? @db.Decimal(6, 2)

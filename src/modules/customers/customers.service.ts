@@ -8,10 +8,17 @@ import dayjs from 'dayjs'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
 import { CustomerListRole } from './dto/customer-list-query.dto'
 import { CustomerSelectRole } from './dto/customer-select-query.dto'
+import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
 
 @Injectable()
 export class CustomersService {
     constructor(private readonly prisma: PrismaService) {}
+
+    private normalizeNullableText(value?: string | null): string | null {
+        const s = String(value ?? '').trim()
+        return s ? s : null
+    }
+
     async list(query: CustomerListQueryDto) {
         const { keyword, role, partyType, type, status, salesOwnerEmpId, accountingOwnerEmpId, documentOwnerEmpId, page = 1, pageSize = 20 } = query
 
@@ -338,6 +345,69 @@ export class CustomersService {
             accountingOwnerName: customer.accountingOwnerEmp?.fullName ?? null,
             legalOwnerName: customer.legalOwnerEmp?.fullName ?? null,
             contracts,
+        }
+    }
+
+    async getPurchaseDefaults(id: string) {
+        const customer = await this.prisma.customer.findUnique({
+            where: { id },
+            select: {
+                id: true,
+                code: true,
+                name: true,
+                defaultPurchaseContractNo: true,
+                defaultDeliveryLocation: true,
+                updatedAt: true,
+            },
+        })
+
+        if (!customer) {
+            throw new NotFoundException('CUSTOMER_NOT_FOUND')
+        }
+
+        return {
+            id: customer.id,
+            code: customer.code,
+            name: customer.name,
+            defaultPurchaseContractNo: customer?.defaultPurchaseContractNo,
+            defaultDeliveryLocation: customer?.defaultDeliveryLocation,
+            updatedAt: customer.updatedAt,
+        }
+    }
+
+    async updatePurchaseDefaults(id: string, dto: UpdateCustomerPurchaseDefaultsDto) {
+        const existing = await this.prisma.customer.findUnique({
+            where: { id },
+            select: { id: true },
+        })
+
+        if (!existing) {
+            throw new NotFoundException('CUSTOMER_NOT_FOUND')
+        }
+
+        const updated = await this.prisma.customer.update({
+            where: { id },
+            data: {
+                defaultPurchaseContractNo: dto.defaultPurchaseContractNo !== undefined ? this.normalizeNullableText(dto.defaultPurchaseContractNo) : undefined,
+                defaultDeliveryLocation: dto.defaultDeliveryLocation !== undefined ? this.normalizeNullableText(dto.defaultDeliveryLocation) : undefined,
+            },
+            select: {
+                id: true,
+                code: true,
+                name: true,
+                defaultPurchaseContractNo: true,
+                defaultDeliveryLocation: true,
+                updatedAt: true,
+            },
+        })
+
+        return {
+            id: updated.id,
+            code: updated.code,
+            name: updated.name,
+            defaultPurchaseContractNo: updated.defaultPurchaseContractNo,
+            defaultDeliveryLocation: updated.defaultDeliveryLocation,
+            updatedAt: updated.updatedAt,
         }
     }
 }

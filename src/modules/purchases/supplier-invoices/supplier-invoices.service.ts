@@ -551,6 +551,7 @@ export class SupplierInvoicesService {
                                 productId: true,
                             },
                         })
+                        
                         if (!gr) throw new BadRequestException('INVOICE_LINE_GR_NOT_FOUND')
                         if (gr.status !== 'CONFIRMED') throw new BadRequestException('INVOICE_LINE_GR_NOT_CONFIRMED')
                         if (gr.supplierCustomerId !== inv.supplierCustomerId) {

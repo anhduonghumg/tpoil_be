@@ -15,6 +15,16 @@ export enum PurchaseOrderStatus {
     COMPLETED = 'COMPLETED',
     CANCELLED = 'CANCELLED',
 }
+
+export enum PurchaseOrderBusinessState {
+    PENDING_APPROVAL = 'PENDING_APPROVAL',
+    PENDING_RECEIPT = 'PENDING_RECEIPT',
+    PENDING_INVOICE = 'PENDING_INVOICE',
+    PENDING_PAYMENT = 'PENDING_PAYMENT',
+    PAID = 'PAID',
+    CANCELLED = 'CANCELLED',
+}
+
 export class CreatePurchaseOrderLineDto {
     @IsString()
     productId!: string
@@ -47,6 +57,7 @@ export class ApprovePurchaseOrderDto {
     @IsString()
     note?: string
 }
+
 export class ListPurchaseOrdersQueryDto {
     @IsOptional()
     @IsString()
@@ -67,6 +78,10 @@ export class ListPurchaseOrdersQueryDto {
     @IsOptional()
     @IsEnum(PurchaseOrderStatus)
     status?: PurchaseOrderStatus
+
+    @IsOptional()
+    @IsEnum(PurchaseOrderBusinessState)
+    businessState?: PurchaseOrderBusinessState
 
     @IsOptional()
     @IsDateString()
@@ -165,4 +180,27 @@ export type PurchaseOrderPaymentPlanInput = {
     amount: number
     note?: string
     sortOrder?: number
+}
+
+export class BulkPurchaseOrderIdsDto {
+    @IsArray()
+    @ArrayMinSize(1)
+    @IsString({ each: true })
+    ids!: string[]
+}
+
+export class BulkActionResultItemDto {
+    id!: string
+    ok!: boolean
+    code?: string
+    message?: string
+}
+
+export type BulkPurchaseOrderActionResult = {
+    successIds: string[]
+    failed: Array<{
+        id: string
+        code: string
+        message: string
+    }>
 }

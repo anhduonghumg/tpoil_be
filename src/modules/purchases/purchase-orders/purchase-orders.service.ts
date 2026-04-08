@@ -1,16 +1,88 @@
 // src/modules/purchases/purchase-orders/purchase-orders.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma, PurchaseOrderStatus, SupplierInvoiceStatus } from '@prisma/client'
+import { BackgroundJobStatus, Prisma, PurchaseOrderStatus, SupplierInvoiceStatus } from '@prisma/client'
 import { ContractCheckService } from './contract-check.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PaymentTermType } from './dto/purchase-order.dto'
+import { BackgroundJobsService } from 'src/modules/background-jobs/background-jobs.service'
+import { JobArtifactsService } from 'src/modules/job-artifacts/job-artifacts.service'
+import { CreatePurchaseOrderPrintBatchDto } from './dto/create-purchase-order-print-batch.dto'
+import { ARTIFACT_PO_PRINT_INPUT, ARTIFACT_PO_PRINT_OUTPUT } from './constants/purchase-order.constants'
+import { PURCHASE_ORDER_PRINT_JOB_NAME, PURCHASE_ORDER_PRINT_JOB_TYPE, QB_PURCHASE_ORDER_PRINT } from './jobs/purchase-order-print-queues'
+import { PurchaseOrderPrintBatchInput, PurchaseOrderPrintData } from './types/purchase-order-print.types'
+import { createHash } from 'crypto'
+import { createWriteStream } from 'fs'
+import { PDFDocument } from 'pdf-lib'
+import * as fs from 'fs/promises'
+import * as archiver from 'archiver'
+import * as path from 'path'
+import * as puppeteer from 'puppeteer-core'
+import { renderPurchaseOrderPrintHtml } from './templates/purchase-order-print.template'
 
 @Injectable()
 export class PurchaseOrdersService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly contractCheck: ContractCheckService,
+        private readonly backgroundJobsService: BackgroundJobsService,
+        private readonly jobArtifactsService: JobArtifactsService,
     ) {}
+
+    private async resolveCustomerAddressAtDate(customerId: string, at: Date): Promise<string | null> {
+        const d = new Date(at)
+        d.setHours(0, 0, 0, 0)
+
+        const row = await this.prisma.customerAddress.findFirst({
+            where: {
+                customerId,
+                validFrom: { lte: d },
+                OR: [{ validTo: null }, { validTo: { gte: d } }],
+            },
+            orderBy: [{ validFrom: 'desc' }, { createdAt: 'desc' }],
+            select: { addressLine: true },
+        })
+
+        return this.normalizeText(row?.addressLine)
+    }
+
+    private normalizeText(value?: string | null): string | null {
+        const s = String(value ?? '').trim()
+        return s ? s : null
+    }
+
+    private formatDate(value: Date | string): string {
+        const d = new Date(value)
+        const dd = String(d.getDate()).padStart(2, '0')
+        const mm = String(d.getMonth() + 1).padStart(2, '0')
+        const yyyy = d.getFullYear()
+        return `${dd}/${mm}/${yyyy}`
+    }
+
+    private mapPaymentModeText(paymentMode: string): string {
+        switch (paymentMode) {
+            case 'PREPAID':
+                return 'Thanh toán trước'
+            case 'POSTPAID':
+                return 'Thanh toán sau'
+            default:
+                return paymentMode
+        }
+    }
+
+    private resolvePaymentDeadlineText(po: { paymentTermDays?: number | null; paymentTermType?: string | null }): string {
+        if (po.paymentTermDays && po.paymentTermDays > 0) {
+            return `${po.paymentTermDays} ngày`
+        }
+
+        switch (po.paymentTermType) {
+            case 'SAME_DAY':
+                return 'Trong ngày'
+            case 'NEXT_DAY':
+                return 'Ngày hôm sau'
+            default:
+                return ''
+        }
+    }
 
     private normalizeDateOnly(s: string) {
         const d = new Date(s)
@@ -22,6 +94,52 @@ export class PurchaseOrdersService {
         const d = new Date(value)
         if (Number.isNaN(d.getTime())) throw new BadRequestException(code)
         return d
+    }
+
+    private async zipFiles(workDir: string, pdfDir: string, outPath: string, includeErrorsTxt: boolean): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+            const output = createWriteStream(outPath)
+            const archive = archiver('zip', { zlib: { level: 9 } })
+
+            output.on('close', () => resolve())
+            output.on('error', (err) => reject(err))
+            archive.on('error', (err) => reject(err))
+
+            archive.pipe(output)
+            archive.directory(pdfDir, false)
+
+            if (includeErrorsTxt) {
+                archive.file(path.join(workDir, 'errors.txt'), { name: 'errors.txt' })
+            }
+
+            archive.finalize()
+        })
+    }
+
+    private buildErrorsText(errors: Array<{ id: string; orderNo?: string; message: string }>): string {
+        const lines: string[] = []
+        lines.push('DANH SÁCH ĐƠN IN LỖI')
+        lines.push('')
+
+        for (const err of errors) {
+            lines.push(`${err.orderNo || err.id} - ${err.message}`)
+        }
+
+        return lines.join('\n')
+    }
+
+    private toSafeFileName(value: string): string {
+        return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'purchase-order'
+    }
+
+    private toErrorMessage(error: unknown): string {
+        if (error instanceof Error) return error.message
+        return String(error)
+    }
+
+    private async sha256File(filePath: string): Promise<string> {
+        const buf = await fs.readFile(filePath)
+        return createHash('sha256').update(buf).digest('hex')
     }
 
     private async assertLocationsBelongToSupplier(args: { supplierCustomerId: string; locationIds: string[] }) {
@@ -45,6 +163,106 @@ export class PurchaseOrdersService {
                 message: 'Kho NCC không hợp lệ hoặc không thuộc NCC đã chọn.',
                 invalidLocationIds: bad,
             })
+        }
+    }
+
+    private buildPoSummary(item: any) {
+        const confirmedReceiptCount = item.receipts?.length ?? 0
+        const hasReceipt = confirmedReceiptCount > 0
+
+        const invoices = item.supplierInvoices ?? []
+        const hasInvoice = invoices.length > 0
+
+        const settlementMap = new Map<string, any>()
+        for (const inv of invoices) {
+            const st = inv.payableSettlement
+            if (st?.id) settlementMap.set(st.id, st)
+        }
+
+        const settlements = Array.from(settlementMap.values())
+
+        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s.amountTotal ?? 0), 0)
+
+        const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s.amountSettled ?? 0), 0)
+
+        const allSettled = settlements.length > 0 && settlements.every((s) => s.status === 'SETTLED')
+
+        let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
+
+        if (allSettled) {
+            paymentStatus = 'PAID'
+        } else if (totalSettledAmount > 0) {
+            paymentStatus = 'PARTIALLY_PAID'
+        }
+
+        const orderedQtyTotal = (item.lines ?? []).reduce((sum: number, l: any) => sum + Number(l.orderedQty ?? 0), 0)
+
+        const receivedQtyTotal = (item.receipts ?? []).reduce((sum: number, r: any) => sum + Number(r.qty ?? 0), 0)
+
+        const remainingQty = Math.max(orderedQtyTotal - receivedQtyTotal, 0)
+
+        const canReceive =
+            item.status !== 'CANCELLED' &&
+            item.status !== 'COMPLETED' &&
+            !hasInvoice &&
+            (item.orderType === 'LOT' ? remainingQty > 0 : confirmedReceiptCount === 0 && remainingQty > 0)
+
+        const businessStatus =
+            item.status === 'CANCELLED'
+                ? 'CANCELLED'
+                : paymentStatus === 'PAID'
+                  ? 'PAID'
+                  : paymentStatus === 'PARTIALLY_PAID'
+                    ? 'PARTIALLY_PAID'
+                    : hasInvoice
+                      ? 'INVOICED'
+                      : hasReceipt
+                        ? 'RECEIVED'
+                        : item.status === 'APPROVED' || item.status === 'IN_PROGRESS'
+                          ? 'APPROVED'
+                          : 'DRAFT'
+
+        return {
+            hasReceipt,
+            hasInvoice,
+            paymentStatus,
+            businessStatus,
+            orderedQtyTotal,
+            receivedQtyTotal,
+            remainingQty,
+            canReceive,
+            totalSettlementAmount,
+            totalSettledAmount,
+        }
+    }
+
+    private matchBusinessState(item: any, state?: string) {
+        if (!state) return true
+
+        const s = item.summary
+        const status = item.status
+
+        switch (state) {
+            case 'PENDING_APPROVAL':
+                return status === 'DRAFT'
+
+            case 'PENDING_RECEIPT':
+                return status !== 'DRAFT' && status !== 'CANCELLED' && status !== 'COMPLETED' && !s.hasReceipt && !s.hasInvoice
+
+            case 'PENDING_INVOICE':
+                return s.hasReceipt && !s.hasInvoice
+
+            case 'PENDING_PAYMENT':
+                return s.hasInvoice && s.paymentStatus !== 'PAID'
+
+            case 'PAID':
+                return s.paymentStatus === 'PAID'
+
+            case 'CANCELLED':
+                return status === 'CANCELLED'
+
+            default:
+                return true
         }
     }
 
@@ -323,6 +541,160 @@ export class PurchaseOrdersService {
         })
     }
 
+    async approveMany(ids: string[]) {
+        const successIds: string[] = []
+        const failed: Array<{ id: string; code: string; message: string }> = []
+
+        for (const id of ids) {
+            try {
+                const po = await this.prisma.purchaseOrder.findUnique({
+                    where: { id },
+                    select: {
+                        id: true,
+                        status: true,
+                        supplierCustomerId: true,
+                        orderDate: true,
+                    },
+                })
+
+                if (!po) {
+                    failed.push({
+                        id,
+                        code: 'PO_NOT_FOUND',
+                        message: 'Không tìm thấy đơn mua',
+                    })
+                    continue
+                }
+
+                if (po.status !== PurchaseOrderStatus.DRAFT) {
+                    failed.push({
+                        id,
+                        code: 'PO_NOT_DRAFT',
+                        message: 'Chỉ duyệt được đơn ở trạng thái nháp',
+                    })
+                    continue
+                }
+
+                await this.contractCheck.checkPurchaseContractWarning({
+                    supplierCustomerId: po.supplierCustomerId,
+                    onDate: po.orderDate,
+                })
+
+                await this.prisma.purchaseOrder.update({
+                    where: { id },
+                    data: { status: PurchaseOrderStatus.APPROVED },
+                })
+
+                successIds.push(id)
+            } catch (e: any) {
+                failed.push({
+                    id,
+                    code: e?.response?.code || e?.message || 'APPROVE_FAILED',
+                    message: e?.response?.message || 'Không thể duyệt đơn',
+                })
+            }
+        }
+
+        return {
+            successIds,
+            failed,
+        }
+    }
+
+    async cancelMany(ids: string[]) {
+        const successIds: string[] = []
+        const failed: Array<{ id: string; code: string; message: string }> = []
+
+        for (const id of ids) {
+            try {
+                const po = await this.prisma.purchaseOrder.findUnique({
+                    where: { id },
+                    include: {
+                        receipts: {
+                            select: { id: true, status: true },
+                        },
+                        supplierInvoices: {
+                            where: {
+                                status: {
+                                    in: [SupplierInvoiceStatus.DRAFT, SupplierInvoiceStatus.POSTED],
+                                },
+                            },
+                            select: {
+                                id: true,
+                                status: true,
+                            },
+                        },
+                    },
+                })
+
+                if (!po) {
+                    failed.push({
+                        id,
+                        code: 'PO_NOT_FOUND',
+                        message: 'Không tìm thấy đơn mua',
+                    })
+                    continue
+                }
+
+                if (po.status === PurchaseOrderStatus.CANCELLED) {
+                    failed.push({
+                        id,
+                        code: 'PO_ALREADY_CANCELLED',
+                        message: 'Đơn đã bị hủy',
+                    })
+                    continue
+                }
+
+                if (po.status === PurchaseOrderStatus.COMPLETED) {
+                    failed.push({
+                        id,
+                        code: 'PO_ALREADY_COMPLETED',
+                        message: 'Đơn đã hoàn thành',
+                    })
+                    continue
+                }
+
+                const hasConfirmedReceipt = (po.receipts ?? []).some((r) => r.status === 'CONFIRMED')
+                if (hasConfirmedReceipt) {
+                    failed.push({
+                        id,
+                        code: 'PO_HAS_CONFIRMED_RECEIPTS',
+                        message: 'Đơn đã có phiếu nhận hàng xác nhận',
+                    })
+                    continue
+                }
+
+                const hasInvoices = (po.supplierInvoices ?? []).length > 0
+                if (hasInvoices) {
+                    failed.push({
+                        id,
+                        code: 'PO_HAS_SUPPLIER_INVOICES',
+                        message: 'Đơn đã có hóa đơn nhà cung cấp',
+                    })
+                    continue
+                }
+
+                await this.prisma.purchaseOrder.update({
+                    where: { id },
+                    data: { status: PurchaseOrderStatus.CANCELLED },
+                })
+
+                successIds.push(id)
+            } catch (e: any) {
+                failed.push({
+                    id,
+                    code: e?.response?.code || e?.message || 'CANCEL_FAILED',
+                    message: e?.response?.message || 'Không thể hủy đơn',
+                })
+            }
+        }
+
+        return {
+            successIds,
+            failed,
+        }
+    }
+
     async detail(id: string) {
         const po = await this.prisma.purchaseOrder.findUnique({
             where: { id },
@@ -370,6 +742,10 @@ export class PurchaseOrdersService {
 
         if (!po) throw new NotFoundException('PO_NOT_FOUND')
 
+        const orderedQtyTotal = (po.lines ?? []).reduce((sum, l) => sum + Number(l.orderedQty ?? 0), 0)
+        const confirmedReceipts = (po.receipts ?? []).filter((x) => x.status === 'CONFIRMED')
+        const receivedQtyTotal = confirmedReceipts.reduce((sum, r) => sum + Number(r.qty ?? 0), 0)
+        const remainingQty = Math.max(orderedQtyTotal - receivedQtyTotal, 0)
         const confirmedReceiptCount = (po.receipts ?? []).filter((x) => x.status === 'CONFIRMED').length
         const invoices = po.supplierInvoices ?? []
 
@@ -377,7 +753,6 @@ export class PurchaseOrdersService {
 
         const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.amountTotal ?? 0), 0)
         const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s!.amountSettled ?? 0), 0)
-
 
         let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
         if (totalSettledAmount > 0 && totalSettledAmount + 0.01 >= totalSettlementAmount && totalSettlementAmount > 0) {
@@ -387,6 +762,12 @@ export class PurchaseOrdersService {
         }
 
         const hasInvoice = invoices.length > 0
+
+        const canReceive =
+            po.status !== PurchaseOrderStatus.CANCELLED &&
+            po.status !== PurchaseOrderStatus.COMPLETED &&
+            !hasInvoice &&
+            (po.orderType === 'LOT' ? remainingQty > 0 : confirmedReceiptCount === 0 && remainingQty > 0)
 
         const summary = {
             hasReceipt: confirmedReceiptCount > 0,
@@ -402,6 +783,23 @@ export class PurchaseOrdersService {
                     : po.status === PurchaseOrderStatus.COMPLETED
                       ? 'Đơn đã hoàn thành'
                       : null,
+
+            orderedQtyTotal,
+            receivedQtyTotal,
+            remainingQty,
+            canReceive,
+            receiveBlockedReason: hasInvoice
+                ? 'Đơn đã có hóa đơn nhà cung cấp'
+                : po.status === PurchaseOrderStatus.CANCELLED
+                  ? 'Đơn đã bị hủy'
+                  : po.status === PurchaseOrderStatus.COMPLETED
+                    ? 'Đơn đã hoàn thành'
+                    : po.orderType === 'SINGLE' && confirmedReceiptCount > 0
+                      ? 'Đơn lẻ đã nhận hàng xong'
+                      : remainingQty <= 0
+                        ? 'Đơn đã nhận đủ số lượng'
+                        : null,
+
             totalSettlementAmount,
             totalSettledAmount,
         }
@@ -418,6 +816,7 @@ export class PurchaseOrdersService {
         orderType?: any
         status?: PurchaseOrderStatus
         paymentMode?: any
+        businessState?: 'PENDING_APPROVAL' | 'PENDING_RECEIPT' | 'PENDING_INVOICE' | 'PENDING_PAYMENT' | 'PAID' | 'CANCELLED'
         dateFrom?: string
         dateTo?: string
         page?: number
@@ -431,7 +830,7 @@ export class PurchaseOrdersService {
             supplierCustomerId: q.supplierCustomerId ?? undefined,
             orderType: q.orderType ?? undefined,
             paymentMode: q.paymentMode ?? undefined,
-            status: q.status ?? undefined,
+            status: q.businessState ? undefined : (q.status ?? undefined),
             ...(q.dateFrom || q.dateTo
                 ? {
                       orderDate: {
@@ -447,7 +846,7 @@ export class PurchaseOrdersService {
                 : {}),
         }
 
-        const [items, total] = await this.prisma.$transaction([
+        const [items] = await this.prisma.$transaction([
             this.prisma.purchaseOrder.findMany({
                 where,
                 orderBy: { orderDate: 'desc' },
@@ -470,7 +869,7 @@ export class PurchaseOrdersService {
 
                     receipts: {
                         where: { status: 'CONFIRMED' },
-                        select: { id: true },
+                        select: { id: true, qty: true },
                     },
 
                     supplierInvoices: {
@@ -490,68 +889,430 @@ export class PurchaseOrdersService {
                             },
                         },
                     },
+
+                    lines: {
+                        select: {
+                            id: true,
+                            orderedQty: true,
+                            product: {
+                                select: {
+                                    id: true,
+                                    code: true,
+                                    name: true,
+                                },
+                            },
+                        },
+                        orderBy: { createdAt: 'asc' },
+                    },
                 },
             }),
-            this.prisma.purchaseOrder.count({ where }),
         ])
 
-        const mappedItems = items.map((item) => {
-            const confirmedReceiptCount = item.receipts?.length ?? 0
-            const invoices = item.supplierInvoices ?? []
+        const mappedItems = items.map((item) => ({
+            ...item,
+            lineCount: item.lines?.length ?? 0,
+            summary: this.buildPoSummary(item),
+        }))
 
-            const hasInvoice = invoices.length > 0
-            const hasPostedInvoice = invoices.some((x) => x.status === SupplierInvoiceStatus.POSTED)
+        const filteredItems = mappedItems.filter((item) => this.matchBusinessState(item, q.businessState))
 
-            const settlements = invoices.map((x) => x.payableSettlement).filter(Boolean)
+        return {
+            items: filteredItems,
+            total: filteredItems.length,
+            page,
+            limit,
+        }
+    }
 
-            const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.amountTotal ?? 0), 0)
-            const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s!.amountSettled ?? 0), 0)
+    async getTabCounts(q: { keyword?: string; supplierCustomerId?: string; orderType?: any; paymentMode?: any; dateFrom?: string; dateTo?: string }) {
+        const where: Prisma.PurchaseOrderWhereInput = {
+            supplierCustomerId: q.supplierCustomerId ?? undefined,
+            orderType: q.orderType ?? undefined,
+            paymentMode: q.paymentMode ?? undefined,
+            ...(q.dateFrom || q.dateTo
+                ? {
+                      orderDate: {
+                          gte: q.dateFrom ? this.normalizeDateOnly(q.dateFrom) : undefined,
+                          lte: q.dateTo ? this.normalizeDateOnly(q.dateTo) : undefined,
+                      },
+                  }
+                : {}),
+            ...(q.keyword
+                ? {
+                      OR: [{ orderNo: { contains: q.keyword.trim(), mode: 'insensitive' } }, { supplier: { name: { contains: q.keyword.trim(), mode: 'insensitive' } } }],
+                  }
+                : {}),
+        }
 
-            let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
-            if (totalSettledAmount > 0 && totalSettledAmount + 0.01 >= totalSettlementAmount && totalSettlementAmount > 0) {
-                paymentStatus = 'PAID'
-            } else if (totalSettledAmount > 0) {
-                paymentStatus = 'PARTIALLY_PAID'
+        const items = await this.prisma.purchaseOrder.findMany({
+            where,
+            select: {
+                id: true,
+                status: true,
+                receipts: {
+                    where: { status: 'CONFIRMED' },
+                    select: { id: true },
+                },
+                supplierInvoices: {
+                    where: { status: { not: SupplierInvoiceStatus.VOID } },
+                    select: {
+                        id: true,
+                        status: true,
+                        payableSettlement: {
+                            select: {
+                                id: true,
+                                status: true,
+                                amountTotal: true,
+                                amountSettled: true,
+                            },
+                        },
+                    },
+                },
+            },
+        })
+
+        const counters = {
+            ALL: 0,
+            PENDING_APPROVAL: 0,
+            PENDING_RECEIPT: 0,
+            PENDING_INVOICE: 0,
+            PENDING_PAYMENT: 0,
+            PAID: 0,
+            CANCELLED: 0,
+        }
+
+        for (const item of items) {
+            const summary = this.buildPoSummary(item)
+
+            counters.ALL++
+
+            const push = (key: keyof typeof counters) => counters[key]++
+
+            if (item.status === PurchaseOrderStatus.DRAFT) push('PENDING_APPROVAL')
+
+            if (
+                item.status !== PurchaseOrderStatus.DRAFT &&
+                item.status !== PurchaseOrderStatus.CANCELLED &&
+                item.status !== PurchaseOrderStatus.COMPLETED &&
+                !summary.hasReceipt &&
+                !summary.hasInvoice
+            ) {
+                push('PENDING_RECEIPT')
             }
 
-            let businessStatus: 'DRAFT' | 'APPROVED' | 'RECEIVED' | 'INVOICED' | 'PARTIALLY_PAID' | 'PAID' | 'CANCELLED' = 'DRAFT'
+            if (summary.hasReceipt && !summary.hasInvoice) push('PENDING_INVOICE')
 
-            if (item.status === PurchaseOrderStatus.CANCELLED) {
-                businessStatus = 'CANCELLED'
-            } else if (paymentStatus === 'PAID') {
-                businessStatus = 'PAID'
-            } else if (paymentStatus === 'PARTIALLY_PAID') {
-                businessStatus = 'PARTIALLY_PAID'
-            } else if (hasInvoice) {
-                businessStatus = 'INVOICED'
-            } else if (confirmedReceiptCount > 0) {
-                businessStatus = 'RECEIVED'
-            } else if (item.status === PurchaseOrderStatus.APPROVED || item.status === PurchaseOrderStatus.IN_PROGRESS || item.status === PurchaseOrderStatus.COMPLETED) {
-                businessStatus = 'APPROVED'
+            if (summary.hasInvoice && summary.paymentStatus !== 'PAID') {
+                push('PENDING_PAYMENT')
             }
+
+            if (summary.paymentStatus === 'PAID') push('PAID')
+
+            if (item.status === PurchaseOrderStatus.CANCELLED) push('CANCELLED')
+        }
+
+        return counters
+    }
+
+    async createPrintBatch(dto: CreatePurchaseOrderPrintBatchDto) {
+        const ids = [...new Set(dto.ids)]
+
+        if (!ids.length) {
+            throw new BadRequestException('IDS_REQUIRED')
+        }
+
+        const found = await this.prisma.purchaseOrder.findMany({
+            where: { id: { in: ids } },
+            select: { id: true },
+        })
+
+        const foundIds = new Set(found.map((x) => x.id))
+        const missingIds = ids.filter((id) => !foundIds.has(id))
+
+        if (missingIds.length > 0) {
+            throw new BadRequestException({
+                code: 'PURCHASE_ORDER_NOT_FOUND',
+                missingIds,
+            })
+        }
+
+        const run = await this.backgroundJobsService.createRun({
+            type: PURCHASE_ORDER_PRINT_JOB_TYPE,
+            name: PURCHASE_ORDER_PRINT_JOB_NAME,
+            payload: { ids },
+        })
+
+        await this.jobArtifactsService.upsertArtifact({
+            runId: run.id,
+            kind: ARTIFACT_PO_PRINT_INPUT,
+            content: { ids },
+        })
+
+        await this.backgroundJobsService.enqueueRun({
+            type: PURCHASE_ORDER_PRINT_JOB_TYPE,
+            queueName: QB_PURCHASE_ORDER_PRINT,
+            runId: run.id,
+            payloadRef: { inputKind: ARTIFACT_PO_PRINT_INPUT },
+            profile: 'default',
+        })
+
+        return {
+            runId: run.id,
+            status: BackgroundJobStatus.PENDING,
+        }
+    }
+
+    async getPrintStatus(runId: string) {
+        const run = await this.prisma.backgroundJobRun.findUnique({
+            where: { id: runId },
+            include: { job: true },
+        })
+
+        if (!run) {
+            throw new NotFoundException('BACKGROUND_JOB_RUN_NOT_FOUND')
+        }
+
+        const output = await this.jobArtifactsService.getArtifact(runId, ARTIFACT_PO_PRINT_OUTPUT)
+
+        const content = (output?.content ?? null) as Record<string, any> | null
+
+        return {
+            runId: run.id,
+            status: run.status,
+            error: run.error,
+            metrics: run.metrics,
+            fileUrl: output?.fileUrl ?? null,
+            fileName: content?.fileName ?? null,
+        }
+    }
+
+    async buildPrintData(poId: string): Promise<PurchaseOrderPrintData> {
+        const po = await this.prisma.purchaseOrder.findUnique({
+            where: { id: poId },
+            include: {
+                supplier: {
+                    select: {
+                        id: true,
+                        name: true,
+                        contactPhone: true,
+                        shippingAddress: true,
+                        defaultPurchaseContractNo: true,
+                        defaultDeliveryLocation: true,
+                    },
+                },
+                supplierLocation: {
+                    select: {
+                        name: true,
+                        address: true,
+                    },
+                },
+                lines: {
+                    orderBy: { id: 'asc' },
+                    include: {
+                        product: {
+                            select: { name: true },
+                        },
+                    },
+                },
+                paymentPlans: {
+                    orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
+                },
+            },
+        })
+
+        if (!po) {
+            throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
+        }
+
+        const historicalAddress = await this.resolveCustomerAddressAtDate(po.supplierCustomerId, po.orderDate)
+
+        const contractNo = this.normalizeText(po.contractNo) ?? this.normalizeText(po.supplier.defaultPurchaseContractNo) ?? ''
+
+        const deliveryLocation =
+            this.normalizeText(po.deliveryLocation) ??
+            this.normalizeText(historicalAddress) ??
+            this.normalizeText(po.supplierLocation?.address) ??
+            this.normalizeText(po.supplier.shippingAddress) ??
+            this.normalizeText(po.supplier.defaultDeliveryLocation) ??
+            ''
+
+        const lines = po.lines.map((line, index) => {
+            const qty = Number(line.orderedQty ?? 0)
+            const unitPrice = Number(line.unitPrice ?? 0)
+            const discountAmount = Number(line.discountAmount ?? 0)
+
+            const rawAmount = qty * unitPrice
+            const lineTotal = rawAmount - discountAmount
+            const payableUnitPrice = qty > 0 ? lineTotal / qty : unitPrice
 
             return {
-                ...item,
-                summary: {
-                    hasReceipt: confirmedReceiptCount > 0,
-                    hasInvoice,
-                    hasPostedInvoice,
-                    paymentStatus,
-                    businessStatus,
-                    canCancel: !hasInvoice && confirmedReceiptCount === 0 && item.status !== PurchaseOrderStatus.CANCELLED && item.status !== PurchaseOrderStatus.COMPLETED,
-                    cancelBlockedReason: hasInvoice
-                        ? 'Đơn đã có hóa đơn nhà cung cấp'
-                        : confirmedReceiptCount > 0
-                          ? 'Đơn đã có phiếu nhận hàng'
-                          : item.status === PurchaseOrderStatus.CANCELLED
-                            ? 'Đơn đã bị hủy'
-                            : item.status === PurchaseOrderStatus.COMPLETED
-                              ? 'Đơn đã hoàn thành'
-                              : null,
-                },
+                index: index + 1,
+                productName: line.product?.name || '',
+                qty,
+                unitPrice,
+                discountAmount,
+                payableUnitPrice,
+                lineTotal,
             }
         })
 
-        return { items: mappedItems, total, page, limit }
+        const totalQty = po.totalQty != null ? Number(po.totalQty) : lines.reduce((sum, l) => sum + l.qty, 0)
+
+        const totalAmount = po.totalAmount != null ? Number(po.totalAmount) : lines.reduce((sum, l) => sum + l.lineTotal, 0)
+
+        return {
+            id: po.id,
+            orderNo: po.orderNo,
+            orderDate: po.orderDate,
+            supplierName: po.supplier.name,
+            contractNo,
+            deliveryLocation,
+            companyAddress: '...',
+            companyPhone: po.supplier.contactPhone || '',
+            deliveryTimeText: po.expectedDate ? this.formatDate(po.expectedDate) : '',
+            paymentModeText: this.mapPaymentModeText(po.paymentMode),
+            paymentDeadlineText: this.resolvePaymentDeadlineText(po),
+            totalQty,
+            totalAmount,
+            lines,
+        }
+    }
+
+    async handleWorkerJob(runId: string) {
+        await this.backgroundJobsService.markProcessing(runId)
+
+        const publicDir = path.join(process.cwd(), 'public', 'po')
+        let browser: puppeteer.Browser | null = null
+
+        try {
+            await fs.mkdir(publicDir, { recursive: true })
+
+            const inputArtifact = await this.jobArtifactsService.getArtifact(runId, ARTIFACT_PO_PRINT_INPUT)
+
+            const input = (inputArtifact?.content ?? null) as PurchaseOrderPrintBatchInput | null
+            const ids = Array.isArray(input?.ids) ? [...new Set(input.ids)] : []
+
+            if (!ids.length) {
+                throw new Error('PRINT_BATCH_INPUT_NOT_FOUND')
+            }
+
+            browser = await puppeteer.launch({
+                executablePath: process.env.CHROME_PATH,
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            })
+
+            const mergedPdf = await PDFDocument.create()
+
+            let processed = 0
+            let success = 0
+            let failed = 0
+
+            await this.backgroundJobsService.updateMetrics(runId, {
+                total: ids.length,
+                processed,
+                success,
+                failed,
+                currentOrderNo: null,
+            })
+
+            for (const id of ids) {
+                try {
+                    const data = await this.buildPrintData(id)
+
+                    await this.backgroundJobsService.updateMetrics(runId, {
+                        total: ids.length,
+                        processed,
+                        success,
+                        failed,
+                        currentOrderNo: data.orderNo,
+                    })
+
+                    const html = renderPurchaseOrderPrintHtml(data)
+                    const page = await browser.newPage()
+
+                    try {
+                        await page.setContent(html, { waitUntil: 'networkidle0' })
+
+                        const pdfBuffer = await page.pdf({
+                            format: 'A4',
+                            printBackground: true,
+                            margin: {
+                                top: '12mm',
+                                right: '10mm',
+                                bottom: '12mm',
+                                left: '10mm',
+                            },
+                        })
+
+                        const partPdf = await PDFDocument.load(pdfBuffer)
+                        const pages = await mergedPdf.copyPages(partPdf, partPdf.getPageIndices())
+
+                        for (const p of pages) {
+                            mergedPdf.addPage(p)
+                        }
+
+                        success++
+                    } finally {
+                        await page.close()
+                    }
+                } catch (error) {
+                    failed++
+                    throw error
+                } finally {
+                    processed++
+
+                    await this.backgroundJobsService.updateMetrics(runId, {
+                        total: ids.length,
+                        processed,
+                        success,
+                        failed,
+                        currentOrderNo: null,
+                    })
+                }
+            }
+
+            if (success === 0) {
+                await this.backgroundJobsService.markFailed(runId, 'ALL_PRINT_FAILED')
+                return
+            }
+
+            const mergedBytes = await mergedPdf.save()
+            const fileName = `${runId}.pdf`
+            const finalPath = path.join(publicDir, fileName)
+
+            await fs.writeFile(finalPath, mergedBytes)
+
+            const checksum = createHash('sha256').update(Buffer.from(mergedBytes)).digest('hex')
+
+            const fileUrl = `/static/po/${fileName}`
+
+            await this.jobArtifactsService.upsertArtifact({
+                runId,
+                kind: ARTIFACT_PO_PRINT_OUTPUT,
+                fileUrl,
+                checksum,
+                content: {
+                    fileName,
+                    totalCount: ids.length,
+                    successCount: success,
+                    failedCount: failed,
+                },
+            })
+
+            await this.backgroundJobsService.markSuccess(runId, {
+                total: ids.length,
+                processed,
+                success,
+                failed,
+            })
+        } catch (error) {
+            await this.backgroundJobsService.markFailed(runId, error)
+            throw error
+        } finally {
+            if (browser) {
+                await browser.close()
+            }
+        }
     }
 }

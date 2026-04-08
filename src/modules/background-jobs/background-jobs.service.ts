@@ -79,4 +79,13 @@ export class BackgroundJobsService {
             data: { status: BackgroundJobStatus.FAILED, finishedAt: new Date(), error: msg },
         })
     }
+
+    async updateMetrics(runId: string, metrics: unknown): Promise<void> {
+        await this.prisma.backgroundJobRun.update({
+            where: { id: runId },
+            data: {
+                metrics: metrics ? toJsonValue(metrics) : undefined,
+            },
+        })
+    }
 }
