@@ -38,7 +38,6 @@ export class AuditInterceptor implements NestInterceptor {
         const moduleCode = this.reflector.get<string>(MODULE_KEY, ctx.getHandler()) ?? this.reflector.get<string>(MODULE_KEY, ctx.getClass())
         if (!moduleCode) return next.handle()
 
-        // Lấy trước dữ liệu "before" nếu có id
         const id: string | undefined = req.params?.id
         const before$ = id ? this.pickBefore(moduleCode, id) : Promise.resolve(null)
 
@@ -91,12 +90,23 @@ export class AuditInterceptor implements NestInterceptor {
         )
     }
 
-    // Tối giản: chỉ cần case department cho module hiện tại.
     private async pickBefore(moduleCode: string, id: string) {
         if (moduleCode === 'department') {
             return this.prisma.department.findUnique({ where: { id } })
         } else if (moduleCode === 'employee') {
             return this.prisma.employee.findUnique({ where: { id } })
+        } else if (moduleCode === 'customer') {
+            return this.prisma.customer.findUnique({ where: { id } })
+        } else if (moduleCode === 'contract') {
+            return this.prisma.contract.findUnique({ where: { id } })
+        } else if (moduleCode === 'contracttype') {
+            return this.prisma.contractType.findUnique({ where: { id } })
+        } else if (moduleCode === 'product') {
+            return this.prisma.product.findUnique({ where: { id } })
+        } else if (moduleCode === 'purchase-order') {
+            return this.prisma.purchaseOrder.findUnique({ where: { id } })
+        } else if (moduleCode === 'customer-group') {
+            return this.prisma.customerGroup.findUnique({ where: { id } })
         }
         return null
     }

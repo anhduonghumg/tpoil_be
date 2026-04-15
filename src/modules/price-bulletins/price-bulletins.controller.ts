@@ -1,24 +1,23 @@
 // src/modules/price-bulletins/price-bulletins.controller.ts
-import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
 import { ListPriceBulletinsDto, ListPriceItemsDto } from './dto/list-price-bulletins.dto'
 import { PriceBulletinsService } from './price-bulletins.service'
 import { CreatePriceBulletinDto } from './dto/create-price-bulletin.dto'
 import { UpdatePriceBulletinDto } from './dto/update-price-bulletin.dto'
 import { QuoteBatchDto, QuotePriceQueryDto, RegionsSelectQueryDto } from './dto/price-bulletins.dto'
 import { CommitImportDto } from './dto/import-price-bulletin-pdf.dto'
-// import { BackgroundJobsService } from '../background-jobs/background-jobs.service'
 import { FileInterceptor } from '@nestjs/platform-express'
-// import { JobArtifactsService } from '../job-artifacts/job-artifacts.service'
-// import { PricePdfStorage } from './price-file.storage'
+import { LoggedInGuard } from '../auth/guards/logged-in.guard'
+import { AuditInterceptor } from 'src/audit/audit.interceptor'
+import { ModuleName } from 'src/common/decorators/module-name.decorator'
+import { MODULE_CODES } from 'src/common/constants/modules'
 
+@UseGuards(LoggedInGuard)
+// @UseInterceptors(AuditInterceptor)
+@ModuleName(MODULE_CODES.PRICE_BULLETIN)
 @Controller('price-bulletins')
 export class PriceBulletinsController {
-    constructor(
-        private readonly service: PriceBulletinsService,
-        // private readonly bg: BackgroundJobsService,
-        // private readonly artifacts: JobArtifactsService,
-        // private readonly storage: PricePdfStorage,
-    ) {}
+    constructor(private readonly service: PriceBulletinsService) {}
 
     @Get()
     list(@Query() dto: ListPriceBulletinsDto) {

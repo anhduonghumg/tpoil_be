@@ -1,10 +1,17 @@
-import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
 import { CreateSupplierInvoiceDto, PostSupplierInvoiceDto } from './dto/supplier-invoice.dto'
 import { SupplierInvoiceImportPdfDto } from './dto/import-pdf.dto'
 import { FileInterceptor } from '@nestjs/platform-express'
 import { memoryStorage } from 'multer'
 import { SupplierInvoicesService } from './supplier-invoices.service'
+import { LoggedInGuard } from 'src/modules/auth/guards/logged-in.guard'
+import { AuditInterceptor } from 'src/audit/audit.interceptor'
+import { ModuleName } from 'src/common/decorators/module-name.decorator'
+import { MODULE_CODES } from 'src/common/constants/modules'
 
+@UseGuards(LoggedInGuard)
+// @UseInterceptors(AuditInterceptor)
+@ModuleName(MODULE_CODES.SUPPLIER_INVOICE)
 @Controller('supplier-invoices')
 export class SupplierInvoicesController {
     constructor(private readonly service: SupplierInvoicesService) {}

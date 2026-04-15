@@ -135,7 +135,7 @@ export function renderPurchaseOrderPrintHtml(data: PurchaseOrderPrintData): stri
     <div class="company">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>
     <div>Độc lập - Tự do - Hạnh phúc</div>
     <br/>
-    <i>Thanh Hóa, ngày ${dateText(data.orderDate)}</i>
+    <i>Thanh Hóa, ngày ${dateText(data.orderDate)}</i></span>
   </div>
 </div>
 
@@ -146,11 +146,11 @@ export function renderPurchaseOrderPrintHtml(data: PurchaseOrderPrintData): stri
 </div>
 
 <div class="section">
-  <div class="red">
+  <div class="">
     Căn cứ hợp đồng mua bán xăng dầu số: ${escapeHtml(data.contractNo || '...')}
   </div>
 
-  <div>Đơn vị đặt hàng: CÔNG TY TNHH VT&TMXD THIÊN PHÚC</div>
+  <div>Đơn vị đặt hàng: <b>CÔNG TY TNHH VT&TMXD THIÊN PHÚC</b></div>
   <div>Địa chỉ: ${escapeHtml(data.companyAddress || '')}</div>
   <div>Điện thoại: ${escapeHtml(data.companyPhone || '')}</div>
 
@@ -191,9 +191,9 @@ export function renderPurchaseOrderPrintHtml(data: PurchaseOrderPrintData): stri
   <div>
     3. Thông tin giao nhận:
     <br/>
-    - Thời gian nhận hàng: ${escapeHtml(data.deliveryTimeText || '')}
+      + Thời gian nhận hàng: Từ ngày ${data.orderDate.toString()} đến khi hoàn tất lô hàng
     <br/>
-    - Địa điểm giao hàng: ${escapeHtml(data.deliveryLocation || '')}
+      + Địa điểm giao hàng: ${escapeHtml(data.deliveryLocation || '')}
   </div>
 
   <div>

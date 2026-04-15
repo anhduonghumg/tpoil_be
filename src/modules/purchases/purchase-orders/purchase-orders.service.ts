@@ -11,13 +11,13 @@ import { ARTIFACT_PO_PRINT_INPUT, ARTIFACT_PO_PRINT_OUTPUT } from './constants/p
 import { PURCHASE_ORDER_PRINT_JOB_NAME, PURCHASE_ORDER_PRINT_JOB_TYPE, QB_PURCHASE_ORDER_PRINT } from './jobs/purchase-order-print-queues'
 import { PurchaseOrderPrintBatchInput, PurchaseOrderPrintData } from './types/purchase-order-print.types'
 import { createHash } from 'crypto'
-import { createWriteStream } from 'fs'
 import { PDFDocument } from 'pdf-lib'
 import * as fs from 'fs/promises'
-import * as archiver from 'archiver'
 import * as path from 'path'
 import * as puppeteer from 'puppeteer-core'
 import { renderPurchaseOrderPrintHtml } from './templates/purchase-order-print.template'
+import { Browser } from 'puppeteer-core'
+import { PaymentRequestPrintData, renderPaymentRequestPrintHtml } from './templates/payment-request-print.template'
 
 @Injectable()
 export class PurchaseOrdersService {
@@ -27,6 +27,55 @@ export class PurchaseOrdersService {
         private readonly backgroundJobsService: BackgroundJobsService,
         private readonly jobArtifactsService: JobArtifactsService,
     ) {}
+
+    private async renderMergedPdfFromHtmls(htmls: string[]): Promise<Buffer> {
+        let browser: Browser | null = null
+
+        try {
+            browser = await puppeteer.launch({
+                executablePath: process.env.CHROME_PATH,
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            })
+
+            const mergedPdf = await PDFDocument.create()
+
+            for (const html of htmls) {
+                const page = await browser.newPage()
+
+                try {
+                    await page.setContent(html, { waitUntil: 'networkidle0' })
+
+                    const pdfBuffer = await page.pdf({
+                        format: 'A4',
+                        printBackground: true,
+                        margin: {
+                            top: '10mm',
+                            right: '10mm',
+                            bottom: '10mm',
+                            left: '10mm',
+                        },
+                    })
+
+                    const partPdf = await PDFDocument.load(pdfBuffer)
+                    const pages = await mergedPdf.copyPages(partPdf, partPdf.getPageIndices())
+
+                    for (const p of pages) {
+                        mergedPdf.addPage(p)
+                    }
+                } finally {
+                    await page.close()
+                }
+            }
+
+            const mergedBytes = await mergedPdf.save()
+            return Buffer.from(mergedBytes)
+        } finally {
+            if (browser) {
+                await browser.close()
+            }
+        }
+    }
 
     private async resolveCustomerAddressAtDate(customerId: string, at: Date): Promise<string | null> {
         const d = new Date(at)
@@ -94,52 +143,6 @@ export class PurchaseOrdersService {
         const d = new Date(value)
         if (Number.isNaN(d.getTime())) throw new BadRequestException(code)
         return d
-    }
-
-    private async zipFiles(workDir: string, pdfDir: string, outPath: string, includeErrorsTxt: boolean): Promise<void> {
-        await new Promise<void>((resolve, reject) => {
-            const output = createWriteStream(outPath)
-            const archive = archiver('zip', { zlib: { level: 9 } })
-
-            output.on('close', () => resolve())
-            output.on('error', (err) => reject(err))
-            archive.on('error', (err) => reject(err))
-
-            archive.pipe(output)
-            archive.directory(pdfDir, false)
-
-            if (includeErrorsTxt) {
-                archive.file(path.join(workDir, 'errors.txt'), { name: 'errors.txt' })
-            }
-
-            archive.finalize()
-        })
-    }
-
-    private buildErrorsText(errors: Array<{ id: string; orderNo?: string; message: string }>): string {
-        const lines: string[] = []
-        lines.push('DANH SÁCH ĐƠN IN LỖI')
-        lines.push('')
-
-        for (const err of errors) {
-            lines.push(`${err.orderNo || err.id} - ${err.message}`)
-        }
-
-        return lines.join('\n')
-    }
-
-    private toSafeFileName(value: string): string {
-        return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'purchase-order'
-    }
-
-    private toErrorMessage(error: unknown): string {
-        if (error instanceof Error) return error.message
-        return String(error)
-    }
-
-    private async sha256File(filePath: string): Promise<string> {
-        const buf = await fs.readFile(filePath)
-        return createHash('sha256').update(buf).digest('hex')
     }
 
     private async assertLocationsBelongToSupplier(args: { supplierCustomerId: string; locationIds: string[] }) {
@@ -264,6 +267,65 @@ export class PurchaseOrdersService {
             default:
                 return true
         }
+    }
+
+    private numberToVietnameseMoney(input: number): string {
+        const n = Math.round(Number(input || 0))
+        if (!Number.isFinite(n) || n <= 0) return 'Không đồng'
+
+        const units = ['', 'nghìn', 'triệu', 'tỷ', 'nghìn tỷ', 'triệu tỷ']
+        const digits = ['không', 'một', 'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín']
+
+        const readTriple = (num: number, full: boolean): string => {
+            const hundred = Math.floor(num / 100)
+            const tenUnit = num % 100
+            const ten = Math.floor(tenUnit / 10)
+            const unit = tenUnit % 10
+            const parts: string[] = []
+
+            if (full || hundred > 0) {
+                parts.push(`${digits[hundred]} trăm`)
+            }
+
+            if (ten > 1) {
+                parts.push(`${digits[ten]} mươi`)
+                if (unit === 1) parts.push('mốt')
+                else if (unit === 4) parts.push('bốn')
+                else if (unit === 5) parts.push('lăm')
+                else if (unit > 0) parts.push(digits[unit])
+            } else if (ten === 1) {
+                parts.push('mười')
+                if (unit === 5) parts.push('lăm')
+                else if (unit > 0) parts.push(digits[unit])
+            } else if (ten === 0 && unit > 0) {
+                if (full || hundred > 0) parts.push('lẻ')
+                if (unit === 5 && (full || hundred > 0)) parts.push('năm')
+                else parts.push(digits[unit])
+            }
+
+            return parts.join(' ').trim()
+        }
+
+        const chunks: number[] = []
+        let temp = n
+        while (temp > 0) {
+            chunks.push(temp % 1000)
+            temp = Math.floor(temp / 1000)
+        }
+
+        const parts: string[] = []
+        for (let i = chunks.length - 1; i >= 0; i--) {
+            const chunk = chunks[i]
+            if (chunk === 0) continue
+
+            const full = i < chunks.length - 1
+            const text = readTriple(chunk, full)
+            const unit = units[i] ? ` ${units[i]}` : ''
+            parts.push(`${text}${unit}`.trim())
+        }
+
+        const sentence = parts.join(' ').replace(/\s+/g, ' ').trim()
+        return sentence.charAt(0).toUpperCase() + sentence.slice(1) + ' đồng'
     }
 
     async create(dto: {
@@ -701,7 +763,24 @@ export class PurchaseOrdersService {
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
                 supplierLocation: { select: { id: true, code: true, name: true } },
-                receipts: true,
+                receipts: {
+                    select: {
+                        id: true,
+                        purchaseOrderLineId: true,
+                        receiptNo: true,
+                        receiptDate: true,
+                        qty: true,
+                        status: true,
+                        supplierLocationId: true,
+                        supplierLocation: {
+                            select: {
+                                id: true,
+                                code: true,
+                                name: true,
+                            },
+                        },
+                    },
+                },
                 supplierInvoices: {
                     where: {
                         status: { not: SupplierInvoiceStatus.VOID },
@@ -769,6 +848,14 @@ export class PurchaseOrdersService {
             !hasInvoice &&
             (po.orderType === 'LOT' ? remainingQty > 0 : confirmedReceiptCount === 0 && remainingQty > 0)
 
+        const receiptDates = confirmedReceipts
+            .map((r) => r.receiptDate)
+            .filter(Boolean)
+            .sort()
+
+        const firstReceiptDate = receiptDates.length ? receiptDates[0] : null
+        const lastReceiptDate = receiptDates.length ? receiptDates[receiptDates.length - 1] : null
+
         const summary = {
             hasReceipt: confirmedReceiptCount > 0,
             hasInvoice,
@@ -802,6 +889,8 @@ export class PurchaseOrdersService {
 
             totalSettlementAmount,
             totalSettledAmount,
+            firstReceiptDate,
+            lastReceiptDate,
         }
 
         return {
@@ -1128,13 +1217,7 @@ export class PurchaseOrdersService {
 
         const contractNo = this.normalizeText(po.contractNo) ?? this.normalizeText(po.supplier.defaultPurchaseContractNo) ?? ''
 
-        const deliveryLocation =
-            this.normalizeText(po.deliveryLocation) ??
-            this.normalizeText(historicalAddress) ??
-            this.normalizeText(po.supplierLocation?.address) ??
-            this.normalizeText(po.supplier.shippingAddress) ??
-            this.normalizeText(po.supplier.defaultDeliveryLocation) ??
-            ''
+        const deliveryLocation = this.normalizeText(po.supplier.defaultDeliveryLocation) ?? ''
 
         const lines = po.lines.map((line, index) => {
             const qty = Number(line.orderedQty ?? 0)
@@ -1163,11 +1246,11 @@ export class PurchaseOrdersService {
         return {
             id: po.id,
             orderNo: po.orderNo,
-            orderDate: po.orderDate,
+            orderDate: this.formatDate(po.orderDate),
             supplierName: po.supplier.name,
             contractNo,
             deliveryLocation,
-            companyAddress: '...',
+            companyAddress: po.supplierLocation?.address || po.supplier.shippingAddress || historicalAddress || '',
             companyPhone: po.supplier.contactPhone || '',
             deliveryTimeText: po.expectedDate ? this.formatDate(po.expectedDate) : '',
             paymentModeText: this.mapPaymentModeText(po.paymentMode),
@@ -1314,5 +1397,155 @@ export class PurchaseOrdersService {
                 await browser.close()
             }
         }
+    }
+
+    async generateSinglePrintPdf(poId: string): Promise<Buffer> {
+        const data = await this.buildPrintData(poId)
+
+        const html = renderPurchaseOrderPrintHtml(data)
+
+        let browser: puppeteer.Browser | null = null
+
+        try {
+            browser = await puppeteer.launch({
+                executablePath: process.env.CHROME_PATH,
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            })
+
+            const page = await browser.newPage()
+
+            await page.setContent(html, {
+                waitUntil: 'networkidle0',
+            })
+
+            const pdfBuffer = await page.pdf({
+                format: 'A4',
+                printBackground: true,
+                margin: {
+                    top: '12mm',
+                    right: '10mm',
+                    bottom: '12mm',
+                    left: '10mm',
+                },
+            })
+
+            return Buffer.from(pdfBuffer)
+        } finally {
+            if (browser) {
+                await browser.close()
+            }
+        }
+    }
+
+    // async printBatchSync(dto: CreatePurchaseOrderPrintBatchDto): Promise<Buffer> {
+    //     const ids = [...new Set(dto.ids)]
+
+    //     if (!ids.length) {
+    //         throw new BadRequestException('IDS_REQUIRED')
+    //     }
+
+    //     const htmls: string[] = []
+
+    //     for (const id of ids) {
+    //         const data = await this.buildPrintData(id)
+    //         htmls.push(renderPurchaseOrderPrintHtml(data))
+    //     }
+
+    //     return this.renderMergedPdfFromHtmls(htmls)
+    // }
+
+    async buildPaymentRequestPrintData(poId: string): Promise<PaymentRequestPrintData> {
+        const po = await this.prisma.purchaseOrder.findUnique({
+            where: { id: poId },
+            include: {
+                supplier: {
+                    select: {
+                        id: true,
+                        code: true,
+                        name: true,
+                    },
+                },
+                lines: {
+                    include: {
+                        product: {
+                            select: {
+                                code: true,
+                                name: true,
+                            },
+                        },
+                    },
+                    orderBy: { id: 'asc' },
+                },
+            },
+        })
+
+        if (!po) {
+            throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
+        }
+
+        const totalAmount =
+            po.totalAmount != null
+                ? Number(po.totalAmount)
+                : (po.lines ?? []).reduce((sum, line) => {
+                      const qty = Number(line.orderedQty ?? 0)
+                      const price = Number(line.unitPrice ?? 0)
+                      const discount = Number(line.discountAmount ?? 0)
+                      return sum + qty * price - discount
+                  }, 0)
+
+        const supplierCode = po.supplier?.code || ''
+        const supplierName = po.supplier?.name || ''
+        const orderNo = po.orderNo
+
+        return {
+            cityText: 'Thanh Hóa',
+            printDate: new Date(),
+
+            requesterName: 'Lê Thị Hoài',
+            requesterDepartment: 'Mua hàng',
+
+            beneficiaryName: supplierName,
+            beneficiaryAccountNo: '',
+            beneficiaryBankName: '',
+
+            totalAmount,
+            totalAmountText: this.numberToVietnameseMoney(totalAmount),
+
+            rows: [
+                {
+                    supplierCode,
+                    orderNo,
+                    note: po.note || '',
+                    amount: totalAmount,
+                    content: `Công ty Thiên Phúc thanh toán tiền hàng cho công ty ${supplierName.toUpperCase()}`,
+                },
+            ],
+
+            bankDepartmentLabel: 'BỘ PHẬN NGÂN HÀNG',
+            purchaseDepartmentLabel: 'BỘ PHẬN MUA HÀNG',
+            deputyDirectorLabel: 'Phó Giám Đốc',
+            requesterLabel: 'Người Đề Nghị',
+
+            deputyDirectorName: 'Nguyễn Ngọc Mai',
+            requesterSignName: 'Lê Thị Hoài',
+        }
+    }
+
+    async printPaymentRequestBatchSync(dto: CreatePurchaseOrderPrintBatchDto): Promise<Buffer> {
+        const ids = [...new Set(dto.ids)]
+
+        if (!ids.length) {
+            throw new BadRequestException('IDS_REQUIRED')
+        }
+
+        const htmls: string[] = []
+
+        for (const id of ids) {
+            const data = await this.buildPaymentRequestPrintData(id)
+            htmls.push(renderPaymentRequestPrintHtml(data))
+        }
+
+        return this.renderMergedPdfFromHtmls(htmls)
     }
 }

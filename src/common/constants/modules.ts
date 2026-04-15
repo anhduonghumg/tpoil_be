@@ -5,8 +5,23 @@ export const MODULE_CODES = {
     FINANCE: 'Tài chính',
     INVENTORY: 'Kho',
     CUSTOMER: 'Khách hàng',
+    CUSTOMER_GROUP: 'Nhóm khách hàng',
     CONTRACT: 'Hợp đồng',
     CONTRACTTYPE: 'Loại hợp đồng',
+    PRODUCT: 'Sản phẩm',
+    PURCHASE: 'Mua hàng',
+    PURCHASE_ORDER: 'Đơn mua hàng',
+    PURCHASE_INVOICE: 'Hóa đơn mua hàng',
+    GOODS_RECEIPT: 'Phiếu nhập kho',
+    SUPPLIER: 'Nhà cung cấp',
+    SUPPLIER_GROUP: 'Nhóm nhà cung cấp',
+    SUPPLIER_INVOICE: 'Hóa đơn nhà cung cấp',
+    SALE: 'Bán hàng',
+    SALE_ORDER: 'Đơn bán hàng',
+    SALE_INVOICE: 'Hóa đơn bán hàng',
+    PRICE_BULLETIN: 'Bảng giá',
+    BACKGROUND_JOBS: 'Công việc nền',
+    JOB_ARTIFACTS: 'Tệp công việc nền',
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]

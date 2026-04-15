@@ -11,9 +11,10 @@ import { CustomerGroupListQueryDto } from './dto/customer-group-list-query.dto'
 import { CustomerGroupSelectQueryDto } from './dto/customer-group-select-query.dto'
 import { CreateCustomerGroupDto } from './dto/create-customer-group.dto'
 import { UpdateCustomerGroupDto } from './dto/update-customer-group.dto'
+import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
-
+// PermissionsGuard
 @UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.CUSTOMER)

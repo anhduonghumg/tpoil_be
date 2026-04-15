@@ -1,5 +1,5 @@
 // src/modules/purchases/purchase-orders/purchase-orders.controller.ts
-import { Body, Controller, Get, NotFoundException, Param, Post, Query, Res } from '@nestjs/common'
+import { Body, Controller, Get, NotFoundException, Param, Post, Query, Res, UseGuards, UseInterceptors } from '@nestjs/common'
 import type { Response } from 'express'
 import path from 'path'
 import { PurchaseOrdersService } from './purchase-orders.service'
@@ -7,7 +7,14 @@ import { ApprovePurchaseOrderDto, BulkPurchaseOrderIdsDto, CreatePurchaseOrderDt
 import { JobArtifactsService } from 'src/modules/job-artifacts/job-artifacts.service'
 import { ARTIFACT_PO_PRINT_OUTPUT } from './jobs/purchase-order-print-queues'
 import { CreatePurchaseOrderPrintBatchDto } from './dto/create-purchase-order-print-batch.dto'
+import { LoggedInGuard } from 'src/modules/auth/guards/logged-in.guard'
+import { AuditInterceptor } from 'src/audit/audit.interceptor'
+import { MODULE_CODES } from 'src/common/constants/modules'
+import { ModuleName } from 'src/common/decorators/module-name.decorator'
 
+@UseGuards(LoggedInGuard)
+// @UseInterceptors(AuditInterceptor)
+@ModuleName(MODULE_CODES.PURCHASE_ORDER)
 @Controller('purchase-orders')
 export class PurchaseOrdersController {
     constructor(
@@ -45,6 +52,16 @@ export class PurchaseOrdersController {
         return this.service.cancel(id)
     }
 
+    @Get(':id/print')
+    async printSingle(@Param('id') id: string, @Res() res: Response) {
+        const pdfBuffer = await this.service.generateSinglePrintPdf(id)
+
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `inline; filename="PO-${id}.pdf"`)
+
+        return res.send(pdfBuffer)
+    }
+
     @Post('approve-many')
     approveMany(@Body() body: BulkPurchaseOrderIdsDto) {
         return this.service.approveMany(body.ids)
@@ -53,6 +70,26 @@ export class PurchaseOrdersController {
     @Post('cancel-many')
     cancelMany(@Body() body: BulkPurchaseOrderIdsDto) {
         return this.service.cancelMany(body.ids)
+    }
+
+    // @Post('print-batch-sync')
+    // async printBatchSync(@Body() dto: CreatePurchaseOrderPrintBatchDto, @Res() res: Response) {
+    //     const pdfBuffer = await this.service.printBatchSync(dto)
+
+    //     res.setHeader('Content-Type', 'application/pdf')
+    //     res.setHeader('Content-Disposition', 'inline; filename="purchase-orders.pdf"')
+
+    //     return res.send(pdfBuffer)
+    // }
+
+    @Post('print-payment-request-batch-sync')
+    async printPaymentRequestBatchSync(@Body() dto: CreatePurchaseOrderPrintBatchDto, @Res() res: Response) {
+        const pdfBuffer = await this.service.printPaymentRequestBatchSync(dto)
+
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', 'inline; filename="payment-requests.pdf"')
+
+        return res.send(pdfBuffer)
     }
 
     @Post('print-batch')

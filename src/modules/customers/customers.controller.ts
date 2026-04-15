@@ -13,9 +13,11 @@ import { ContractsService } from '../contracts/contracts.service'
 import { AssignContractsToCustomerDto } from './dto/assign-contracts.dto'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
 import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
+import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
+// PermissionsGuard
 @UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.CUSTOMER)

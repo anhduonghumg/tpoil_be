@@ -16,6 +16,7 @@ import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dt
 import { ImportContractsDto } from './dto/import-contracts.dto'
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
+// PermissionsGuard
 @UseGuards(LoggedInGuard)
 @UseInterceptors(AuditInterceptor)
 @ModuleName(MODULE_CODES.CONTRACT)
