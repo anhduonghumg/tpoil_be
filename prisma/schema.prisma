@@ -305,6 +305,11 @@ enum CounterpartyType {
   OTHER
 }
 
+enum PurchaseBizType {
+  COMMERCIAL
+  TERM
+}
+
 // =======================================
 // Cron Jobs
 // =======================================
@@ -1073,6 +1078,7 @@ model PurchaseOrder {
   priceRegionId String?      @db.Uuid
   priceRegion   PriceRegion? @relation(fields: [priceRegionId], references: [id], onDelete: SetNull)
 
+  bizType     PurchaseBizType     @default(COMMERCIAL)
   orderType   PurchaseOrderType
   status      PurchaseOrderStatus @default(DRAFT)
   paymentMode PaymentMode
@@ -1100,11 +1106,13 @@ model PurchaseOrder {
 
   supplierInvoices SupplierInvoice[]          @relation("supplierInvoices")
   paymentPlans     PurchaseOrderPaymentPlan[]
+  pricingRuns      PurchasePricingRun[]
 
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
   @@index([priceRegionId])
+  @@index([bizType])
 }
 
 model PurchaseOrderLine {
@@ -1130,6 +1138,7 @@ model PurchaseOrderLine {
   product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   goodsReceipts GoodsReceipt[]
+  pricingRuns   PurchasePricingRun[]
 
   @@index([purchaseOrderId])
   @@index([productId])
@@ -1196,6 +1205,7 @@ model GoodsReceipt {
   purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   invoiceLines SupplierInvoiceLine[]
+  pricingRuns  PurchasePricingRunReceipt[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1204,6 +1214,22 @@ model GoodsReceipt {
   @@index([supplierCustomerId, receiptDate])
   @@index([supplierLocationId, productId])
   @@index([status])
+}
+
+model PurchasePricingRunReceipt {
+  runId          String @db.Uuid
+  goodsReceiptId String @db.Uuid
+
+  qtyActualUsed Decimal? @db.Decimal(18, 3)
+  qtyV15Used    Decimal? @db.Decimal(18, 3)
+
+  createdAt DateTime @default(now())
+
+  run          PurchasePricingRun @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  goodsReceipt GoodsReceipt       @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([runId, goodsReceiptId])
+  @@index([goodsReceiptId])
 }
 
 // ======================================================
@@ -1688,7 +1714,14 @@ model SupplierPricingTemplate {
 }
 
 model PurchasePricingRun {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  purchaseOrderId String        @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  purchaseOrderLineId String            @db.Uuid
+  purchaseOrderLine   PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
   supplierCustomerId String   @db.Uuid
   supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
@@ -1705,11 +1738,14 @@ model PurchasePricingRun {
 
   status PricingRunStatus @default(DRAFT)
 
-  stages PurchasePricingStage[]
+  stages   PurchasePricingStage[]
+  receipts PurchasePricingRunReceipt[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([purchaseOrderId])
+  @@index([purchaseOrderLineId])
   @@index([supplierCustomerId, billDate])
   @@index([status])
 }
@@ -1743,10 +1779,30 @@ model PurchasePricingStage {
   note String?
 
   priceDays PurchasePricingPriceDay[]
+  costs     PurchasePricingStageCost[]
 
   run PurchasePricingRun @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([runId, stageType])
+}
+
+model PurchasePricingStageCost {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  stageId String               @db.Uuid
+  stage   PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  costType  PurchaseCostType
+  amountVnd Decimal          @db.Decimal(18, 2)
+
+  sourceDocNo String?
+  note        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([stageId])
+  @@index([costType])
 }
 
 model PurchasePricingPriceDay {

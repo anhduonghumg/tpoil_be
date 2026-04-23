@@ -38,6 +38,7 @@ import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module
 import { BankingModule } from './modules/banking/banking.module'
 import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-import-templates.module'
 import { BankPurposesModule } from './modules/bank-purposes/bank-purposes.module'
+import { PurchaseTermModule } from './modules/purchases/purchase-term/purchase-term.module'
 
 @Module({
     imports: [
@@ -65,6 +66,7 @@ import { BankPurposesModule } from './modules/bank-purposes/bank-purposes.module
         ProductsModule,
         SupplierLocationsModule,
         PriceBulletinsModule,
+        PurchaseTermModule,
 
         BankingModule,
         BankPurposesModule,
