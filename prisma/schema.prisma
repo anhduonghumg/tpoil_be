@@ -1090,7 +1090,8 @@ model PurchaseOrder {
   orderDate    DateTime
   expectedDate DateTime?
 
-  note String?
+  paymentNote String?
+  note        String?
 
   totalQty    Decimal? @db.Decimal(18, 3)
   totalAmount Decimal? @db.Decimal(18, 2)
@@ -1719,8 +1720,8 @@ model PurchasePricingRun {
   purchaseOrderId String        @db.Uuid
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  purchaseOrderLineId String            @db.Uuid
-  purchaseOrderLine   PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  purchaseOrderLineId String?            @db.Uuid
+  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   supplierCustomerId String   @db.Uuid
   supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)

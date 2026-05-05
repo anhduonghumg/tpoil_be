@@ -39,6 +39,7 @@ import { BankingModule } from './modules/banking/banking.module'
 import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-import-templates.module'
 import { BankPurposesModule } from './modules/bank-purposes/bank-purposes.module'
 import { PurchaseTermModule } from './modules/purchases/purchase-term/purchase-term.module'
+import { CommodityPriceQuotesModule } from './modules/commodity-price-quotes/commodity-price-quotes.module'
 
 @Module({
     imports: [
@@ -67,6 +68,7 @@ import { PurchaseTermModule } from './modules/purchases/purchase-term/purchase-t
         SupplierLocationsModule,
         PriceBulletinsModule,
         PurchaseTermModule,
+        CommodityPriceQuotesModule,
 
         BankingModule,
         BankPurposesModule,

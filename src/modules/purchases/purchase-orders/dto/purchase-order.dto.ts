@@ -163,6 +163,10 @@ export class CreatePurchaseOrderDto {
     @IsString()
     note?: string
 
+    @IsOptional()
+    @IsString()
+    paymentNote?: string
+
     @IsArray()
     @ArrayMinSize(1)
     @ValidateNested({ each: true })
