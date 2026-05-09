@@ -1,28 +1,23 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common'
+import { Body, Controller, Param, Post } from '@nestjs/common'
 import { CalculateTermPricingDto } from './dto/calculate-term-pricing.dto'
 import { PurchaseTermPricingService } from './purchase-term-pricing.service'
 
-@Controller('purchase-term')
+@Controller('purchase-terms')
 export class PurchaseTermPricingController {
     constructor(private readonly service: PurchaseTermPricingService) {}
 
-    @Post('orders/:id/pricing/calculate')
-    calculate(@Param('id') purchaseOrderId: string, @Body() dto: CalculateTermPricingDto) {
-        return this.service.calculate(purchaseOrderId, dto)
+    @Post(':orderId/pricing/estimate')
+    createEstimate(@Param('orderId') orderId: string, @Body() dto: CalculateTermPricingDto) {
+        return this.service.createEstimate(orderId, dto)
     }
 
-    @Get('orders/:id/pricing-runs')
-    listByOrder(@Param('id') purchaseOrderId: string) {
-        return this.service.listByOrder(purchaseOrderId)
+    @Post(':orderId/pricing/bill')
+    createBillNormalize(@Param('orderId') orderId: string, @Body() dto: CalculateTermPricingDto) {
+        return this.service.createBillNormalize(orderId, dto)
     }
 
-    @Get('pricing-runs/:id')
-    detail(@Param('id') id: string) {
-        return this.service.findRunById(id)
-    }
-
-    @Post('pricing-runs/:id/post')
-    postRun(@Param('id') id: string) {
-        return this.service.postRun(id)
+    @Post(':orderId/pricing/final')
+    createFinal(@Param('orderId') orderId: string, @Body() dto: CalculateTermPricingDto) {
+        return this.service.createFinal(orderId, dto)
     }
 }

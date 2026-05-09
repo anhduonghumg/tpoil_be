@@ -1,32 +1,34 @@
-import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
+import { IsArray, IsDateString, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
 import { Type } from 'class-transformer'
-import { PaymentMode, PaymentTermType, PurchaseOrderType } from '@prisma/client'
+
+export class CreateTermBillInfoDto {
+    @IsOptional()
+    @IsNumber()
+    premium?: number
+}
 
 export class CreateTermPurchaseOrderLineDto {
-    @IsString()
+    @IsUUID()
     productId!: string
 
     @IsOptional()
-    @IsString()
+    @IsUUID()
     supplierLocationId?: string
 
     @IsNumber()
-    @Min(0)
+    @Min(0.001)
     orderedQty!: number
 
     @IsOptional()
     @IsNumber()
-    @Min(0)
     unitPrice?: number
 
     @IsOptional()
     @IsNumber()
-    @Min(0)
     taxRate?: number
 
     @IsOptional()
     @IsNumber()
-    @Min(0)
     discountAmount?: number
 }
 
@@ -38,19 +40,6 @@ export class CreateTermPurchaseOrderDto {
     @IsUUID()
     supplierLocationId?: string
 
-    @IsEnum(PurchaseOrderType)
-    orderType!: PurchaseOrderType
-
-    @IsEnum(PaymentMode)
-    paymentMode!: PaymentMode
-
-    @IsOptional()
-    @IsEnum(PaymentTermType)
-    paymentTermType?: PaymentTermType
-
-    @IsOptional()
-    paymentTermDays?: number
-
     @IsDateString()
     orderDate!: string
 
@@ -60,15 +49,24 @@ export class CreateTermPurchaseOrderDto {
 
     @IsOptional()
     @IsString()
-    note?: string
-
-    @IsOptional()
-    @IsString()
     contractNo?: string
 
     @IsOptional()
     @IsString()
     deliveryLocation?: string
+
+    @IsOptional()
+    @IsString()
+    paymentNote?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    @IsOptional()
+    @ValidateNested()
+    @Type(() => CreateTermBillInfoDto)
+    billInfo?: CreateTermBillInfoDto
 
     @IsArray()
     @ValidateNested({ each: true })

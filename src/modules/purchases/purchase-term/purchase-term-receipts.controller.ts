@@ -3,18 +3,18 @@ import { CreateTermGoodsReceiptDto } from './dto/create-term-goods-receipt.dto'
 import { UpdateTermGoodsReceiptDto } from './dto/update-term-goods-receipt.dto'
 import { PurchaseTermReceiptsService } from './purchase-term-receipts.service'
 
-@Controller('purchase-term')
+@Controller('purchase-terms')
 export class PurchaseTermReceiptsController {
     constructor(private readonly service: PurchaseTermReceiptsService) {}
 
-    @Post('orders/:id/receipts')
-    create(@Param('id') purchaseOrderId: string, @Body() dto: CreateTermGoodsReceiptDto) {
-        return this.service.create(purchaseOrderId, dto)
+    @Get(':orderId/receipts')
+    listByOrder(@Param('orderId') orderId: string) {
+        return this.service.listByOrder(orderId)
     }
 
-    @Get('orders/:id/receipts')
-    listByOrder(@Param('id') purchaseOrderId: string) {
-        return this.service.listByOrder(purchaseOrderId)
+    @Post(':orderId/receipts')
+    create(@Param('orderId') orderId: string, @Body() dto: CreateTermGoodsReceiptDto) {
+        return this.service.create(orderId, dto)
     }
 
     @Get('receipts/:id')

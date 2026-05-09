@@ -4,8 +4,9 @@ export class CreateTermGoodsReceiptDto {
     @IsUUID()
     purchaseOrderLineId!: string
 
+    @IsOptional()
     @IsUUID()
-    supplierLocationId!: string
+    supplierLocationId?: string
 
     @IsUUID()
     productId!: string
@@ -14,7 +15,7 @@ export class CreateTermGoodsReceiptDto {
     receiptDate!: string
 
     @IsNumber()
-    @Min(0)
+    @Min(0.001)
     qty!: number
 
     @IsOptional()

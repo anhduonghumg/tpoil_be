@@ -916,6 +916,7 @@ export class PurchaseOrdersService {
         const skip = (page - 1) * limit
 
         const where: Prisma.PurchaseOrderWhereInput = {
+            bizType: "COMMERCIAL",
             supplierCustomerId: q.supplierCustomerId ?? undefined,
             orderType: q.orderType ?? undefined,
             paymentMode: q.paymentMode ?? undefined,

@@ -2,7 +2,14 @@ import { Injectable, NotFoundException } from '@nestjs/common'
 import { PurchaseBizType, PurchaseOrderStatus, PricingRunStatus, PricingStageType } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 
-export type TermPurchaseNextAction = 'APPROVE_ORDER' | 'CREATE_RECEIPT' | 'CALCULATE_ESTIMATE' | 'CALCULATE_BILL_NORMALIZE' | 'CALCULATE_FINAL' | 'COMPLETE_ORDER' | 'VIEW_ONLY'
+export type TermPurchaseNextAction =
+    | 'APPROVE_ORDER'
+    | 'CREATE_RECEIPT'
+    | 'CALCULATE_TEMP_PRICE'
+    | 'CALCULATE_INVOICE_PRICE'
+    | 'CALCULATE_OFFICIAL_FX'
+    | 'COMPLETE_ORDER'
+    | 'VIEW_ONLY'
 
 @Injectable()
 export class PurchaseTermNextActionService {
@@ -35,21 +42,34 @@ export class PurchaseTermNextActionService {
         }
 
         const confirmedReceipts = order.receipts.filter((x) => x.status === 'CONFIRMED')
+
         if (!confirmedReceipts.length) {
             return 'CREATE_RECEIPT'
         }
 
         const stages = order.pricingRuns.flatMap((x) => x.stages)
+
         const hasEstimate = stages.some((x) => x.stageType === PricingStageType.ESTIMATE)
         const hasBillNormalize = stages.some((x) => x.stageType === PricingStageType.BILL_NORMALIZE)
         const hasFinal = stages.some((x) => x.stageType === PricingStageType.FINAL)
 
-        if (!hasEstimate) return 'CALCULATE_ESTIMATE'
-        if (!hasBillNormalize) return 'CALCULATE_BILL_NORMALIZE'
-        if (!hasFinal) return 'CALCULATE_FINAL'
+        if (!hasEstimate) {
+            return 'CALCULATE_TEMP_PRICE'
+        }
+
+        if (!hasBillNormalize) {
+            return 'CALCULATE_INVOICE_PRICE'
+        }
+
+        if (!hasFinal) {
+            return 'CALCULATE_OFFICIAL_FX'
+        }
 
         const hasPostedRun = order.pricingRuns.some((x) => x.status === PricingRunStatus.POSTED)
-        if (!hasPostedRun) return 'COMPLETE_ORDER'
+
+        if (!hasPostedRun) {
+            return 'COMPLETE_ORDER'
+        }
 
         return 'VIEW_ONLY'
     }

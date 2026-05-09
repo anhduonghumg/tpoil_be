@@ -954,20 +954,20 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  inventoryBalances  InventoryBalance[]
-  receipts           GoodsReceipt[]
-  invoiceLines       SupplierInvoiceLine[]
-  reconcileLines     ReconcileLine[]
-  reconcileVariances ReconcileVariance[]
-  adjustmentLines    InventoryAdjustmentLine[]
-  snapshotLines      InventorySnapshotLine[]
-  ledger             InventoryLedger[]
-  purchaseOrderLines PurchaseOrderLine[]
-  priceQuotes        CommodityPriceQuote[]
-  pricingTemplates   SupplierPricingTemplate[]
-  pricingRuns        PurchasePricingRun[]
-  costLayers         InventoryCostLayer[]
-  priceBulletinItems PriceBulletinItem[]
+  inventoryBalances         InventoryBalance[]
+  receipts                  GoodsReceipt[]
+  invoiceLines              SupplierInvoiceLine[]
+  reconcileLines            ReconcileLine[]
+  reconcileVariances        ReconcileVariance[]
+  adjustmentLines           InventoryAdjustmentLine[]
+  snapshotLines             InventorySnapshotLine[]
+  ledger                    InventoryLedger[]
+  purchaseOrderLines        PurchaseOrderLine[]
+  priceQuotes               CommodityPriceQuote[]
+  pricingTemplates          SupplierPricingTemplate[]
+  costLayers                InventoryCostLayer[]
+  priceBulletinItems        PriceBulletinItem[]
+  purchasePricingStageLines PurchasePricingStageLine[]
 
   @@index([name])
 }
@@ -992,17 +992,18 @@ model SupplierLocation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  inventoryBalances    InventoryBalance[]
-  ledger               InventoryLedger[]
-  receipts             GoodsReceipt[]
-  invoiceLines         SupplierInvoiceLine[]
-  reconcileSessions    ReconcileSession[]
-  adjustmentLines      InventoryAdjustmentLine[]
-  snapshotLines        InventorySnapshotLine[]
-  costLayers           InventoryCostLayer[]
-  inventoryAdjustments InventoryAdjustment[]
-  purchaseOrders       PurchaseOrder[]
-  purchaseOrderLines   PurchaseOrderLine[]
+  inventoryBalances         InventoryBalance[]
+  ledger                    InventoryLedger[]
+  receipts                  GoodsReceipt[]
+  invoiceLines              SupplierInvoiceLine[]
+  reconcileSessions         ReconcileSession[]
+  adjustmentLines           InventoryAdjustmentLine[]
+  snapshotLines             InventorySnapshotLine[]
+  costLayers                InventoryCostLayer[]
+  inventoryAdjustments      InventoryAdjustment[]
+  purchaseOrders            PurchaseOrder[]
+  purchaseOrderLines        PurchaseOrderLine[]
+  purchasePricingStageLines PurchasePricingStageLine[]
 
   @@unique([supplierCustomerId, code])
   @@index([supplierCustomerId])
@@ -1078,10 +1079,11 @@ model PurchaseOrder {
   priceRegionId String?      @db.Uuid
   priceRegion   PriceRegion? @relation(fields: [priceRegionId], references: [id], onDelete: SetNull)
 
-  bizType     PurchaseBizType     @default(COMMERCIAL)
-  orderType   PurchaseOrderType
-  status      PurchaseOrderStatus @default(DRAFT)
-  paymentMode PaymentMode
+  bizType              PurchaseBizType     @default(COMMERCIAL)
+  orderType            PurchaseOrderType
+  status               PurchaseOrderStatus @default(DRAFT)
+  paymentMode          PaymentMode
+  termPremiumUsdPerBbl Decimal?            @db.Decimal(18, 6)
 
   paymentTermType     PaymentTermType @default(SAME_DAY)
   paymentTermDays     Int?
@@ -1138,8 +1140,8 @@ model PurchaseOrderLine {
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  goodsReceipts GoodsReceipt[]
-  pricingRuns   PurchasePricingRun[]
+  goodsReceipts             GoodsReceipt[]
+  purchasePricingStageLines PurchasePricingStageLine[]
 
   @@index([purchaseOrderId])
   @@index([productId])
@@ -1720,19 +1722,13 @@ model PurchasePricingRun {
   purchaseOrderId String        @db.Uuid
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  purchaseOrderLineId String?            @db.Uuid
-  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
   supplierCustomerId String   @db.Uuid
   supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  billDate DateTime? @db.Date
 
-  billDate DateTime @db.Date
-
-  qtyBasisSelected QtyBasis
-  qtyBasisLocked   Boolean  @default(false)
+  qtyBasisSelected QtyBasis?
+  qtyBasisLocked   Boolean   @default(false)
 
   qtyActualTotal Decimal? @db.Decimal(18, 3)
   qtyV15Total    Decimal? @db.Decimal(18, 3)
@@ -1746,7 +1742,6 @@ model PurchasePricingRun {
   updatedAt DateTime @updatedAt
 
   @@index([purchaseOrderId])
-  @@index([purchaseOrderLineId])
   @@index([supplierCustomerId, billDate])
   @@index([status])
 }
@@ -1779,12 +1774,46 @@ model PurchasePricingStage {
 
   note String?
 
-  priceDays PurchasePricingPriceDay[]
-  costs     PurchasePricingStageCost[]
+  costs PurchasePricingStageCost[]
+  lines PurchasePricingStageLine[]
 
-  run PurchasePricingRun @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  run       PurchasePricingRun        @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  priceDays PurchasePricingPriceDay[]
 
   @@unique([runId, stageType])
+}
+
+model PurchasePricingStageLine {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  stageId String               @db.Uuid
+  stage   PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  purchaseOrderLineId String?            @db.Uuid
+  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  supplierLocationId String?           @db.Uuid
+  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  qtyActual Decimal? @db.Decimal(18, 3)
+  qtyV15    Decimal? @db.Decimal(18, 3)
+
+  unitVndPerLiter Decimal? @db.Decimal(18, 6)
+  amountVnd       Decimal? @db.Decimal(18, 2)
+
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([stageId, purchaseOrderLineId])
+  @@index([stageId])
+  @@index([productId])
+  @@index([purchaseOrderLineId])
+  @@index([supplierLocationId, productId])
 }
 
 model PurchasePricingStageCost {
@@ -1807,14 +1836,17 @@ model PurchasePricingStageCost {
 }
 
 model PurchasePricingPriceDay {
-  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  stageId        String   @db.Uuid
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  stageId String               @db.Uuid
+  stage   PurchasePricingStage @relation(fields: [stageId], references: [id])
+
   quoteDate      DateTime @db.Date
   priceUsdPerBbl Decimal  @db.Decimal(18, 6)
 
-  stage PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  createdAt DateTime @default(now())
 
-  @@unique([stageId, quoteDate])
+  @@index([stageId, quoteDate])
 }
 
 model InventoryCostLayer {

@@ -1,6 +1,8 @@
-import { FxStage, PricingStageType, QtyBasis } from '@prisma/client'
+import { FxStage, PurchaseCostType, QtyBasis } from '@prisma/client'
+
 import { Type } from 'class-transformer'
-import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, ValidateNested } from 'class-validator'
+
+import { IsArray, IsBoolean, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, ValidateNested } from 'class-validator'
 
 export class TermPricingReceiptInputDto {
     @IsUUID()
@@ -15,12 +17,37 @@ export class TermPricingReceiptInputDto {
     qtyV15Used?: number
 }
 
-export class TermPricingCostInputDto {
-    @IsString()
-    costType?: string
+export class TermPricingPriceDayInputDto {
+    @IsDateString()
+    quoteDate!: string
 
     @IsNumber()
-    amountVnd?: number
+    priceUsdPerBbl!: number
+}
+
+export class TermPricingLineInputDto {
+    @IsUUID()
+    purchaseOrderLineId!: string
+
+    @IsOptional()
+    @IsNumber()
+    qtyActual?: number
+
+    @IsOptional()
+    @IsNumber()
+    qtyV15?: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+export class TermPricingCostInputDto {
+    @IsEnum(PurchaseCostType)
+    costType!: PurchaseCostType
+
+    @IsNumber()
+    amountVnd!: number
 
     @IsOptional()
     @IsString()
@@ -32,28 +59,15 @@ export class TermPricingCostInputDto {
 }
 
 export class CalculateTermPricingDto {
-    @IsUUID()
-    purchaseOrderLineId!: string
-
     @IsDateString()
     billDate!: string
-
-    @IsEnum(PricingStageType)
-    stageType!: PricingStageType
 
     @IsEnum(QtyBasis)
     qtyBasisSelected!: QtyBasis
 
     @IsOptional()
+    @IsBoolean()
     qtyBasisLocked?: boolean
-
-    @IsOptional()
-    @IsNumber()
-    qtyActualTotal?: number
-
-    @IsOptional()
-    @IsNumber()
-    qtyV15Total?: number
 
     @IsOptional()
     @IsNumber()
@@ -62,6 +76,24 @@ export class CalculateTermPricingDto {
     @IsOptional()
     @IsNumber()
     premiumUsdPerBbl?: number
+
+    @IsOptional()
+    @IsDateString()
+    plattsBaseDate?: string
+
+    @IsOptional()
+    @IsNumber()
+    plattsDaysBefore?: number
+
+    @IsOptional()
+    @IsNumber()
+    plattsDaysAfter?: number
+
+    @IsOptional()
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => TermPricingPriceDayInputDto)
+    priceDays?: TermPricingPriceDayInputDto[]
 
     @IsOptional()
     @IsDateString()
@@ -92,6 +124,11 @@ export class CalculateTermPricingDto {
     @ValidateNested({ each: true })
     @Type(() => TermPricingReceiptInputDto)
     receipts?: TermPricingReceiptInputDto[]
+
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => TermPricingLineInputDto)
+    lines!: TermPricingLineInputDto[]
 
     @IsOptional()
     @IsArray()

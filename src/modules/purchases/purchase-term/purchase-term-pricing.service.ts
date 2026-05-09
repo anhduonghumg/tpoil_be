@@ -1,378 +1,537 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { CostLayerStatus, FxStage, GoodsReceiptStatus, PriceSource, PricingRunStatus, PricingStageType, PurchaseBizType, PurchaseCostType, QtyBasis } from '@prisma/client'
+
+import { CostLayerStatus, FxStage, PricingRunStatus, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, QtyBasis } from '@prisma/client'
+
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+
 import { CalculateTermPricingDto } from './dto/calculate-term-pricing.dto'
 
 @Injectable()
 export class PurchaseTermPricingService {
     constructor(private readonly prisma: PrismaService) {}
 
-    private litersPerBbl = 158.987295
+    /*
+     * =========================
+     * Helpers
+     * =========================
+     */
 
-    private async resolveMops(productId: string, billDate: string, override?: number) {
-        if (override != null) return override
-
-        const quote = await this.prisma.commodityPriceQuote.findFirst({
-            where: {
-                productId,
-                quoteDate: new Date(billDate),
-                source: PriceSource.PLATTS,
-            },
-            orderBy: { quoteDate: 'desc' },
-        })
-
-        if (!quote) throw new NotFoundException('TERM_PRICE_QUOTE_NOT_FOUND')
-        return Number(quote.priceUsdPerBbl)
-    }
-    private async resolveFx(fxRateDate: string | undefined, override?: number, stage?: FxStage) {
-        if (override != null) return override
-        const date = fxRateDate ? new Date(fxRateDate) : undefined
-
-        const fx = await this.prisma.exchangeRate.findFirst({
-            where: {
-                base: 'USD',
-                quote: 'VND',
-                stage: stage ?? FxStage.ESTIMATE,
-                rateDate: date ?? undefined,
-            },
-            orderBy: { rateDate: 'desc' },
-        })
-
-        if (!fx) throw new NotFoundException('TERM_EXCHANGE_RATE_NOT_FOUND')
-        return Number(fx.rate)
+    private addDays(date: Date, days: number): Date {
+        const d = new Date(date)
+        d.setUTCDate(d.getUTCDate() + days)
+        return d
     }
 
-    async calculate(purchaseOrderId: string, dto: CalculateTermPricingDto) {
-        const order = await this.prisma.purchaseOrder.findFirst({
-            where: { id: purchaseOrderId, bizType: PurchaseBizType.TERM },
+    private toDateOnly(value?: string | Date | null): Date | undefined {
+        if (!value) {
+            return undefined
+        }
+
+        if (value instanceof Date) {
+            return value
+        }
+
+        return new Date(`${value}T00:00:00.000Z`)
+    }
+
+    private usdPerBblToVndPerLiter(usdPerBbl: number, fxRate: number) {
+        /*
+         * 1 barrel = 158.987 liters
+         */
+
+        return (usdPerBbl * fxRate) / 158.987
+    }
+
+    /*
+     * =========================
+     * Queries
+     * =========================
+     */
+
+    private async getOrderForPricing(orderId: string) {
+        const order = await this.prisma.purchaseOrder.findUnique({
+            where: {
+                id: orderId,
+            },
+
             include: {
                 supplier: true,
-                supplierLocation: true,
+
                 lines: {
                     include: {
                         product: true,
                         supplierLocation: true,
                     },
-                },
-                receipts: true,
-            },
-        })
 
-        if (!order) throw new NotFoundException('TERM_PURCHASE_ORDER_NOT_FOUND')
-
-        const line = order.lines.find((x) => x.id === dto.purchaseOrderLineId)
-        if (!line) throw new BadRequestException('TERM_PURCHASE_ORDER_LINE_NOT_FOUND')
-
-        const matchedReceipts = dto.receipts?.length
-            ? await this.prisma.goodsReceipt.findMany({
-                  where: {
-                      id: { in: dto.receipts.map((x) => x.goodsReceiptId) },
-                      purchaseOrderId,
-                      purchaseOrderLineId: dto.purchaseOrderLineId,
-                      status: GoodsReceiptStatus.CONFIRMED,
-                  },
-              })
-            : await this.prisma.goodsReceipt.findMany({
-                  where: {
-                      purchaseOrderId,
-                      purchaseOrderLineId: dto.purchaseOrderLineId,
-                      status: GoodsReceiptStatus.CONFIRMED,
-                  },
-              })
-
-        if (!matchedReceipts.length) {
-            throw new BadRequestException('TERM_PRICING_CONFIRMED_RECEIPT_REQUIRED')
-        }
-
-        const qtyActualTotal = dto.qtyActualTotal ?? matchedReceipts.reduce((sum, x) => sum + Number(x.qty || 0), 0)
-        const qtyV15Total = dto.qtyV15Total ?? matchedReceipts.reduce((sum, x) => sum + Number(x.standardQtyV15 || x.qty || 0), 0)
-
-        const qtyUsed = dto.qtyBasisSelected === QtyBasis.V15 ? qtyV15Total : qtyActualTotal
-        if (!qtyUsed || qtyUsed <= 0) {
-            throw new BadRequestException('TERM_PRICING_QTY_INVALID')
-        }
-
-        const mopsAvgUsdPerBbl = await this.resolveMops(line.productId, dto.billDate, dto.mopsAvgUsdPerBbl)
-        const premiumUsdPerBbl = Number(dto.premiumUsdPerBbl || 0)
-        const unitUsdPerBbl = mopsAvgUsdPerBbl + premiumUsdPerBbl
-        const amountUsd = (unitUsdPerBbl / this.litersPerBbl) * qtyUsed
-
-        const fxRate = await this.resolveFx(dto.fxRateDate, dto.fxRate, dto.fxStage)
-        const amountVndBeforeTax = amountUsd * fxRate
-
-        const costTotal = (dto.costs ?? []).reduce((sum, x) => sum + Number(x.amountVnd || 0), 0)
-        const envTaxAmountVnd = Number(dto.envTaxAmountVnd || 0)
-        const vatAmountVnd = Number(dto.vatAmountVnd || 0)
-        const totalAmountVnd = amountVndBeforeTax + costTotal + envTaxAmountVnd + vatAmountVnd
-        const unitVndPerLiter = totalAmountVnd / qtyUsed
-
-        const stageStatusMap: Record<PricingStageType, PricingRunStatus> = {
-            ESTIMATE: PricingRunStatus.ESTIMATED,
-            BILL_NORMALIZE: PricingRunStatus.NORMALIZED,
-            FINAL: PricingRunStatus.FINAL_READY,
-        }
-
-        const run = await this.prisma.$transaction(async (tx) => {
-            const existingRun = await tx.purchasePricingRun.findFirst({
-                where: {
-                    purchaseOrderId,
-                    purchaseOrderLineId: dto.purchaseOrderLineId,
-                    billDate: new Date(dto.billDate),
-                },
-                orderBy: { createdAt: 'desc' },
-            })
-
-            if (existingRun && existingRun.status === PricingRunStatus.POSTED) {
-                throw new BadRequestException('TERM_PRICING_RUN_ALREADY_POSTED_NOT_EDITABLE')
-            }
-
-            const run = existingRun
-                ? await tx.purchasePricingRun.update({
-                      where: { id: existingRun.id },
-                      data: {
-                          supplierCustomerId: order.supplierCustomerId,
-                          productId: line.productId,
-                          qtyBasisSelected: dto.qtyBasisSelected,
-                          qtyBasisLocked: dto.qtyBasisLocked ?? false,
-                          qtyActualTotal,
-                          qtyV15Total,
-                          status: stageStatusMap[dto.stageType],
-                      },
-                  })
-                : await tx.purchasePricingRun.create({
-                      data: {
-                          purchaseOrderId,
-                          purchaseOrderLineId: dto.purchaseOrderLineId,
-                          supplierCustomerId: order.supplierCustomerId,
-                          productId: line.productId,
-                          billDate: dto.billDate,
-                          qtyBasisSelected: dto.qtyBasisSelected,
-                          qtyBasisLocked: dto.qtyBasisLocked ?? false,
-                          qtyActualTotal,
-                          qtyV15Total,
-                          status: stageStatusMap[dto.stageType],
-                      },
-                  })
-
-            await tx.purchasePricingRunReceipt.deleteMany({ where: { runId: run.id } })
-            if (matchedReceipts.length) {
-                await tx.purchasePricingRunReceipt.createMany({
-                    data: matchedReceipts.map((receipt) => {
-                        const receiptInput = dto.receipts?.find((x) => x.goodsReceiptId === receipt.id)
-                        return {
-                            runId: run.id,
-                            goodsReceiptId: receipt.id,
-                            qtyActualUsed: receiptInput?.qtyActualUsed ?? Number(receipt.qty || 0),
-                            qtyV15Used: receiptInput?.qtyV15Used ?? Number(receipt.standardQtyV15 || receipt.qty || 0),
-                        }
-                    }),
-                })
-            }
-
-            const stage = await tx.purchasePricingStage.upsert({
-                where: {
-                    runId_stageType: {
-                        runId: run.id,
-                        stageType: dto.stageType,
+                    orderBy: {
+                        createdAt: 'asc',
                     },
                 },
-                update: {
-                    mopsAvgUsdPerBbl,
-                    premiumUsdPerBbl,
-                    unitUsdPerBbl,
-                    amountUsd,
-                    fxRateDate: dto.fxRateDate ? new Date(dto.fxRateDate) : null,
-                    fxStage: dto.fxStage ?? FxStage.ESTIMATE,
-                    fxRate,
-                    envTaxAmountVnd,
-                    vatAmountVnd,
-                    amountVndBeforeTax,
-                    totalAmountVnd,
-                    unitVndPerLiter,
-                    note: dto.note ?? null,
-                    insuranceAmountVnd: null,
-                    shippingFeeVnd: null,
-                    otherFeeVnd: null,
-                },
-                create: {
-                    runId: run.id,
-                    stageType: dto.stageType,
-                    mopsAvgUsdPerBbl,
-                    premiumUsdPerBbl,
-                    unitUsdPerBbl,
-                    amountUsd,
-                    fxRateDate: dto.fxRateDate ? new Date(dto.fxRateDate) : null,
-                    fxStage: dto.fxStage ?? FxStage.ESTIMATE,
-                    fxRate,
-                    envTaxAmountVnd,
-                    vatAmountVnd,
-                    amountVndBeforeTax,
-                    totalAmountVnd,
-                    unitVndPerLiter,
-                    note: dto.note ?? null,
-                    insuranceAmountVnd: null,
-                    shippingFeeVnd: null,
-                    otherFeeVnd: null,
-                },
-            })
 
-            await tx.purchasePricingStageCost.deleteMany({ where: { stageId: stage.id } })
-            if (dto.costs?.length) {
-                await tx.purchasePricingStageCost.createMany({
-                    data: dto.costs.map((cost) => ({
-                        stageId: stage.id || '',
-                        costType: cost.costType as PurchaseCostType,
-                        amountVnd: cost.amountVnd || 0,
-                        sourceDocNo: cost.sourceDocNo ?? null,
-                        note: cost.note ?? null,
-                    })),
-                })
-            }
-
-            return run
-        })
-
-        return this.findRunById(run.id)
-    }
-
-    async listByOrder(purchaseOrderId: string) {
-        return this.prisma.purchasePricingRun.findMany({
-            where: { purchaseOrderId },
-            include: {
-                product: true,
-                purchaseOrderLine: {
-                    include: {
-                        supplierLocation: true,
-                        product: true,
-                    },
-                },
-                stages: {
-                    include: {
-                        costs: true,
-                        priceDays: true,
-                    },
-                },
                 receipts: {
+                    where: {
+                        status: 'CONFIRMED',
+                    },
+
+                    orderBy: {
+                        receiptDate: 'asc',
+                    },
+                },
+
+                pricingRuns: {
                     include: {
-                        goodsReceipt: true,
+                        stages: {
+                            include: {
+                                lines: true,
+                                costs: true,
+                                priceDays: true,
+                            },
+                        },
+                    },
+
+                    orderBy: {
+                        createdAt: 'desc',
                     },
                 },
             },
-            orderBy: { createdAt: 'desc' },
         })
+
+        if (!order || order.bizType !== PurchaseBizType.TERM) {
+            throw new NotFoundException('TERM_PURCHASE_ORDER_NOT_FOUND')
+        }
+
+        return order
     }
 
-    async findRunById(id: string) {
-        const run = await this.prisma.purchasePricingRun.findUnique({
-            where: { id },
-            include: {
-                product: true,
-                purchaseOrder: true,
-                purchaseOrderLine: {
-                    include: {
-                        supplierLocation: true,
-                        product: true,
-                    },
-                },
-                stages: {
-                    include: {
-                        costs: true,
-                        priceDays: true,
-                    },
-                    orderBy: { stageType: 'asc' },
-                },
-                receipts: {
-                    include: {
-                        goodsReceipt: true,
-                    },
-                },
-            },
-        })
+    /*
+     * =========================
+     * Run
+     * =========================
+     */
 
-        if (!run) throw new NotFoundException('TERM_PRICING_RUN_NOT_FOUND')
-        return run
-    }
-
-    async postRun(id: string) {
-        const run = await this.prisma.purchasePricingRun.findUnique({
-            where: { id },
-            include: {
-                purchaseOrder: true,
-                purchaseOrderLine: true,
-                stages: true,
-            },
-        })
-
-        if (!run) {
-            throw new NotFoundException('TERM_PRICING_RUN_NOT_FOUND')
-        }
-
-        const finalStage = run.stages.find((x) => x.stageType === PricingStageType.FINAL)
-        if (!finalStage) {
-            throw new BadRequestException('TERM_PRICING_FINAL_STAGE_REQUIRED')
-        }
-
-        if (run.status === PricingRunStatus.POSTED) {
-            throw new BadRequestException('TERM_PRICING_ALREADY_POSTED')
-        }
-
-        const qtyUsed = run.qtyBasisSelected === QtyBasis.V15 ? Number(run.qtyV15Total || 0) : Number(run.qtyActualTotal || 0)
-
-        if (qtyUsed <= 0) {
-            throw new BadRequestException('TERM_PRICING_QTY_INVALID')
-        }
-
-        const unitCostPerLiter = Number(finalStage.unitVndPerLiter || 0)
-        if (unitCostPerLiter <= 0) {
-            throw new BadRequestException('TERM_PRICING_UNIT_COST_INVALID')
-        }
-
-        const totalCost = Number(finalStage.totalAmountVnd || 0)
-        if (totalCost <= 0) {
-            throw new BadRequestException('TERM_PRICING_TOTAL_COST_INVALID')
-        }
-
-        const supplierLocationId = run.purchaseOrderLine?.supplierLocationId || run.purchaseOrder?.supplierLocationId
-        if (!supplierLocationId) {
-            throw new BadRequestException('TERM_PRICING_SUPPLIER_LOCATION_REQUIRED')
-        }
-
-        const existedLayer = await this.prisma.inventoryCostLayer.findFirst({
+    private async getOrCreateRun(tx: Prisma.TransactionClient, order: any, dto: CalculateTermPricingDto) {
+        const existed = await tx.purchasePricingRun.findFirst({
             where: {
-                sourceType: 'TERM_PRICING',
-                sourceId: run.id,
+                purchaseOrderId: order.id,
+            },
+
+            orderBy: {
+                createdAt: 'desc',
             },
         })
 
-        if (existedLayer) {
-            throw new BadRequestException('TERM_PRICING_COST_LAYER_ALREADY_CREATED')
+        if (existed) {
+            return existed
         }
 
-        await this.prisma.$transaction(async (tx) => {
+        const qtyActualTotal = order.receipts.reduce((sum: number, x: any) => sum + Number(x.qty || 0), 0)
+
+        const qtyV15Total = order.receipts.reduce((sum: number, x: any) => sum + Number(x.standardQtyV15 || 0), 0)
+
+        return tx.purchasePricingRun.create({
+            data: {
+                purchaseOrderId: order.id,
+
+                supplierCustomerId: order.supplierCustomerId,
+
+                billDate: this.toDateOnly(dto.billDate),
+
+                qtyBasisSelected: dto.qtyBasisSelected ?? QtyBasis.ACTUAL,
+
+                qtyBasisLocked: dto.qtyBasisLocked ?? false,
+
+                qtyActualTotal,
+
+                qtyV15Total,
+
+                status: PricingRunStatus.DRAFT,
+            },
+        })
+    }
+
+    private validateStageFlow(order: any, stageType: PricingStageType) {
+        if (order.status === PurchaseOrderStatus.CANCELLED) {
+            throw new BadRequestException('PURCHASE_ORDER_CANCELLED')
+        }
+
+        if (!order.receipts.length) {
+            throw new BadRequestException('CONFIRMED_RECEIPTS_REQUIRED')
+        }
+
+        const stages = order.pricingRuns.flatMap((run: any) => run.stages ?? [])
+
+        const hasEstimate = stages.some((x: any) => x.stageType === PricingStageType.ESTIMATE)
+
+        const hasBillNormalize = stages.some((x: any) => x.stageType === PricingStageType.BILL_NORMALIZE)
+
+        if (stageType === PricingStageType.BILL_NORMALIZE && !hasEstimate) {
+            throw new BadRequestException('ESTIMATE_REQUIRED')
+        }
+
+        if (stageType === PricingStageType.FINAL && !hasBillNormalize) {
+            throw new BadRequestException('BILL_NORMALIZE_REQUIRED')
+        }
+    }
+
+    private async createStageBase(tx: Prisma.TransactionClient, runId: string, order: any, dto: CalculateTermPricingDto, stageType: PricingStageType) {
+        const existed = await tx.purchasePricingStage.findFirst({
+            where: {
+                runId,
+                stageType,
+            },
+        })
+
+        if (existed) {
+            throw new BadRequestException(`${stageType}_ALREADY_EXISTS`)
+        }
+
+        const mops = Number(dto.mopsAvgUsdPerBbl ?? 0)
+        const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+
+        return tx.purchasePricingStage.create({
+            data: {
+                runId,
+                stageType,
+
+                mopsAvgUsdPerBbl: new Prisma.Decimal(mops),
+                premiumUsdPerBbl: new Prisma.Decimal(premium),
+                unitUsdPerBbl: new Prisma.Decimal(mops + premium),
+
+                fxRateDate: this.toDateOnly(dto.fxRateDate),
+                fxStage: dto.fxStage ?? FxStage.ESTIMATE,
+                fxRate: dto.fxRate !== undefined && dto.fxRate !== null ? new Prisma.Decimal(dto.fxRate) : null,
+
+                envTaxAmountVnd: dto.envTaxAmountVnd !== undefined && dto.envTaxAmountVnd !== null ? new Prisma.Decimal(dto.envTaxAmountVnd) : null,
+
+                vatAmountVnd: dto.vatAmountVnd !== undefined && dto.vatAmountVnd !== null ? new Prisma.Decimal(dto.vatAmountVnd) : null,
+
+                note: dto.note?.trim() || null,
+            },
+        })
+    }
+
+    private async buildStageLines(tx: Prisma.TransactionClient, order: any, stageId: string, dto: CalculateTermPricingDto) {
+        for (const input of dto.lines || []) {
+            const line = order.lines.find((x: any) => x.id === input.purchaseOrderLineId)
+
+            if (!line) {
+                throw new BadRequestException('PURCHASE_ORDER_LINE_NOT_FOUND')
+            }
+
+            const qtyActual = input.qtyActual ?? Number(line.withdrawnQty || line.orderedQty || 0)
+
+            const qtyV15 = input.qtyV15 ?? Number(line.withdrawnQty || line.orderedQty || 0)
+
+            await tx.purchasePricingStageLine.create({
+                data: {
+                    stageId,
+
+                    purchaseOrderLineId: line.id,
+
+                    productId: line.productId,
+
+                    supplierLocationId: line.supplierLocationId,
+
+                    qtyActual: new Prisma.Decimal(qtyActual),
+
+                    qtyV15: new Prisma.Decimal(qtyV15),
+
+                    note: input.note?.trim() || null,
+                },
+            })
+        }
+    }
+
+    private async resolvePriceDaysFromPlatts(tx: Prisma.TransactionClient, dto: CalculateTermPricingDto, productIds: string[]) {
+        if (dto.priceDays?.length) {
+            return dto.priceDays
+        }
+
+        if (!dto.plattsBaseDate) {
+            return []
+        }
+
+        const baseDate = this.toDateOnly(dto.plattsBaseDate)!
+
+        const daysBefore = dto.plattsDaysBefore ?? 5
+        const daysAfter = dto.plattsDaysAfter ?? 5
+
+        const fromDate = this.addDays(baseDate, -daysBefore)
+        const toDate = this.addDays(baseDate, daysAfter)
+
+        const quotes = await tx.commodityPriceQuote.findMany({
+            where: {
+                productId: {
+                    in: productIds,
+                },
+                source: 'PLATTS',
+                quoteDate: {
+                    gte: fromDate,
+                    lte: toDate,
+                },
+            },
+            orderBy: {
+                quoteDate: 'asc',
+            },
+        })
+
+        if (!quotes.length) {
+            throw new BadRequestException('PLATTS_PRICE_QUOTES_NOT_FOUND')
+        }
+
+        return quotes.map((x) => ({
+            quoteDate: x.quoteDate.toISOString().slice(0, 10),
+            priceUsdPerBbl: Number(x.priceUsdPerBbl),
+        }))
+    }
+
+    private async createPriceDays(tx: Prisma.TransactionClient, stageId: string, dto: CalculateTermPricingDto, productIds: string[]) {
+        const priceDays = await this.resolvePriceDaysFromPlatts(tx, dto, productIds)
+
+        for (const day of priceDays) {
+            await tx.purchasePricingPriceDay.create({
+                data: {
+                    stageId,
+                    quoteDate: this.toDateOnly(day.quoteDate)!,
+                    priceUsdPerBbl: new Prisma.Decimal(day.priceUsdPerBbl),
+                },
+            })
+        }
+
+        return priceDays
+    }
+
+    private async createCosts(tx: Prisma.TransactionClient, stageId: string, dto: CalculateTermPricingDto) {
+        for (const cost of dto.costs || []) {
+            await tx.purchasePricingStageCost.create({
+                data: {
+                    stageId,
+
+                    costType: cost.costType,
+
+                    amountVnd: new Prisma.Decimal(cost.amountVnd),
+
+                    sourceDocNo: cost.sourceDocNo?.trim() || null,
+
+                    note: cost.note?.trim() || null,
+                },
+            })
+        }
+    }
+
+    private async recalculateStage(tx: Prisma.TransactionClient, stageId: string) {
+        const stage = await tx.purchasePricingStage.findUnique({
+            where: {
+                id: stageId,
+            },
+
+            include: {
+                lines: true,
+                costs: true,
+            },
+        })
+
+        if (!stage) {
+            throw new NotFoundException('PRICING_STAGE_NOT_FOUND')
+        }
+
+        const unitUsdPerBbl = Number(stage.unitUsdPerBbl || 0)
+
+        const fxRate = Number(stage.fxRate || 0)
+
+        const unitVndPerLiter = this.usdPerBblToVndPerLiter(unitUsdPerBbl, fxRate)
+
+        let totalAmountVnd = 0
+
+        for (const line of stage.lines) {
+            const qty = Number(line.qtyV15 || line.qtyActual || 0)
+
+            const amountVnd = qty * unitVndPerLiter
+
+            totalAmountVnd += amountVnd
+
+            await tx.purchasePricingStageLine.update({
+                where: {
+                    id: line.id,
+                },
+
+                data: {
+                    unitVndPerLiter: new Prisma.Decimal(unitVndPerLiter),
+
+                    amountVnd: new Prisma.Decimal(amountVnd),
+                },
+            })
+        }
+
+        const totalCosts = stage.costs.reduce((sum: number, x: any) => sum + Number(x.amountVnd || 0), 0)
+
+        totalAmountVnd += totalCosts
+
+        totalAmountVnd += Number(stage.envTaxAmountVnd || 0)
+
+        totalAmountVnd += Number(stage.vatAmountVnd || 0)
+
+        await tx.purchasePricingStage.update({
+            where: {
+                id: stage.id,
+            },
+
+            data: {
+                unitVndPerLiter: new Prisma.Decimal(unitVndPerLiter),
+
+                totalAmountVnd: new Prisma.Decimal(totalAmountVnd),
+            },
+        })
+    }
+
+    private async createCostLayers(tx: Prisma.TransactionClient, order: any, runId: string, stageId: string) {
+        const stage = await tx.purchasePricingStage.findUnique({
+            where: {
+                id: stageId,
+            },
+
+            include: {
+                lines: true,
+            },
+        })
+
+        if (!stage) {
+            throw new NotFoundException('PRICING_STAGE_NOT_FOUND')
+        }
+
+        for (const line of stage.lines) {
+            const qty = Number(line.qtyV15 || line.qtyActual || 0)
+
+            if (qty <= 0) {
+                continue
+            }
+
             await tx.inventoryCostLayer.create({
                 data: {
-                    supplierCustomerId: run.supplierCustomerId,
-                    supplierLocationId,
-                    productId: run.productId,
-                    sourceType: 'TERM_PRICING',
-                    sourceId: run.id,
-                    originalQty: qtyUsed,
-                    remainingQty: qtyUsed,
-                    unitCostPerLiter,
-                    totalCost,
-                    costDate: run.billDate,
+                    supplierCustomerId: order.supplierCustomerId,
+
+                    supplierLocationId: line.supplierLocationId ?? '',
+
+                    productId: line.productId,
+
+                    sourceType: 'TERM_PRICING_FINAL',
+
+                    sourceId: runId,
+
+                    originalQty: new Prisma.Decimal(qty),
+
+                    remainingQty: new Prisma.Decimal(qty),
+
+                    unitCostPerLiter: line.unitVndPerLiter || new Prisma.Decimal(0),
+
+                    totalCost: line.amountVnd || new Prisma.Decimal(0),
+
+                    costDate: new Date(),
+
                     status: CostLayerStatus.OPEN,
                 },
             })
+        }
+    }
 
-            await tx.purchasePricingRun.update({
-                where: { id },
-                data: {
-                    status: PricingRunStatus.POSTED,
-                },
-            })
+    /*
+     * =========================
+     * Public APIs
+     * =========================
+     */
+
+    async createEstimate(orderId: string, dto: CalculateTermPricingDto) {
+        return this.createStage(orderId, dto, PricingStageType.ESTIMATE)
+    }
+
+    async createBillNormalize(orderId: string, dto: CalculateTermPricingDto) {
+        return this.createStage(orderId, dto, PricingStageType.BILL_NORMALIZE)
+    }
+
+    async createFinal(orderId: string, dto: CalculateTermPricingDto) {
+        return this.createStage(orderId, dto, PricingStageType.FINAL)
+    }
+
+    private async createStage(orderId: string, dto: CalculateTermPricingDto, stageType: PricingStageType) {
+        const order = await this.getOrderForPricing(orderId)
+
+        this.validateStageFlow(order, stageType)
+
+        return this.prisma.$transaction(async (tx) => {
+            const run = await this.getOrCreateRun(tx, order, dto)
+
+            const stage = await this.createStageBase(tx, run.id, order, dto, stageType)
+
+            await this.buildStageLines(tx, order, stage.id, dto)
+
+            const productIds = order.lines.map((x: any) => x.productId)
+
+            const priceDays = await this.createPriceDays(tx, stage.id, dto, productIds)
+
+            if (priceDays.length && (dto.mopsAvgUsdPerBbl === undefined || dto.mopsAvgUsdPerBbl === null)) {
+                const avg = priceDays.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / priceDays.length
+
+                const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+
+                await tx.purchasePricingStage.update({
+                    where: {
+                        id: stage.id,
+                    },
+                    data: {
+                        mopsAvgUsdPerBbl: new Prisma.Decimal(avg),
+                        premiumUsdPerBbl: new Prisma.Decimal(premium),
+                        unitUsdPerBbl: new Prisma.Decimal(avg + premium),
+                    },
+                })
+            }
+
+            await this.createCosts(tx, stage.id, dto)
+
+            await this.recalculateStage(tx, stage.id)
+
+            if (stageType === PricingStageType.FINAL) {
+                await this.createCostLayers(tx, order, run.id, stage.id)
+
+                await tx.purchasePricingRun.update({
+                    where: {
+                        id: run.id,
+                    },
+
+                    data: {
+                        status: PricingRunStatus.POSTED,
+                    },
+                })
+            }
+
+            return this.getStageDetail(stage.id)
         })
+    }
 
-        return this.findRunById(id)
+    async getStageDetail(stageId: string) {
+        return this.prisma.purchasePricingStage.findUnique({
+            where: {
+                id: stageId,
+            },
+
+            include: {
+                lines: {
+                    include: {
+                        product: true,
+                        supplierLocation: true,
+                        purchaseOrderLine: true,
+                    },
+                },
+
+                costs: true,
+
+                priceDays: true,
+
+                run: {
+                    include: {
+                        purchaseOrder: true,
+                    },
+                },
+            },
+        })
     }
 }

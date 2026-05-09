@@ -4,7 +4,7 @@ import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.
 import { UpdateTermPurchaseOrderDto } from './dto/update-term-purchase-order.dto'
 import { PurchaseTermOrdersService } from './purchase-term-orders.service'
 
-@Controller('purchase-term/orders')
+@Controller('purchase-terms')
 export class PurchaseTermOrdersController {
     constructor(private readonly service: PurchaseTermOrdersService) {}
 
@@ -23,28 +23,33 @@ export class PurchaseTermOrdersController {
         return this.service.findById(id)
     }
 
-    @Patch(':id')
-    update(@Param('id') id: string, @Body() dto: UpdateTermPurchaseOrderDto) {
-        return this.service.update(id, dto)
-    }
-
     @Post(':id/approve')
     approve(@Param('id') id: string) {
         return this.service.approve(id)
     }
 
-    @Post(':id/cancel')
-    cancel(@Param('id') id: string) {
-        return this.service.cancel(id)
-    }
+    // @Patch(':id')
+    // update(@Param('id') id: string, @Body() dto: UpdateTermPurchaseOrderDto) {
+    //     return this.service.update(id, dto)
+    // }
 
-    @Get(':id/next-action')
-    getNextAction(@Param('id') id: string) {
-        return this.service.getNextAction(id)
-    }
+    // @Post(':id/approve')
+    // approve(@Param('id') id: string) {
+    //     return this.service.approve(id)
+    // }
 
-    @Post(':id/complete')
-    complete(@Param('id') id: string) {
-        return this.service.complete(id)
-    }
+    // @Post(':id/cancel')
+    // cancel(@Param('id') id: string) {
+    //     return this.service.cancel(id)
+    // }
+
+    // @Get(':id/next-action')
+    // getNextAction(@Param('id') id: string) {
+    //     return this.service.getNextAction(id)
+    // }
+
+    // @Post(':id/complete')
+    // complete(@Param('id') id: string) {
+    //     return this.service.complete(id)
+    // }
 }
