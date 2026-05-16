@@ -1,6 +1,17 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 
-import { CostLayerStatus, FxStage, PricingRunStatus, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, QtyBasis } from '@prisma/client'
+import {
+    CostLayerStatus,
+    FxStage,
+    PricingRunStatus,
+    PricingSheetRowType,
+    PricingSheetValueType,
+    PricingStageType,
+    Prisma,
+    PurchaseBizType,
+    PurchaseOrderStatus,
+    QtyBasis,
+} from '@prisma/client'
 
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 
@@ -85,6 +96,7 @@ export class PurchaseTermPricingService {
                                 lines: true,
                                 costs: true,
                                 priceDays: true,
+                                sheetRows: true,
                             },
                         },
                     },
@@ -164,12 +176,18 @@ export class PurchaseTermPricingService {
 
         const hasBillNormalize = stages.some((x: any) => x.stageType === PricingStageType.BILL_NORMALIZE)
 
+        const hasFinal = stages.some((x: any) => x.stageType === PricingStageType.FINAL)
+
         if (stageType === PricingStageType.BILL_NORMALIZE && !hasEstimate) {
             throw new BadRequestException('ESTIMATE_REQUIRED')
         }
 
         if (stageType === PricingStageType.FINAL && !hasBillNormalize) {
             throw new BadRequestException('BILL_NORMALIZE_REQUIRED')
+        }
+
+        if (stageType === PricingStageType.BOSS_SHEET && !hasFinal) {
+            throw new BadRequestException('FINAL_STAGE_REQUIRED')
         }
     }
 
@@ -187,6 +205,7 @@ export class PurchaseTermPricingService {
 
         const mops = Number(dto.mopsAvgUsdPerBbl ?? 0)
         const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+        const specialTax = Number(dto.specialConsumptionTaxUsdPerBbl ?? 0)
 
         return tx.purchasePricingStage.create({
             data: {
@@ -195,11 +214,32 @@ export class PurchaseTermPricingService {
 
                 mopsAvgUsdPerBbl: new Prisma.Decimal(mops),
                 premiumUsdPerBbl: new Prisma.Decimal(premium),
-                unitUsdPerBbl: new Prisma.Decimal(mops + premium),
+                specialConsumptionTaxUsdPerBbl: new Prisma.Decimal(specialTax),
+                unitUsdPerBbl: new Prisma.Decimal(mops + premium + specialTax),
 
                 fxRateDate: this.toDateOnly(dto.fxRateDate),
                 fxStage: dto.fxStage ?? FxStage.ESTIMATE,
                 fxRate: dto.fxRate !== undefined && dto.fxRate !== null ? new Prisma.Decimal(dto.fxRate) : null,
+
+                billBarrelQty: dto.billBarrelQty !== undefined && dto.billBarrelQty !== null ? new Prisma.Decimal(dto.billBarrelQty) : null,
+
+                tankQtyLiter: dto.tankQtyLiter !== undefined && dto.tankQtyLiter !== null ? new Prisma.Decimal(dto.tankQtyLiter) : null,
+
+                insuranceRate: dto.insuranceRate !== undefined && dto.insuranceRate !== null ? new Prisma.Decimal(dto.insuranceRate) : null,
+
+                inspectionFeeVnd: dto.inspectionFeeVnd !== undefined && dto.inspectionFeeVnd !== null ? new Prisma.Decimal(dto.inspectionFeeVnd) : null,
+
+                transportFeeVnd: dto.transportFeeVnd !== undefined && dto.transportFeeVnd !== null ? new Prisma.Decimal(dto.transportFeeVnd) : null,
+
+                storageFeeVnd: dto.storageFeeVnd !== undefined && dto.storageFeeVnd !== null ? new Prisma.Decimal(dto.storageFeeVnd) : null,
+
+                transportLossRate: dto.transportLossRate !== undefined && dto.transportLossRate !== null ? new Prisma.Decimal(dto.transportLossRate) : null,
+
+                envTaxVndPerLiter: dto.envTaxVndPerLiter !== undefined && dto.envTaxVndPerLiter !== null ? new Prisma.Decimal(dto.envTaxVndPerLiter) : null,
+
+                extraCostVndPerLiter: dto.extraCostVndPerLiter !== undefined && dto.extraCostVndPerLiter !== null ? new Prisma.Decimal(dto.extraCostVndPerLiter) : null,
+
+                retailPriceVndPerLiter: dto.retailPriceVndPerLiter !== undefined && dto.retailPriceVndPerLiter !== null ? new Prisma.Decimal(dto.retailPriceVndPerLiter) : null,
 
                 envTaxAmountVnd: dto.envTaxAmountVnd !== undefined && dto.envTaxAmountVnd !== null ? new Prisma.Decimal(dto.envTaxAmountVnd) : null,
 
@@ -276,7 +316,7 @@ export class PurchaseTermPricingService {
         })
 
         if (!quotes.length) {
-            throw new BadRequestException('PLATTS_PRICE_QUOTES_NOT_FOUND')
+            return []
         }
 
         return quotes.map((x) => ({
@@ -302,84 +342,117 @@ export class PurchaseTermPricingService {
     }
 
     private async createCosts(tx: Prisma.TransactionClient, stageId: string, dto: CalculateTermPricingDto) {
-        for (const cost of dto.costs || []) {
+        for (const [index, cost] of (dto.costs || []).entries()) {
             await tx.purchasePricingStageCost.create({
                 data: {
                     stageId,
-
                     costType: cost.costType,
-
+                    name: cost.name?.trim() || null,
                     amountVnd: new Prisma.Decimal(cost.amountVnd),
-
                     sourceDocNo: cost.sourceDocNo?.trim() || null,
-
                     note: cost.note?.trim() || null,
+                    sortOrder: cost.sortOrder ?? index + 1,
                 },
             })
         }
     }
 
+    private toNumber(value: any): number {
+        if (value === null || value === undefined) return 0
+
+        const n = Number(value)
+        return Number.isFinite(n) ? n : 0
+    }
+
     private async recalculateStage(tx: Prisma.TransactionClient, stageId: string) {
         const stage = await tx.purchasePricingStage.findUnique({
-            where: {
-                id: stageId,
-            },
-
+            where: { id: stageId },
             include: {
-                lines: true,
+                priceDays: true,
                 costs: true,
+                lines: true,
             },
         })
 
         if (!stage) {
-            throw new NotFoundException('PRICING_STAGE_NOT_FOUND')
+            throw new BadRequestException('PURCHASE_PRICING_STAGE_NOT_FOUND')
         }
 
-        const unitUsdPerBbl = Number(stage.unitUsdPerBbl || 0)
+        const priceDays = stage.priceDays ?? []
 
-        const fxRate = Number(stage.fxRate || 0)
+        const avgPlatts = priceDays.length > 0 ? priceDays.reduce((sum, x) => sum + this.toNumber(x.priceUsdPerBbl), 0) / priceDays.length : this.toNumber(stage.mopsAvgUsdPerBbl)
 
-        const unitVndPerLiter = this.usdPerBblToVndPerLiter(unitUsdPerBbl, fxRate)
+        const premium = this.toNumber(stage.premiumUsdPerBbl)
+        const specialTax = this.toNumber(stage.specialConsumptionTaxUsdPerBbl)
 
-        let totalAmountVnd = 0
+        const unitUsdPerBbl = avgPlatts + premium + specialTax
+
+        const billBarrelQty = this.toNumber(stage.billBarrelQty)
+        const paymentAmountUsd = unitUsdPerBbl * billBarrelQty
+
+        const fxRate = this.toNumber(stage.fxRate)
+
+        const insuranceRate = this.toNumber(stage.insuranceRate)
+        const insuranceAmountVnd = paymentAmountUsd * fxRate * insuranceRate
+
+        const inspectionFeeVnd = this.toNumber(stage.inspectionFeeVnd)
+        const transportFeeVnd = this.toNumber(stage.transportFeeVnd)
+        const storageFeeVnd = this.toNumber(stage.storageFeeVnd)
+
+        const transportLossRate = this.toNumber(stage.transportLossRate)
+        const transportLossAmountVnd = paymentAmountUsd * fxRate * transportLossRate
+
+        const extraStageCosts = stage.costs.reduce((sum, x) => sum + this.toNumber(x.amountVnd), 0)
+
+        const billTotalVnd = paymentAmountUsd * fxRate + insuranceAmountVnd + inspectionFeeVnd + transportFeeVnd + storageFeeVnd + transportLossAmountVnd + extraStageCosts
+
+        const tankQtyLiter = this.toNumber(stage.tankQtyLiter)
+
+        const tankUnitPriceVndPerLiter = tankQtyLiter > 0 ? billTotalVnd / tankQtyLiter : 0
+
+        const envTaxVndPerLiter = this.toNumber(stage.envTaxVndPerLiter)
+        const extraCostVndPerLiter = this.toNumber(stage.extraCostVndPerLiter)
+
+        const sellingUnitPriceVndPerLiter = tankUnitPriceVndPerLiter + envTaxVndPerLiter + extraCostVndPerLiter
+
+        const temporaryAmountVnd = sellingUnitPriceVndPerLiter * tankQtyLiter
+
+        const retailPriceVndPerLiter = this.toNumber(stage.retailPriceVndPerLiter)
+
+        const discountVndPerLiter = retailPriceVndPerLiter > 0 ? retailPriceVndPerLiter - sellingUnitPriceVndPerLiter : 0
 
         for (const line of stage.lines) {
-            const qty = Number(line.qtyV15 || line.qtyActual || 0)
-
-            const amountVnd = qty * unitVndPerLiter
-
-            totalAmountVnd += amountVnd
+            const qty = this.toNumber(line.qtyV15 ?? line.qtyActual)
 
             await tx.purchasePricingStageLine.update({
-                where: {
-                    id: line.id,
-                },
-
+                where: { id: line.id },
                 data: {
-                    unitVndPerLiter: new Prisma.Decimal(unitVndPerLiter),
-
-                    amountVnd: new Prisma.Decimal(amountVnd),
+                    unitVndPerLiter: new Prisma.Decimal(sellingUnitPriceVndPerLiter),
+                    amountVnd: new Prisma.Decimal(qty * sellingUnitPriceVndPerLiter),
                 },
             })
         }
 
-        const totalCosts = stage.costs.reduce((sum: number, x: any) => sum + Number(x.amountVnd || 0), 0)
-
-        totalAmountVnd += totalCosts
-
-        totalAmountVnd += Number(stage.envTaxAmountVnd || 0)
-
-        totalAmountVnd += Number(stage.vatAmountVnd || 0)
-
         await tx.purchasePricingStage.update({
-            where: {
-                id: stage.id,
-            },
-
+            where: { id: stage.id },
             data: {
-                unitVndPerLiter: new Prisma.Decimal(unitVndPerLiter),
+                mopsAvgUsdPerBbl: new Prisma.Decimal(avgPlatts),
+                unitUsdPerBbl: new Prisma.Decimal(unitUsdPerBbl),
+                amountUsd: new Prisma.Decimal(paymentAmountUsd),
 
-                totalAmountVnd: new Prisma.Decimal(totalAmountVnd),
+                paymentAmountUsd: new Prisma.Decimal(paymentAmountUsd),
+
+                insuranceAmountVnd: new Prisma.Decimal(insuranceAmountVnd),
+                transportLossAmountVnd: new Prisma.Decimal(transportLossAmountVnd),
+
+                billTotalVnd: new Prisma.Decimal(billTotalVnd),
+                tankUnitPriceVndPerLiter: new Prisma.Decimal(tankUnitPriceVndPerLiter),
+                sellingUnitPriceVndPerLiter: new Prisma.Decimal(sellingUnitPriceVndPerLiter),
+                temporaryAmountVnd: new Prisma.Decimal(temporaryAmountVnd),
+                discountVndPerLiter: new Prisma.Decimal(discountVndPerLiter),
+
+                totalAmountVnd: new Prisma.Decimal(temporaryAmountVnd),
+                unitVndPerLiter: new Prisma.Decimal(sellingUnitPriceVndPerLiter),
             },
         })
     }
@@ -489,6 +562,8 @@ export class PurchaseTermPricingService {
 
             await this.recalculateStage(tx, stage.id)
 
+            await this.buildSheetRows(tx, stage.id)
+
             if (stageType === PricingStageType.FINAL) {
                 await this.createCostLayers(tx, order, run.id, stage.id)
 
@@ -496,7 +571,33 @@ export class PurchaseTermPricingService {
                     where: {
                         id: run.id,
                     },
-
+                    data: {
+                        status: PricingRunStatus.POSTED,
+                    },
+                })
+            } else if (stageType === PricingStageType.ESTIMATE) {
+                await tx.purchasePricingRun.update({
+                    where: {
+                        id: run.id,
+                    },
+                    data: {
+                        status: PricingRunStatus.ESTIMATED,
+                    },
+                })
+            } else if (stageType === PricingStageType.BILL_NORMALIZE) {
+                await tx.purchasePricingRun.update({
+                    where: {
+                        id: run.id,
+                    },
+                    data: {
+                        status: PricingRunStatus.NORMALIZED,
+                    },
+                })
+            } else if (stageType === PricingStageType.BOSS_SHEET) {
+                await tx.purchasePricingRun.update({
+                    where: {
+                        id: run.id,
+                    },
                     data: {
                         status: PricingRunStatus.POSTED,
                     },
@@ -512,20 +613,32 @@ export class PurchaseTermPricingService {
             where: {
                 id: stageId,
             },
-
             include: {
+                priceDays: {
+                    orderBy: {
+                        quoteDate: 'asc',
+                    },
+                },
+                costs: {
+                    orderBy: {
+                        sortOrder: 'asc',
+                    },
+                },
+                sheetRows: {
+                    orderBy: {
+                        sortOrder: 'asc',
+                    },
+                },
                 lines: {
                     include: {
                         product: true,
                         supplierLocation: true,
                         purchaseOrderLine: true,
                     },
+                    orderBy: {
+                        createdAt: 'asc',
+                    },
                 },
-
-                costs: true,
-
-                priceDays: true,
-
                 run: {
                     include: {
                         purchaseOrder: true,
@@ -533,5 +646,246 @@ export class PurchaseTermPricingService {
                 },
             },
         })
+    }
+
+    private async buildSheetRows(tx: Prisma.TransactionClient, stageId: string) {
+        const stage = await tx.purchasePricingStage.findUnique({
+            where: { id: stageId },
+            include: {
+                priceDays: {
+                    orderBy: {
+                        quoteDate: 'asc',
+                    },
+                },
+                costs: {
+                    orderBy: {
+                        sortOrder: 'asc',
+                    },
+                },
+            },
+        })
+
+        if (!stage) {
+            throw new BadRequestException('PURCHASE_PRICING_STAGE_NOT_FOUND')
+        }
+
+        await tx.purchasePricingSheetRow.deleteMany({
+            where: {
+                stageId,
+            },
+        })
+
+        const rows: Prisma.PurchasePricingSheetRowCreateManyInput[] = []
+
+        let rowNo = 1
+
+        for (const day of stage.priceDays) {
+            rows.push({
+                stageId,
+                rowNo,
+                sortOrder: rowNo,
+                code: `PRICE_DAY_${rowNo}`,
+                label: day.quoteDate.toISOString().slice(0, 10),
+                rowType: PricingSheetRowType.PRICE_DAY,
+                valueType: PricingSheetValueType.NUMBER,
+                calculatedValue: day.priceUsdPerBbl,
+                unit: 'USD/thùng',
+                note: rowNo === 1 ? 'Giá Platts' : null,
+            })
+
+            rowNo++
+        }
+
+        const addRow = (args: {
+            code: string
+            label: string
+            value?: Prisma.Decimal | number | null
+            unit?: string
+            formula?: string
+            note?: string
+            rowType?: PricingSheetRowType
+            valueType?: PricingSheetValueType
+            isInput?: boolean
+            isResult?: boolean
+            isBold?: boolean
+            isHighlighted?: boolean
+        }) => {
+            rows.push({
+                stageId,
+                rowNo,
+                sortOrder: rowNo,
+                code: args.code,
+                label: args.label,
+                rowType: args.rowType ?? PricingSheetRowType.FORMULA,
+                valueType: args.valueType ?? PricingSheetValueType.NUMBER,
+                calculatedValue: args.value === undefined || args.value === null ? null : new Prisma.Decimal(args.value),
+                unit: args.unit ?? null,
+                formula: args.formula ?? null,
+                note: args.note ?? null,
+                isInput: args.isInput ?? false,
+                isResult: args.isResult ?? false,
+                isBold: args.isBold ?? false,
+                isHighlighted: args.isHighlighted ?? false,
+            })
+
+            rowNo++
+        }
+
+        addRow({
+            code: 'AVG_PLATTS',
+            label: 'Giá trung bình Platts',
+            value: stage.mopsAvgUsdPerBbl,
+            unit: 'USD',
+            note: 'Trung bình các ngày Platts',
+            isBold: true,
+        })
+
+        addRow({
+            code: 'PREMIUM',
+            label: 'Premium',
+            value: stage.premiumUsdPerBbl,
+            unit: 'USD',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'FOB_NS',
+            label: 'FOB NS',
+            value: stage.unitUsdPerBbl,
+            unit: 'USD',
+            formula: 'Giá trung bình Platts + Premium + Thuế TTĐB',
+            isBold: true,
+        })
+
+        addRow({
+            code: 'BILL_BARREL_QTY',
+            label: 'Số thùng BILL',
+            value: stage.billBarrelQty,
+            unit: 'thùng',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'PAYMENT_AMOUNT_USD',
+            label: 'Số tiền thanh toán',
+            value: stage.paymentAmountUsd,
+            unit: 'USD',
+            formula: 'Đơn giá/thùng * Số thùng BILL',
+            isBold: true,
+        })
+
+        addRow({
+            code: 'FX_RATE',
+            label: 'Tỷ giá VCB',
+            value: stage.fxRate,
+            unit: 'VND/USD',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'INSURANCE',
+            label: 'Bảo hiểm hàng hóa',
+            value: stage.insuranceAmountVnd,
+            unit: 'VND',
+            rowType: PricingSheetRowType.COST,
+        })
+
+        for (const cost of stage.costs) {
+            addRow({
+                code: `COST_${cost.costType}_${cost.id}`,
+                label: cost.name || cost.costType,
+                value: cost.amountVnd,
+                unit: 'VND',
+                rowType: PricingSheetRowType.COST,
+                note: cost.note ?? undefined,
+            })
+        }
+
+        addRow({
+            code: 'TRANSPORT_LOSS',
+            label: 'Hao hụt vận chuyển',
+            value: stage.transportLossAmountVnd,
+            unit: 'VND',
+            rowType: PricingSheetRowType.COST,
+        })
+
+        addRow({
+            code: 'BILL_TOTAL_VND',
+            label: 'Tổng tiền BILL',
+            value: stage.billTotalVnd,
+            unit: 'VND',
+            formula: 'Tiền hàng + chi phí',
+            rowType: PricingSheetRowType.RESULT,
+            isResult: true,
+            isBold: true,
+            isHighlighted: true,
+        })
+
+        addRow({
+            code: 'TANK_QTY',
+            label: 'Số lượng bồn',
+            value: stage.tankQtyLiter,
+            unit: 'lit',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'TANK_UNIT_PRICE',
+            label: 'Đơn giá/Lít TT bồn',
+            value: stage.tankUnitPriceVndPerLiter,
+            unit: 'VND/lit',
+            rowType: PricingSheetRowType.RESULT,
+            isBold: true,
+        })
+
+        addRow({
+            code: 'ENV_TAX_PER_LITER',
+            label: 'Thuế BVMT',
+            value: stage.envTaxVndPerLiter,
+            unit: 'VND/lit',
+            rowType: PricingSheetRowType.TAX,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'EXTRA_COST_PER_LITER',
+            label: 'Chi phí phát sinh',
+            value: stage.extraCostVndPerLiter,
+            unit: 'VND/lit',
+            rowType: PricingSheetRowType.COST,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'SELLING_UNIT_PRICE',
+            label: 'Đơn giá bán',
+            value: stage.sellingUnitPriceVndPerLiter,
+            unit: 'VND/lit',
+            rowType: PricingSheetRowType.RESULT,
+            isBold: true,
+        })
+
+        addRow({
+            code: 'TEMP_AMOUNT',
+            label: 'Thành tiền tạm tính',
+            value: stage.temporaryAmountVnd,
+            unit: 'VND',
+            rowType: PricingSheetRowType.RESULT,
+            isResult: true,
+            isBold: true,
+            isHighlighted: true,
+        })
+
+        await tx.purchasePricingSheetRow.createMany({
+            data: rows,
+        })
+    }
+
+    async createBossSheet(orderId: string, dto: CalculateTermPricingDto) {
+        return this.createStage(orderId, dto, PricingStageType.BOSS_SHEET)
     }
 }

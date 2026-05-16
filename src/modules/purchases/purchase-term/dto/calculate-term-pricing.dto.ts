@@ -46,6 +46,10 @@ export class TermPricingCostInputDto {
     @IsEnum(PurchaseCostType)
     costType!: PurchaseCostType
 
+    @IsOptional()
+    @IsString()
+    name?: string
+
     @IsNumber()
     amountVnd!: number
 
@@ -56,6 +60,10 @@ export class TermPricingCostInputDto {
     @IsOptional()
     @IsString()
     note?: string
+
+    @IsOptional()
+    @IsNumber()
+    sortOrder?: number
 }
 
 export class CalculateTermPricingDto {
@@ -76,6 +84,10 @@ export class CalculateTermPricingDto {
     @IsOptional()
     @IsNumber()
     premiumUsdPerBbl?: number
+
+    @IsOptional()
+    @IsNumber()
+    specialConsumptionTaxUsdPerBbl?: number
 
     @IsOptional()
     @IsDateString()
@@ -106,6 +118,46 @@ export class CalculateTermPricingDto {
     @IsOptional()
     @IsNumber()
     fxRate?: number
+
+    @IsOptional()
+    @IsNumber()
+    billBarrelQty?: number
+
+    @IsOptional()
+    @IsNumber()
+    tankQtyLiter?: number
+
+    @IsOptional()
+    @IsNumber()
+    insuranceRate?: number
+
+    @IsOptional()
+    @IsNumber()
+    inspectionFeeVnd?: number
+
+    @IsOptional()
+    @IsNumber()
+    transportFeeVnd?: number
+
+    @IsOptional()
+    @IsNumber()
+    storageFeeVnd?: number
+
+    @IsOptional()
+    @IsNumber()
+    transportLossRate?: number
+
+    @IsOptional()
+    @IsNumber()
+    envTaxVndPerLiter?: number
+
+    @IsOptional()
+    @IsNumber()
+    extraCostVndPerLiter?: number
+
+    @IsOptional()
+    @IsNumber()
+    retailPriceVndPerLiter?: number
 
     @IsOptional()
     @IsNumber()

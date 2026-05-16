@@ -145,7 +145,7 @@ export class PurchaseTermMapper {
                 updatedAt: x.updatedAt,
             })),
 
-            pricingRun: (order.pricingRuns ?? [])[0] ? this.toPricingRun((order.pricingRuns ?? [])[0]) : null,
+            // pricingRun: (order.pricingRuns ?? [])[0] ? this.toPricingRun((order.pricingRuns ?? [])[0]) : null,
 
             pricingRuns: (order.pricingRuns ?? []).map((run: any) => this.toPricingRun(run)),
 
@@ -243,6 +243,25 @@ export class PurchaseTermMapper {
                         quoteDate: day.quoteDate,
                         priceUsdPerBbl: this.n(day.priceUsdPerBbl),
                     })),
+                })),
+                sheetRows: (stage.sheetRows ?? []).map((x: any) => ({
+                    id: x.id,
+                    rowNo: x.rowNo,
+                    code: x.code,
+                    label: x.label,
+                    rowType: x.rowType,
+                    valueType: x.valueType,
+                    inputValue: x.inputValue == null ? null : Number(x.inputValue),
+                    calculatedValue: x.calculatedValue == null ? null : Number(x.calculatedValue),
+                    displayValue: x.displayValue,
+                    unit: x.unit,
+                    formula: x.formula,
+                    note: x.note,
+                    isInput: x.isInput,
+                    isResult: x.isResult,
+                    isBold: x.isBold,
+                    isHighlighted: x.isHighlighted,
+                    sortOrder: x.sortOrder,
                 })),
             })),
         }

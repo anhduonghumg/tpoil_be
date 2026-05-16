@@ -20,4 +20,9 @@ export class PurchaseTermPricingController {
     createFinal(@Param('orderId') orderId: string, @Body() dto: CalculateTermPricingDto) {
         return this.service.createFinal(orderId, dto)
     }
+
+    @Post(':orderId/pricing/boss-sheet')
+    createBossSheetPricing(@Param('orderId') orderId: string, @Body() dto: CalculateTermPricingDto) {
+        return this.service.createBossSheet(orderId, dto)
+    }
 }

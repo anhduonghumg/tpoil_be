@@ -1,12 +1,16 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
 import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.query.dto'
-import { UpdateTermPurchaseOrderDto } from './dto/update-term-purchase-order.dto'
+// import { UpdateTermPurchaseOrderDto } from './dto/update-term-purchase-order.dto'
 import { PurchaseTermOrdersService } from './purchase-term-orders.service'
+import { VcbFxService } from './vcb-fx.service'
 
 @Controller('purchase-terms')
 export class PurchaseTermOrdersController {
-    constructor(private readonly service: PurchaseTermOrdersService) {}
+    constructor(
+        private readonly service: PurchaseTermOrdersService,
+        private readonly vcbFxService: VcbFxService,
+    ) {}
 
     @Post()
     create(@Body() dto: CreateTermPurchaseOrderDto) {
@@ -16,6 +20,11 @@ export class PurchaseTermOrdersController {
     @Get()
     list(@Query() query: ListTermPurchaseOrdersQueryDto) {
         return this.service.list(query)
+    }
+
+    @Get('vcb-fx-rate')
+    getVcbFx() {
+        return this.vcbFxService.getUsdSellRate()
     }
 
     @Get(':id')

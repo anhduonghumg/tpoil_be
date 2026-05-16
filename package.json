@@ -76,7 +76,8 @@
         "reflect-metadata": "^0.2.2",
         "rxjs": "^7.8.1",
         "swagger-ui-express": "^5.0.1",
-        "uuid": "^11.1.0"
+        "uuid": "^11.1.0",
+        "xml2js-parser": "^1.1.1"
     },
     "devDependencies": {
         "@commitlint/cli": "^19.8.1",

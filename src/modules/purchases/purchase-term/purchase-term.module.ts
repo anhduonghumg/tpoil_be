@@ -9,12 +9,13 @@ import { PurchaseTermPricingController } from './purchase-term-pricing.controlle
 import { PurchaseTermPricingService } from './purchase-term-pricing.service'
 import { PurchaseTermReceiptsController } from './purchase-term-receipts.controller'
 import { PurchaseTermReceiptsService } from './purchase-term-receipts.service'
+import { VcbFxService } from './vcb-fx.service'
 import { PrismaModule } from 'src/infra/prisma/prisma.module'
 
 @Module({
     imports: [PrismaModule],
     controllers: [PurchaseTermOrdersController, PurchaseTermReceiptsController, PurchaseTermPricingController, PurchaseTermCostLayerController],
-    providers: [PurchaseTermOrdersService, PurchaseTermReceiptsService, PurchaseTermPricingService, PurchaseTermCostLayerService, PurchaseTermNextActionService],
+    providers: [PurchaseTermOrdersService, PurchaseTermReceiptsService, PurchaseTermPricingService, PurchaseTermCostLayerService, PurchaseTermNextActionService, VcbFxService],
     exports: [PurchaseTermOrdersService, PurchaseTermReceiptsService, PurchaseTermPricingService, PurchaseTermCostLayerService, PurchaseTermNextActionService],
 })
 export class PurchaseTermModule {}

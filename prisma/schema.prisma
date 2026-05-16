@@ -47,6 +47,25 @@ enum PricingStageType {
   ESTIMATE
   BILL_NORMALIZE
   FINAL
+  BOSS_SHEET
+}
+
+enum PricingSheetRowType {
+  PRICE_DAY
+  INPUT
+  FORMULA
+  COST
+  TAX
+  RESULT
+  NOTE
+}
+
+enum PricingSheetValueType {
+  NUMBER
+  MONEY
+  PERCENT
+  TEXT
+  DATE
 }
 
 enum FxStage {
@@ -69,7 +88,9 @@ enum PriceSource {
 enum PurchaseCostType {
   INSURANCE
   INSPECTION
-  SHIPPING
+  TRANSPORT
+  STORAGE
+  LOSS
   OTHER
 }
 
@@ -1772,6 +1793,31 @@ model PurchasePricingStage {
   totalAmountVnd     Decimal? @db.Decimal(18, 2)
   unitVndPerLiter    Decimal? @db.Decimal(18, 6)
 
+  specialConsumptionTaxUsdPerBbl Decimal? @db.Decimal(18, 6)
+
+  billBarrelQty Decimal? @db.Decimal(18, 3)
+  tankQtyLiter  Decimal? @db.Decimal(18, 3)
+
+  insuranceRate     Decimal? @db.Decimal(18, 6)
+  transportLossRate Decimal? @db.Decimal(18, 6)
+
+  inspectionFeeVnd Decimal? @db.Decimal(18, 2)
+  transportFeeVnd  Decimal? @db.Decimal(18, 2)
+  storageFeeVnd    Decimal? @db.Decimal(18, 2)
+
+  envTaxVndPerLiter      Decimal? @db.Decimal(18, 6)
+  extraCostVndPerLiter   Decimal? @db.Decimal(18, 6)
+  retailPriceVndPerLiter Decimal? @db.Decimal(18, 6)
+
+  paymentAmountUsd Decimal? @db.Decimal(18, 6)
+
+  transportLossAmountVnd      Decimal? @db.Decimal(18, 2)
+  billTotalVnd                Decimal? @db.Decimal(18, 2)
+  tankUnitPriceVndPerLiter    Decimal? @db.Decimal(18, 6)
+  sellingUnitPriceVndPerLiter Decimal? @db.Decimal(18, 6)
+  temporaryAmountVnd          Decimal? @db.Decimal(18, 2)
+  discountVndPerLiter         Decimal? @db.Decimal(18, 6)
+
   note String?
 
   costs PurchasePricingStageCost[]
@@ -1779,6 +1825,7 @@ model PurchasePricingStage {
 
   run       PurchasePricingRun        @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   priceDays PurchasePricingPriceDay[]
+  sheetRows PurchasePricingSheetRow[]
 
   @@unique([runId, stageType])
 }
@@ -1822,6 +1869,9 @@ model PurchasePricingStageCost {
   stageId String               @db.Uuid
   stage   PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
+  name      String?
+  sortOrder Int              @default(0)
+  
   costType  PurchaseCostType
   amountVnd Decimal          @db.Decimal(18, 2)
 
@@ -1896,6 +1946,43 @@ model PriceRegion {
   purchaseOrders PurchaseOrder[]
 
   @@index([isActive])
+}
+
+model PurchasePricingSheetRow {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  stageId String               @db.Uuid
+  stage   PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  rowNo Int
+  code  String?
+  label String
+
+  rowType   PricingSheetRowType
+  valueType PricingSheetValueType @default(NUMBER)
+
+  inputValue      Decimal? @db.Decimal(18, 6)
+  calculatedValue Decimal? @db.Decimal(18, 6)
+
+  displayValue String?
+  unit         String?
+  formula      String?
+  note         String?
+
+  isInput       Boolean @default(false)
+  isResult      Boolean @default(false)
+  isBold        Boolean @default(false)
+  isHighlighted Boolean @default(false)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([stageId, rowNo])
+  @@index([stageId])
+  @@index([stageId, code])
+  @@index([stageId, sortOrder])
 }
 
 model PriceBulletin {

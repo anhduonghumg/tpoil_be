@@ -24,41 +24,66 @@ export class PurchaseTermOrdersService {
         return new Date(`${value}T00:00:00.000Z`)
     }
 
-    private orderInclude = {
+    private readonly orderInclude = {
         supplier: true,
+
         supplierLocation: true,
+
         lines: {
             include: {
                 product: true,
                 supplierLocation: true,
             },
-            orderBy: { createdAt: 'asc' as const },
+            orderBy: {
+                createdAt: 'asc',
+            },
         },
+
         receipts: {
             include: {
                 product: true,
                 supplierLocation: true,
             },
-            orderBy: { createdAt: 'desc' as const },
+            orderBy: {
+                createdAt: 'desc',
+            },
         },
+
         pricingRuns: {
             include: {
                 stages: {
                     include: {
+                        priceDays: {
+                            orderBy: {
+                                quoteDate: 'asc',
+                            },
+                        },
+
                         costs: true,
-                        priceDays: true,
+
+                        sheetRows: {
+                            orderBy: {
+                                sortOrder: 'asc',
+                            },
+                        },
                         lines: {
                             include: {
                                 product: true,
                                 supplierLocation: true,
+                                purchaseOrderLine: true,
+                            },
+                            orderBy: {
+                                createdAt: 'asc',
                             },
                         },
                     },
                 },
             },
-            orderBy: { createdAt: 'desc' as const },
+            orderBy: {
+                createdAt: 'desc',
+            },
         },
-    }
+    } satisfies Prisma.PurchaseOrderInclude
 
     private async generateOrderNo(tx: Prisma.TransactionClient): Promise<string> {
         const now = new Date()
