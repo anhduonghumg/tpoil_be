@@ -22,6 +22,17 @@ export class PurchaseTermOrdersController {
         return this.service.list(query)
     }
 
+    @Get('platts-average')
+    getPlattsAverage(
+        @Query('productId')
+        productId: string,
+
+        @Query('baseDate')
+        baseDate: string,
+    ) {
+        return this.service.getPlattsAverage(productId, baseDate)
+    }
+
     @Get('vcb-fx-rate')
     getVcbFx() {
         return this.vcbFxService.getUsdSellRate()

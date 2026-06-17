@@ -20,16 +20,19 @@
         "test:cov": "jest --coverage",
         "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
         "test:e2e": "jest --config ./test/jest-e2e.json",
-        "lint": "eslint . --ext .ts",
-        "lint:fix": "eslint . --ext .ts --fix",
+        "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+        "lint:fix": "eslint \"src/**/*.ts\" \"test/**/*.ts\" --fix",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "prepare": "husky"
     },
     "lint-staged": {
-        "*.{ts,js,json,md}": [
+        "*.{ts,js}": [
             "prettier --write",
-            "eslint --fix --max-warnings=0"
+            "eslint --fix"
+        ],
+        "*.{json,md}": [
+            "prettier --write"
         ]
     },
     "dependencies": {

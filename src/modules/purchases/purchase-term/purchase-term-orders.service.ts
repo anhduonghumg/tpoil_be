@@ -6,6 +6,7 @@ import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.
 import { UpdateTermPurchaseOrderDto } from './dto/update-term-purchase-order.dto'
 import { PurchaseTermMapper } from './purchase-term.mapper'
 import { PurchaseTermNextActionService } from './purchase-term-next-action.service'
+import dayjs from 'dayjs'
 
 @Injectable()
 export class PurchaseTermOrdersService {
@@ -660,6 +661,46 @@ export class PurchaseTermOrdersService {
 
         if (!location) {
             throw new BadRequestException('SUPPLIER_LOCATION_INVALID')
+        }
+    }
+
+    async getPlattsAverage(productId: string, baseDate: string) {
+        const from = dayjs(baseDate).subtract(5, 'day').toDate()
+
+        const to = dayjs(baseDate).add(5, 'day').toDate()
+
+        const rows = await this.prisma.commodityPriceQuote.findMany({
+            where: {
+                productId,
+
+                quoteDate: {
+                    gte: from,
+                    lte: to,
+                },
+            },
+
+            orderBy: {
+                quoteDate: 'asc',
+            },
+        })
+
+        if (!rows.length) {
+            return {
+                avgPriceUsdPerBbl: null,
+                items: [],
+            }
+        }
+
+        const avg = rows.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / rows.length
+
+        return {
+            avgPriceUsdPerBbl: Number(avg.toFixed(4)),
+
+            items: rows.map((x) => ({
+                quoteDate: x.quoteDate,
+
+                priceUsdPerBbl: Number(x.priceUsdPerBbl),
+            })),
         }
     }
 }

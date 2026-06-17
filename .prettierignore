@@ -1,0 +1,7 @@
+dist
+coverage
+node_modules
+uploads
+storage
+public
+package-lock.json
