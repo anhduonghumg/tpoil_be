@@ -331,6 +331,57 @@ enum PurchaseBizType {
   TERM
 }
 
+enum TermTransportMode {
+  PIPELINE
+  SEA
+  ROAD
+}
+
+enum TermShipmentStatus {
+  DRAFT
+  CONFIRMED
+  VOID
+}
+
+enum TermLogisticsCostStatus {
+  DRAFT
+  CONFIRMED
+  ALLOCATED
+  POSTED
+  VOID
+}
+
+enum TermLogisticsCostType {
+  FREIGHT
+  INSURANCE
+  INSPECTION
+  PORT_FEE
+  HANDLING
+  PIPELINE_FEE
+  STORAGE
+  OTHER
+}
+
+enum TermCostAllocationBasis {
+  BY_ACTUAL_QTY
+  BY_V15_QTY
+  BY_VALUE
+  MANUAL
+}
+
+model DocumentSequence {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  moduleCode String
+  period     String
+  currentNo  Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moduleCode, period])
+}
+
 // =======================================
 // Cron Jobs
 // =======================================
@@ -741,18 +792,19 @@ model Customer {
   creditHistories CreditLimitHistory[]
   addresses       CustomerAddress[]
 
-  vehicles          Vehicle[]
-  drivers           Driver[]
-  supplierLocations SupplierLocation[]
-  purchaseOrders    PurchaseOrder[]
-  goodsReceipts     GoodsReceipt[]
-  supplierInvoices  SupplierInvoice[]
-  settlements       SupplierSettlement[]
-  reconcileSessions ReconcileSession[]
-  adjustments       InventoryAdjustment[]
-  pricingTemplates  SupplierPricingTemplate[]
-  pricingRuns       PurchasePricingRun[]
-  costLayers        InventoryCostLayer[]
+  vehicles           Vehicle[]
+  drivers            Driver[]
+  supplierLocations  SupplierLocation[]
+  purchaseOrders     PurchaseOrder[]
+  goodsReceipts      GoodsReceipt[]
+  supplierInvoices   SupplierInvoice[]
+  settlements        SupplierSettlement[]
+  reconcileSessions  ReconcileSession[]
+  adjustments        InventoryAdjustment[]
+  pricingTemplates   SupplierPricingTemplate[]
+  pricingRuns        PurchasePricingRun[]
+  costLayers         InventoryCostLayer[]
+  termLogisticsCosts TermLogisticsCost[]       @relation("term_logistics_cost_vendor")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -829,9 +881,10 @@ model Contract {
   renewalOf   Contract?  @relation("ContractRenewal", fields: [renewalOfId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   renewals    Contract[] @relation("ContractRenewal")
 
-  items       ContractItem[]
-  appendices  ContractAppendix[]
-  attachments ContractAttachment[]
+  items          ContractItem[]
+  appendices     ContractAppendix[]
+  attachments    ContractAttachment[]
+  purchaseOrders PurchaseOrder[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -985,10 +1038,12 @@ model Product {
   ledger                    InventoryLedger[]
   purchaseOrderLines        PurchaseOrderLine[]
   priceQuotes               CommodityPriceQuote[]
+  environmentalTaxRates     EnvironmentalTaxRate[]
   pricingTemplates          SupplierPricingTemplate[]
   costLayers                InventoryCostLayer[]
   priceBulletinItems        PriceBulletinItem[]
   purchasePricingStageLines PurchasePricingStageLine[]
+  termLogisticsCostLines    TermLogisticsCostLine[]
 
   @@index([name])
 }
@@ -1105,6 +1160,7 @@ model PurchaseOrder {
   status               PurchaseOrderStatus @default(DRAFT)
   paymentMode          PaymentMode
   termPremiumUsdPerBbl Decimal?            @db.Decimal(18, 6)
+  transportMode        TermTransportMode?
 
   paymentTermType     PaymentTermType @default(SAME_DAY)
   paymentTermDays     Int?
@@ -1120,6 +1176,8 @@ model PurchaseOrder {
   totalAmount Decimal? @db.Decimal(18, 2)
 
   contractNo       String?
+  contractId       String?   @db.Uuid
+  contract         Contract? @relation(fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   deliveryLocation String?
 
   createdAt DateTime @default(now())
@@ -1128,15 +1186,18 @@ model PurchaseOrder {
   lines    PurchaseOrderLine[]
   receipts GoodsReceipt[]
 
-  supplierInvoices SupplierInvoice[]          @relation("supplierInvoices")
-  paymentPlans     PurchaseOrderPaymentPlan[]
-  pricingRuns      PurchasePricingRun[]
+  supplierInvoices   SupplierInvoice[]          @relation("supplierInvoices")
+  paymentPlans       PurchaseOrderPaymentPlan[]
+  pricingRuns        PurchasePricingRun[]
+  termShipments      TermShipment[]
+  termLogisticsCosts TermLogisticsCost[]
 
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
   @@index([priceRegionId])
   @@index([bizType])
+  @@index([contractId])
 }
 
 model PurchaseOrderLine {
@@ -1163,10 +1224,124 @@ model PurchaseOrderLine {
 
   goodsReceipts             GoodsReceipt[]
   purchasePricingStageLines PurchasePricingStageLine[]
+  termLogisticsCostLines    TermLogisticsCostLine[]
 
   @@index([purchaseOrderId])
   @@index([productId])
   @@index([supplierLocationId, productId])
+}
+
+model TermShipment {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  purchaseOrderId String        @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  transportMode TermTransportMode @default(SEA)
+
+  vesselName String?
+  voyageNo   String?
+  blNo       String?
+
+  loadingPort   String?
+  dischargePort String?
+
+  etd DateTime?
+  eta DateTime?
+
+  surveyorName String?
+  note         String?
+
+  status TermShipmentStatus @default(DRAFT)
+
+  logisticsCosts TermLogisticsCost[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseOrderId])
+  @@index([transportMode])
+  @@index([status])
+  @@index([eta])
+}
+
+model TermLogisticsCost {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  purchaseOrderId String        @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  shipmentId String?       @db.Uuid
+  shipment   TermShipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  vendorCustomerId String?   @db.Uuid
+  vendor           Customer? @relation("term_logistics_cost_vendor", fields: [vendorCustomerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  documentNo   String?
+  documentDate DateTime? @db.Date
+
+  currency String   @default("VND")
+  fxRate   Decimal? @db.Decimal(18, 6)
+
+  totalBeforeVat Decimal @default(0) @db.Decimal(18, 2)
+  totalVat       Decimal @default(0) @db.Decimal(18, 2)
+  totalAfterVat  Decimal @default(0) @db.Decimal(18, 2)
+
+  status TermLogisticsCostStatus @default(DRAFT)
+
+  note String?
+
+  lines TermLogisticsCostLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseOrderId])
+  @@index([shipmentId])
+  @@index([vendorCustomerId])
+  @@index([documentDate])
+  @@index([status])
+}
+
+model TermLogisticsCostLine {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  logisticsCostId String            @db.Uuid
+  logisticsCost   TermLogisticsCost @relation(fields: [logisticsCostId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  costType TermLogisticsCostType
+
+  productId String?  @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  purchaseOrderLineId String?            @db.Uuid
+  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  goodsReceiptId String?       @db.Uuid
+  goodsReceipt   GoodsReceipt? @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  allocationBasis TermCostAllocationBasis @default(BY_ACTUAL_QTY)
+
+  amountBeforeVat Decimal @db.Decimal(18, 2)
+  vatRate         Decimal @default(0) @db.Decimal(5, 2)
+  vatAmount       Decimal @default(0) @db.Decimal(18, 2)
+  amountAfterVat  Decimal @db.Decimal(18, 2)
+
+  amountVndBeforeVat Decimal? @db.Decimal(18, 2)
+
+  isCapitalizedToCost Boolean @default(true)
+
+  note      String?
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([logisticsCostId])
+  @@index([costType])
+  @@index([productId])
+  @@index([purchaseOrderLineId])
+  @@index([goodsReceiptId])
 }
 
 model PurchaseOrderPaymentPlan {
@@ -1228,8 +1403,9 @@ model GoodsReceipt {
   purchaseOrder       PurchaseOrder?     @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  invoiceLines SupplierInvoiceLine[]
-  pricingRuns  PurchasePricingRunReceipt[]
+  invoiceLines           SupplierInvoiceLine[]
+  pricingRuns            PurchasePricingRunReceipt[]
+  termLogisticsCostLines TermLogisticsCostLine[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1719,6 +1895,47 @@ model ExchangeRate {
   @@unique([rateDate, base, quote, stage])
 }
 
+model VcbFxRate {
+  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  rateDate     DateTime @db.Date
+  bankCode     String   @default("VCB")
+  currencyCode String   @default("USD")
+
+  cashBuyRate     Decimal? @db.Decimal(18, 6)
+  transferBuyRate Decimal? @db.Decimal(18, 6)
+  sellRate        Decimal  @db.Decimal(18, 6)
+
+  source     String    @default("MANUAL")
+  fetchedAt  DateTime? @db.Timestamptz
+  rawPayload Json?
+  note       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([rateDate, bankCode, currencyCode])
+  @@index([currencyCode, rateDate])
+}
+
+model EnvironmentalTaxRate {
+  id        String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  taxVndPerLiter Decimal @db.Decimal(18, 6)
+  status         String  @default("ACTIVE")
+  note           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productId, effectiveFrom, effectiveTo])
+  @@index([status])
+}
+
 model SupplierPricingTemplate {
   id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   supplierCustomerId String   @db.Uuid
@@ -1870,8 +2087,8 @@ model PurchasePricingStageCost {
   stage   PurchasePricingStage @relation(fields: [stageId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   name      String?
-  sortOrder Int              @default(0)
-  
+  sortOrder Int     @default(0)
+
   costType  PurchaseCostType
   amountVnd Decimal          @db.Decimal(18, 2)
 

@@ -1,4 +1,5 @@
-import { IsArray, IsDateString, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
+import { TermTransportMode } from '@prisma/client'
+import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
 import { Type } from 'class-transformer'
 
 export class CreateTermBillInfoDto {
@@ -50,6 +51,10 @@ export class CreateTermPurchaseOrderDto {
     @IsOptional()
     @IsString()
     contractNo?: string
+
+    @IsOptional()
+    @IsEnum(TermTransportMode)
+    transportMode?: TermTransportMode
 
     @IsOptional()
     @IsString()

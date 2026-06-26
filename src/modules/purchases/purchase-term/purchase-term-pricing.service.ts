@@ -8,9 +8,11 @@ import {
     PricingSheetValueType,
     PricingStageType,
     Prisma,
+    PurchaseCostType,
     PurchaseBizType,
     PurchaseOrderStatus,
     QtyBasis,
+    TermLogisticsCostStatus,
 } from '@prisma/client'
 
 import { PrismaService } from 'src/infra/prisma/prisma.service'
@@ -357,6 +359,68 @@ export class PurchaseTermPricingService {
         }
     }
 
+    private async createBossSheetLogisticsCosts(tx: Prisma.TransactionClient, purchaseOrderId: string, stageId: string) {
+        const logisticsCosts = await tx.termLogisticsCost.findMany({
+            where: {
+                purchaseOrderId,
+                status: {
+                    in: [TermLogisticsCostStatus.CONFIRMED, TermLogisticsCostStatus.ALLOCATED, TermLogisticsCostStatus.POSTED],
+                },
+            },
+            include: {
+                vendor: true,
+                lines: {
+                    where: {
+                        isCapitalizedToCost: true,
+                    },
+                    orderBy: {
+                        sortOrder: 'asc',
+                    },
+                },
+            },
+            orderBy: {
+                documentDate: 'asc',
+            },
+        })
+
+        const mapCostType = (costType: string): PurchaseCostType => {
+            switch (costType) {
+                case 'INSURANCE':
+                    return PurchaseCostType.INSURANCE
+                case 'INSPECTION':
+                    return PurchaseCostType.INSPECTION
+                case 'STORAGE':
+                    return PurchaseCostType.STORAGE
+                case 'FREIGHT':
+                case 'HANDLING':
+                case 'PIPELINE_FEE':
+                    return PurchaseCostType.TRANSPORT
+                default:
+                    return PurchaseCostType.OTHER
+            }
+        }
+
+        const rows = logisticsCosts.flatMap((cost) =>
+            cost.lines.map((line) => ({
+                stageId,
+                costType: mapCostType(line.costType),
+                name: `${line.costType}${cost.vendor?.name ? ` - ${cost.vendor.name}` : ''}`,
+                amountVnd: line.amountVndBeforeVat ?? new Prisma.Decimal(0),
+                sourceDocNo: cost.documentNo,
+                note: line.note ?? cost.note,
+                sortOrder: line.sortOrder,
+            })),
+        )
+
+        if (!rows.length) {
+            return
+        }
+
+        await tx.purchasePricingStageCost.createMany({
+            data: rows,
+        })
+    }
+
     private toNumber(value: any): number {
         if (value === null || value === undefined) return 0
 
@@ -559,6 +623,10 @@ export class PurchaseTermPricingService {
             }
 
             await this.createCosts(tx, stage.id, dto)
+
+            if (stageType === PricingStageType.BOSS_SHEET) {
+                await this.createBossSheetLogisticsCosts(tx, order.id, stage.id)
+            }
 
             await this.recalculateStage(tx, stage.id)
 

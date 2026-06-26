@@ -40,6 +40,8 @@ import { BankImportTemplatesModule } from './modules/bank-import-templates/bank-
 import { BankPurposesModule } from './modules/bank-purposes/bank-purposes.module'
 import { PurchaseTermModule } from './modules/purchases/purchase-term/purchase-term.module'
 import { CommodityPriceQuotesModule } from './modules/commodity-price-quotes/commodity-price-quotes.module'
+import { VcbFxRatesModule } from './modules/vcb-fx-rates/vcb-fx-rates.module'
+import { EnvironmentTaxesModule } from './modules/environment-taxes/environment-taxes.module'
 
 @Module({
     imports: [
@@ -69,6 +71,8 @@ import { CommodityPriceQuotesModule } from './modules/commodity-price-quotes/com
         PriceBulletinsModule,
         PurchaseTermModule,
         CommodityPriceQuotesModule,
+        VcbFxRatesModule,
+        EnvironmentTaxesModule,
 
         BankingModule,
         BankPurposesModule,

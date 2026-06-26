@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
+import { ContractKind, ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
 import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.query.dto'
@@ -29,6 +29,8 @@ export class PurchaseTermOrdersService {
         supplier: true,
 
         supplierLocation: true,
+
+        contract: true,
 
         lines: {
             include: {
@@ -84,28 +86,143 @@ export class PurchaseTermOrdersService {
                 createdAt: 'desc',
             },
         },
+
+        termShipments: {
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
+
+        termLogisticsCosts: {
+            include: {
+                shipment: true,
+                vendor: true,
+                lines: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
     } satisfies Prisma.PurchaseOrderInclude
 
-    private async generateOrderNo(tx: Prisma.TransactionClient): Promise<string> {
-        const now = new Date()
-        const y = now.getFullYear()
-        const m = String(now.getMonth() + 1).padStart(2, '0')
-        const prefix = `TE${y}${m}`
+    private getTermPeriod(orderDate: Date): string {
+        const y = orderDate.getUTCFullYear()
+        const m = String(orderDate.getUTCMonth() + 1).padStart(2, '0')
 
-        const count = await tx.purchaseOrder.count({
+        return `${y}${m}`
+    }
+
+    private async generateOrderNo(tx: Prisma.TransactionClient, orderDate: Date, supplierCode: string): Promise<string> {
+        const period = this.getTermPeriod(orderDate)
+
+        const sequence = await tx.documentSequence.upsert({
             where: {
-                orderNo: {
-                    startsWith: prefix,
+                moduleCode_period: {
+                    moduleCode: 'PURCHASE_TERM',
+                    period,
+                },
+            },
+            create: {
+                moduleCode: 'PURCHASE_TERM',
+                period,
+                currentNo: 1,
+            },
+            update: {
+                currentNo: {
+                    increment: 1,
                 },
             },
         })
 
-        return `${prefix}-${String(count + 1).padStart(4, '0')}`
+        const runningNo = String(sequence.currentNo).padStart(4, '0')
+        return `TE${period}${runningNo}-${supplierCode}`
+    }
+
+    private async findValidPurchaseContract(db: Prisma.TransactionClient | PrismaService, supplierCustomerId: string, orderDate: Date) {
+        return db.contract.findFirst({
+            where: {
+                customerId: supplierCustomerId,
+                kind: ContractKind.PURCHASE,
+                status: ContractStatus.Active,
+                startDate: {
+                    lte: orderDate,
+                },
+                endDate: {
+                    gte: orderDate,
+                },
+                deletedAt: null,
+            },
+            orderBy: {
+                endDate: 'asc',
+            },
+        })
+    }
+
+    async validateContract(supplierCustomerId: string, orderDate?: string) {
+        if (!supplierCustomerId) {
+            throw new BadRequestException('SUPPLIER_CUSTOMER_ID_REQUIRED')
+        }
+
+        const today = new Date().toISOString().slice(0, 10)
+        const date = this.toDateOnly(orderDate ?? today)!
+        const contract = await this.findValidPurchaseContract(this.prisma, supplierCustomerId, date)
+
+        if (contract) {
+            return {
+                valid: true,
+                contract: {
+                    id: contract.id,
+                    code: contract.code,
+                    name: contract.name,
+                    startDate: contract.startDate,
+                    endDate: contract.endDate,
+                    status: contract.status,
+                },
+            }
+        }
+
+        const purchaseContracts = await this.prisma.contract.findMany({
+            where: {
+                customerId: supplierCustomerId,
+                kind: ContractKind.PURCHASE,
+                deletedAt: null,
+            },
+            select: {
+                id: true,
+                endDate: true,
+                status: true,
+            },
+        })
+
+        const reason = !purchaseContracts.length
+            ? 'NO_PURCHASE_CONTRACT'
+            : purchaseContracts.some((x) => x.status === ContractStatus.Active && x.endDate < date)
+              ? 'EXPIRED_PURCHASE_CONTRACT'
+              : 'NO_VALID_PURCHASE_CONTRACT'
+
+        const message =
+            reason === 'NO_PURCHASE_CONTRACT'
+                ? 'Supplier has no active purchase contract for TERM order.'
+                : reason === 'EXPIRED_PURCHASE_CONTRACT'
+                  ? 'Supplier purchase contract has expired. Cannot create TERM order.'
+                  : 'Supplier has no valid purchase contract for this TERM order date.'
+
+        return {
+            valid: false,
+            reason,
+            message,
+        }
     }
 
     async create(dto: CreateTermPurchaseOrderDto) {
         if (!dto.lines?.length) {
             throw new BadRequestException('TERM_PURCHASE_ORDER_LINES_REQUIRED')
+        }
+
+        const orderDate = this.toDateOnly(dto.orderDate)
+
+        if (!orderDate) {
+            throw new BadRequestException('ORDER_DATE_REQUIRED')
         }
 
         const supplier = await this.prisma.customer.findUnique({
@@ -120,6 +237,10 @@ export class PurchaseTermOrdersService {
             throw new BadRequestException('PARTY_IS_NOT_SUPPLIER')
         }
 
+        if (!supplier.code?.trim()) {
+            throw new BadRequestException('SUPPLIER_CODE_REQUIRED_FOR_TERM_ORDER')
+        }
+
         if (dto.supplierLocationId) {
             await this.ensureSupplierLocation(dto.supplierLocationId, dto.supplierCustomerId)
         }
@@ -127,7 +248,14 @@ export class PurchaseTermOrdersService {
         await this.validateLines(dto.lines, dto.supplierCustomerId, dto.supplierLocationId)
 
         const created = await this.prisma.$transaction(async (tx) => {
-            const orderNo = await this.generateOrderNo(tx)
+            const contract = await this.findValidPurchaseContract(tx, dto.supplierCustomerId, orderDate)
+
+            if (!contract) {
+                const validation = await this.validateContract(dto.supplierCustomerId, dto.orderDate)
+                throw new BadRequestException(validation)
+            }
+
+            const orderNo = await this.generateOrderNo(tx, orderDate, supplier.code.trim())
 
             const totalQty = dto.lines.reduce((sum, x) => sum + Number(x.orderedQty || 0), 0)
 
@@ -146,10 +274,12 @@ export class PurchaseTermOrdersService {
                     supplierCustomerId: dto.supplierCustomerId,
                     supplierLocationId: dto.supplierLocationId ?? null,
 
-                    orderDate: this.toDateOnly(dto.orderDate)!,
+                    orderDate,
                     expectedDate: this.toDateOnly(dto.expectedDate),
 
-                    contractNo: dto.contractNo?.trim() || supplier.defaultPurchaseContractNo || null,
+                    contractId: contract.id,
+                    contractNo: contract.code,
+                    transportMode: dto.transportMode ?? null,
                     deliveryLocation: dto.deliveryLocation?.trim() || supplier.defaultDeliveryLocation || null,
 
                     paymentNote: dto.paymentNote?.trim() || null,
