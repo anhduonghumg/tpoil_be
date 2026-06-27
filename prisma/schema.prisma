@@ -2034,6 +2034,10 @@ model PurchasePricingStage {
   sellingUnitPriceVndPerLiter Decimal? @db.Decimal(18, 6)
   temporaryAmountVnd          Decimal? @db.Decimal(18, 2)
   discountVndPerLiter         Decimal? @db.Decimal(18, 6)
+  contractPaymentRate         Decimal? @db.Decimal(18, 6)
+  contractPaymentAmountVnd    Decimal? @db.Decimal(18, 2)
+  bankGuaranteeRate           Decimal? @db.Decimal(18, 6)
+  bankGuaranteeFeeVnd         Decimal? @db.Decimal(18, 2)
 
   note String?
 

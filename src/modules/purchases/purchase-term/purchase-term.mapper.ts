@@ -35,7 +35,7 @@ export class PurchaseTermMapper {
 
     private static nextActionLabel(nextAction: string): string {
         const map: Record<string, string> = {
-            APPROVE_ORDER: 'Duyệt đơn',
+            APPROVE_ORDER: 'Sinh đơn đặt hàng',
             CREATE_RECEIPT: 'Nhận hàng',
             CALCULATE_TEMP_PRICE: 'Lập bảng giá tạm tính',
             CALCULATE_INVOICE_PRICE: 'Lập bảng giá theo bill',
@@ -54,13 +54,28 @@ export class PurchaseTermMapper {
         const hasFinal = this.hasStage(order, 'FINAL')
         const hasBossSheet = this.hasStage(order, 'BOSS_SHEET')
         const isCompleted = order.status === 'COMPLETED'
+        const isOrderGenerated = order.status !== 'DRAFT'
 
         const steps = [
             {
-                key: 'ORDER',
-                title: 'Hợp đồng & đơn đặt hàng',
-                description: order.contractNo ? `Hợp đồng ${order.contractNo}` : 'Cần hợp đồng mua hợp lệ',
-                status: order.status !== 'DRAFT' ? 'DONE' : nextAction === 'APPROVE_ORDER' ? 'CURRENT' : 'WAITING',
+                key: 'CONTRACT',
+                title: 'Hợp đồng',
+                description: order.contractNo ? `Hợp đồng ${order.contractNo}` : 'Cần hợp đồng TERM mua hợp lệ',
+                status: order.contractNo ? 'DONE' : 'CURRENT',
+                action: null,
+            },
+            {
+                key: 'ESTIMATE_PRICE',
+                title: 'Bảng giá tạm tính',
+                description: hasEstimate ? 'Đã có bảng giá tạm tính' : 'Tạo trước để làm căn cứ đặt hàng và thanh toán tạm',
+                status: hasEstimate ? 'DONE' : nextAction === 'CALCULATE_TEMP_PRICE' ? 'CURRENT' : 'WAITING',
+                action: 'CALCULATE_TEMP_PRICE',
+            },
+            {
+                key: 'PURCHASE_ORDER',
+                title: 'Đơn đặt hàng',
+                description: isOrderGenerated ? 'Đơn đặt hàng đã được sinh/duyệt' : hasEstimate ? 'Sinh đơn đặt hàng từ bảng giá tạm tính' : 'Chờ bảng giá tạm tính',
+                status: isOrderGenerated ? 'DONE' : nextAction === 'APPROVE_ORDER' ? 'CURRENT' : 'WAITING',
                 action: 'APPROVE_ORDER',
             },
             {
@@ -71,22 +86,15 @@ export class PurchaseTermMapper {
                 action: 'CREATE_RECEIPT',
             },
             {
-                key: 'ESTIMATE_PRICE',
-                title: 'Bảng giá tạm tính',
-                description: hasEstimate ? 'Đã có bảng giá tạm tính' : 'Căn cứ MOPS, premium, tỷ giá và thuế',
-                status: hasEstimate ? 'DONE' : nextAction === 'CALCULATE_TEMP_PRICE' ? 'CURRENT' : 'WAITING',
-                action: 'CALCULATE_TEMP_PRICE',
-            },
-            {
                 key: 'FINAL_PRICE',
-                title: 'Bảng giá chính thức',
-                description: hasFinal ? 'Đã chốt bảng giá chính thức' : hasBill ? 'Đã có bảng giá theo bill, chờ chốt tỷ giá' : 'Cần bảng giá theo bill trước khi chốt',
+                title: 'Bảng giá chốt',
+                description: hasFinal ? 'Đã chốt bảng giá chính thức' : hasBill ? 'Đã có bảng giá theo bill, chờ chốt tỷ giá' : 'Sau giao nhận mới lập bảng giá theo bill',
                 status: hasFinal ? 'DONE' : nextAction === 'CALCULATE_INVOICE_PRICE' || nextAction === 'CALCULATE_OFFICIAL_FX' ? 'CURRENT' : 'WAITING',
                 action: hasBill ? 'CALCULATE_OFFICIAL_FX' : 'CALCULATE_INVOICE_PRICE',
             },
             {
                 key: 'SETTLEMENT',
-                title: 'Quyết toán & thanh toán',
+                title: 'Quyết toán',
                 description: isCompleted ? 'Hồ sơ đã hoàn tất' : hasBossSheet ? 'Đã có bảng tổng hợp, chờ hoàn tất' : 'Đối chiếu chênh lệch và chứng từ thanh toán',
                 status: isCompleted ? 'DONE' : nextAction === 'COMPLETE_ORDER' ? 'CURRENT' : 'WAITING',
                 action: 'COMPLETE_ORDER',
@@ -94,9 +102,10 @@ export class PurchaseTermMapper {
         ]
 
         const missing = [
-            !order.contractNo ? 'Hợp đồng mua hợp lệ' : null,
-            !hasConfirmedReceipt ? 'Biên bản/phiếu nhận hàng đã xác nhận' : null,
+            !order.contractNo ? 'Hợp đồng TERM mua hợp lệ' : null,
             !hasEstimate ? 'Bảng giá tạm tính' : null,
+            !isOrderGenerated ? 'Đơn đặt hàng sinh từ bảng giá tạm tính' : null,
+            !hasConfirmedReceipt ? 'Biên bản/phiếu nhận hàng đã xác nhận' : null,
             !hasBill ? 'Bảng giá theo bill' : null,
             !hasFinal ? 'Bảng giá chính thức' : null,
         ].filter(Boolean)
@@ -116,25 +125,26 @@ export class PurchaseTermMapper {
         const hasFinal = this.hasStage(order, 'FINAL')
         const hasConfirmedReceipt = (order.receipts ?? []).some((receipt: any) => receipt.status === 'CONFIRMED')
         const finalStage = this.latestStage(order, 'FINAL')
+        const isOrderGenerated = order.status !== 'DRAFT'
 
         return [
             {
                 key: 'APPENDIX',
                 title: 'Phụ lục hợp đồng',
-                description: 'In phụ lục gắn với hợp đồng mua và mã đơn TERM.',
+                description: 'In phụ lục gắn với hợp đồng TERM mua.',
                 status: order.contractNo ? 'READY' : 'WAITING',
-            },
-            {
-                key: 'PURCHASE_ORDER',
-                title: 'Đơn đặt hàng',
-                description: 'Đơn đặt hàng tạm tính gửi nhà cung cấp.',
-                status: order.orderNo ? 'READY' : 'WAITING',
             },
             {
                 key: 'ESTIMATE_PRICE',
                 title: 'Bảng giá tạm tính',
-                description: 'Bảng giá tạm tính chuyển tiền lần 1.',
+                description: 'Bảng giá tạm tính lập trước đơn đặt hàng.',
                 status: hasEstimate ? 'READY' : 'WAITING',
+            },
+            {
+                key: 'PURCHASE_ORDER',
+                title: 'Đơn đặt hàng',
+                description: 'Đơn đặt hàng sinh từ bảng giá tạm tính.',
+                status: hasEstimate && isOrderGenerated ? 'READY' : 'WAITING',
             },
             {
                 key: 'BILL_PRICE',
@@ -162,7 +172,6 @@ export class PurchaseTermMapper {
             },
         ]
     }
-
     static toOrderListItem(order: any, nextAction: string) {
         const lines = order.lines ?? []
 
@@ -426,6 +435,15 @@ export class PurchaseTermMapper {
                 amountVndBeforeTax: this.n(stage.amountVndBeforeTax),
                 totalAmountVnd: this.n(stage.totalAmountVnd),
                 unitVndPerLiter: this.n(stage.unitVndPerLiter),
+                billTotalVnd: this.n(stage.billTotalVnd),
+                tankUnitPriceVndPerLiter: this.n(stage.tankUnitPriceVndPerLiter),
+                sellingUnitPriceVndPerLiter: this.n(stage.sellingUnitPriceVndPerLiter),
+                temporaryAmountVnd: this.n(stage.temporaryAmountVnd),
+                contractPaymentRate: this.n(stage.contractPaymentRate),
+                contractPaymentAmountVnd: this.n(stage.contractPaymentAmountVnd),
+                bankGuaranteeRate: this.n(stage.bankGuaranteeRate),
+                bankGuaranteeFeeVnd: this.n(stage.bankGuaranteeFeeVnd),
+                discountVndPerLiter: this.n(stage.discountVndPerLiter),
 
                 note: stage.note,
 

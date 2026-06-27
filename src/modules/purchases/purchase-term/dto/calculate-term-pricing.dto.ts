@@ -161,6 +161,14 @@ export class CalculateTermPricingDto {
 
     @IsOptional()
     @IsNumber()
+    contractPaymentRate?: number
+
+    @IsOptional()
+    @IsNumber()
+    bankGuaranteeRate?: number
+
+    @IsOptional()
+    @IsNumber()
     envTaxAmountVnd?: number
 
     @IsOptional()

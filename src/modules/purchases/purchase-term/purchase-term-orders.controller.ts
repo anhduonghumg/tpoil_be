@@ -33,8 +33,11 @@ export class PurchaseTermOrdersController {
 
         @Query('baseDate')
         baseDate: string,
+
+        @Query('limit')
+        limit?: string,
     ) {
-        return this.service.getPlattsAverage(productId, baseDate)
+        return this.service.getPlattsAverage(productId, baseDate, limit ? Number(limit) : undefined)
     }
 
     @Get('vcb-fx-rate')

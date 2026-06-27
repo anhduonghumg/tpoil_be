@@ -37,16 +37,6 @@ export class PurchaseTermNextActionService {
             return 'VIEW_ONLY'
         }
 
-        if (order.status === PurchaseOrderStatus.DRAFT) {
-            return 'APPROVE_ORDER'
-        }
-
-        const confirmedReceipts = order.receipts.filter((x) => x.status === 'CONFIRMED')
-
-        if (!confirmedReceipts.length) {
-            return 'CREATE_RECEIPT'
-        }
-
         const stages = order.pricingRuns.flatMap((x) => x.stages)
 
         const hasEstimate = stages.some((x) => x.stageType === PricingStageType.ESTIMATE)
@@ -55,6 +45,16 @@ export class PurchaseTermNextActionService {
 
         if (!hasEstimate) {
             return 'CALCULATE_TEMP_PRICE'
+        }
+
+        if (order.status === PurchaseOrderStatus.DRAFT) {
+            return 'APPROVE_ORDER'
+        }
+
+        const confirmedReceipts = order.receipts.filter((x) => x.status === 'CONFIRMED')
+
+        if (!confirmedReceipts.length) {
+            return 'CREATE_RECEIPT'
         }
 
         if (!hasBillNormalize) {

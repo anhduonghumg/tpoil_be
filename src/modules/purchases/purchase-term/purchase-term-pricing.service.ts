@@ -168,7 +168,7 @@ export class PurchaseTermPricingService {
             throw new BadRequestException('PURCHASE_ORDER_CANCELLED')
         }
 
-        if (!order.receipts.length) {
+        if (stageType !== PricingStageType.ESTIMATE && !order.receipts.length) {
             throw new BadRequestException('CONFIRMED_RECEIPTS_REQUIRED')
         }
 
@@ -202,7 +202,35 @@ export class PurchaseTermPricingService {
         })
 
         if (existed) {
-            throw new BadRequestException(`${stageType}_ALREADY_EXISTS`)
+            await tx.purchasePricingPriceDay.deleteMany({
+                where: {
+                    stageId: existed.id,
+                },
+            })
+
+            await tx.purchasePricingSheetRow.deleteMany({
+                where: {
+                    stageId: existed.id,
+                },
+            })
+
+            await tx.purchasePricingStageCost.deleteMany({
+                where: {
+                    stageId: existed.id,
+                },
+            })
+
+            await tx.purchasePricingStageLine.deleteMany({
+                where: {
+                    stageId: existed.id,
+                },
+            })
+
+            await tx.purchasePricingStage.delete({
+                where: {
+                    id: existed.id,
+                },
+            })
         }
 
         const mops = Number(dto.mopsAvgUsdPerBbl ?? 0)
@@ -242,6 +270,10 @@ export class PurchaseTermPricingService {
                 extraCostVndPerLiter: dto.extraCostVndPerLiter !== undefined && dto.extraCostVndPerLiter !== null ? new Prisma.Decimal(dto.extraCostVndPerLiter) : null,
 
                 retailPriceVndPerLiter: dto.retailPriceVndPerLiter !== undefined && dto.retailPriceVndPerLiter !== null ? new Prisma.Decimal(dto.retailPriceVndPerLiter) : null,
+
+                contractPaymentRate: dto.contractPaymentRate !== undefined && dto.contractPaymentRate !== null ? new Prisma.Decimal(dto.contractPaymentRate) : null,
+
+                bankGuaranteeRate: dto.bankGuaranteeRate !== undefined && dto.bankGuaranteeRate !== null ? new Prisma.Decimal(dto.bankGuaranteeRate) : null,
 
                 envTaxAmountVnd: dto.envTaxAmountVnd !== undefined && dto.envTaxAmountVnd !== null ? new Prisma.Decimal(dto.envTaxAmountVnd) : null,
 
@@ -480,6 +512,10 @@ export class PurchaseTermPricingService {
         const sellingUnitPriceVndPerLiter = tankUnitPriceVndPerLiter + envTaxVndPerLiter + extraCostVndPerLiter
 
         const temporaryAmountVnd = sellingUnitPriceVndPerLiter * tankQtyLiter
+        const contractPaymentRate = this.toNumber(stage.contractPaymentRate)
+        const contractPaymentAmountVnd = temporaryAmountVnd * contractPaymentRate / 100
+        const bankGuaranteeRate = this.toNumber(stage.bankGuaranteeRate)
+        const bankGuaranteeFeeVnd = temporaryAmountVnd * bankGuaranteeRate / 100
 
         const retailPriceVndPerLiter = this.toNumber(stage.retailPriceVndPerLiter)
 
@@ -513,6 +549,8 @@ export class PurchaseTermPricingService {
                 tankUnitPriceVndPerLiter: new Prisma.Decimal(tankUnitPriceVndPerLiter),
                 sellingUnitPriceVndPerLiter: new Prisma.Decimal(sellingUnitPriceVndPerLiter),
                 temporaryAmountVnd: new Prisma.Decimal(temporaryAmountVnd),
+                contractPaymentAmountVnd: new Prisma.Decimal(contractPaymentAmountVnd),
+                bankGuaranteeFeeVnd: new Prisma.Decimal(bankGuaranteeFeeVnd),
                 discountVndPerLiter: new Prisma.Decimal(discountVndPerLiter),
 
                 totalAmountVnd: new Prisma.Decimal(temporaryAmountVnd),
@@ -596,6 +634,15 @@ export class PurchaseTermPricingService {
 
         return this.prisma.$transaction(async (tx) => {
             const run = await this.getOrCreateRun(tx, order, dto)
+
+            if (stageType === PricingStageType.FINAL) {
+                await tx.inventoryCostLayer.deleteMany({
+                    where: {
+                        sourceType: 'TERM_PRICING_FINAL',
+                        sourceId: run.id,
+                    },
+                })
+            }
 
             const stage = await this.createStageBase(tx, run.id, order, dto, stageType)
 
@@ -946,6 +993,55 @@ export class PurchaseTermPricingService {
             isResult: true,
             isBold: true,
             isHighlighted: true,
+        })
+
+        addRow({
+            code: 'INPUT_QTY',
+            label: 'Số lượng nhập',
+            value: stage.tankQtyLiter,
+            unit: 'lit',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+            isBold: true,
+        })
+
+        addRow({
+            code: 'CONTRACT_PAYMENT_RATE',
+            label: 'Tỷ lệ thanh toán trước theo hợp đồng',
+            value: stage.contractPaymentRate,
+            unit: '%',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'CONTRACT_PAYMENT_AMOUNT',
+            label: 'Giá trị thanh toán trước theo hợp đồng',
+            value: stage.contractPaymentAmountVnd,
+            unit: 'VND',
+            formula: 'Thành tiền trước thuế VAT * tỷ lệ thanh toán',
+            rowType: PricingSheetRowType.RESULT,
+            isResult: true,
+            isBold: true,
+        })
+
+        addRow({
+            code: 'BANK_GUARANTEE_RATE',
+            label: 'Tỷ lệ phí bảo lãnh ngân hàng',
+            value: stage.bankGuaranteeRate,
+            unit: '%',
+            rowType: PricingSheetRowType.INPUT,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'BANK_GUARANTEE_FEE',
+            label: 'Phí bảo lãnh ngân hàng',
+            value: stage.bankGuaranteeFeeVnd,
+            unit: 'VND',
+            formula: 'Thành tiền trước thuế VAT * tỷ lệ phí bảo lãnh',
+            rowType: PricingSheetRowType.COST,
+            isBold: true,
         })
 
         await tx.purchasePricingSheetRow.createMany({

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { ContractKind, ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
+import { ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
 import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.query.dto'
@@ -10,6 +10,8 @@ import dayjs from 'dayjs'
 
 @Injectable()
 export class PurchaseTermOrdersService {
+    private readonly termPurchaseContractTypeId = '019f0303-32fe-73a1-84e9-76f9a0c4fa0e'
+
     constructor(
         private readonly prisma: PrismaService,
         private readonly nextActionService: PurchaseTermNextActionService,
@@ -23,6 +25,16 @@ export class PurchaseTermOrdersService {
         }
 
         return new Date(`${value}T00:00:00.000Z`)
+    }
+
+    private dateRangeOfDay(value: Date) {
+        const start = new Date(value)
+        start.setUTCHours(0, 0, 0, 0)
+
+        const end = new Date(value)
+        end.setUTCHours(23, 59, 59, 999)
+
+        return { start, end }
     }
 
     private readonly orderInclude = {
@@ -139,16 +151,18 @@ export class PurchaseTermOrdersService {
     }
 
     private async findValidPurchaseContract(db: Prisma.TransactionClient | PrismaService, supplierCustomerId: string, orderDate: Date) {
+        const day = this.dateRangeOfDay(orderDate)
+
         return db.contract.findFirst({
             where: {
                 customerId: supplierCustomerId,
-                kind: ContractKind.PURCHASE,
+                contractTypeId: this.termPurchaseContractTypeId,
                 status: ContractStatus.Active,
                 startDate: {
-                    lte: orderDate,
+                    lte: day.end,
                 },
                 endDate: {
-                    gte: orderDate,
+                    gte: day.start,
                 },
                 deletedAt: null,
             },
@@ -165,6 +179,7 @@ export class PurchaseTermOrdersService {
 
         const today = new Date().toISOString().slice(0, 10)
         const date = this.toDateOnly(orderDate ?? today)!
+        const day = this.dateRangeOfDay(date)
         const contract = await this.findValidPurchaseContract(this.prisma, supplierCustomerId, date)
 
         if (contract) {
@@ -184,33 +199,85 @@ export class PurchaseTermOrdersService {
         const purchaseContracts = await this.prisma.contract.findMany({
             where: {
                 customerId: supplierCustomerId,
-                kind: ContractKind.PURCHASE,
+                contractTypeId: this.termPurchaseContractTypeId,
                 deletedAt: null,
             },
             select: {
                 id: true,
+                code: true,
+                startDate: true,
+                endDate: true,
+                status: true,
+            },
+        })
+
+        const activeOtherTypeContract = await this.prisma.contract.findFirst({
+            where: {
+                customerId: supplierCustomerId,
+                contractTypeId: {
+                    not: this.termPurchaseContractTypeId,
+                },
+                status: ContractStatus.Active,
+                startDate: {
+                    lte: day.end,
+                },
+                endDate: {
+                    gte: day.start,
+                },
+                deletedAt: null,
+            },
+            orderBy: {
+                endDate: 'asc',
+            },
+            select: {
+                id: true,
+                code: true,
+                contractTypeId: true,
+                contractType: {
+                    select: {
+                        code: true,
+                        name: true,
+                    },
+                },
+                startDate: true,
                 endDate: true,
                 status: true,
             },
         })
 
         const reason = !purchaseContracts.length
-            ? 'NO_PURCHASE_CONTRACT'
-            : purchaseContracts.some((x) => x.status === ContractStatus.Active && x.endDate < date)
+            ? activeOtherTypeContract
+                ? 'CONTRACT_TYPE_NOT_TERM_PURCHASE'
+                : 'NO_PURCHASE_CONTRACT'
+            : purchaseContracts.some((x) => x.status === ContractStatus.Active && x.endDate < day.start)
               ? 'EXPIRED_PURCHASE_CONTRACT'
+              : purchaseContracts.some((x) => x.status === ContractStatus.Active && x.startDate > day.end)
+                ? 'PURCHASE_CONTRACT_NOT_YET_EFFECTIVE'
               : 'NO_VALID_PURCHASE_CONTRACT'
 
         const message =
-            reason === 'NO_PURCHASE_CONTRACT'
-                ? 'Supplier has no active purchase contract for TERM order.'
-                : reason === 'EXPIRED_PURCHASE_CONTRACT'
-                  ? 'Supplier purchase contract has expired. Cannot create TERM order.'
-                  : 'Supplier has no valid purchase contract for this TERM order date.'
+            reason === 'CONTRACT_TYPE_NOT_TERM_PURCHASE'
+                ? `Đối tác có hợp đồng còn hiệu lực (${activeOtherTypeContract?.code}) nhưng không đúng loại hợp đồng mua bán xăng dầu.`
+                : reason === 'NO_PURCHASE_CONTRACT'
+                  ? 'Nhà cung cấp chưa có hợp đồng mua bán xăng dầu'
+                  : reason === 'EXPIRED_PURCHASE_CONTRACT'
+                    ? 'Hợp đồng mua bán xăng dầu của nhà cung cấp đã hết hạn tại ngày hồ sơ TERM.'
+                    : reason === 'PURCHASE_CONTRACT_NOT_YET_EFFECTIVE'
+                      ? 'Hợp đồng mua bán xăng dầu của nhà cung cấp chưa đến ngày hiệu lực tại ngày hồ sơ TERM.'
+                      : 'Nhà cung cấp chưa có hợp đồng mua bán xăng dầu hợp lệ tại ngày hồ sơ TERM.'
 
         return {
             valid: false,
             reason,
             message,
+            checkedDate: date.toISOString().slice(0, 10),
+            requiredContractTypeId: this.termPurchaseContractTypeId,
+            activeOtherTypeContract,
+            purchaseContracts: purchaseContracts.map((x) => ({
+                ...x,
+                startDate: x.startDate.toISOString().slice(0, 10),
+                endDate: x.endDate.toISOString().slice(0, 10),
+            })),
         }
     }
 
@@ -499,6 +566,11 @@ export class PurchaseTermOrdersService {
             },
             include: {
                 lines: true,
+                pricingRuns: {
+                    include: {
+                        stages: true,
+                    },
+                },
             },
         })
 
@@ -512,6 +584,12 @@ export class PurchaseTermOrdersService {
 
         if (!order.lines.length) {
             throw new BadRequestException('TERM_PURCHASE_ORDER_LINES_REQUIRED')
+        }
+
+        const hasEstimate = order.pricingRuns.some((run) => run.stages.some((stage) => stage.stageType === PricingStageType.ESTIMATE))
+
+        if (!hasEstimate) {
+            throw new BadRequestException('TERM_PURCHASE_ORDER_ESTIMATE_REQUIRED')
         }
 
         await this.prisma.purchaseOrder.update({
@@ -794,24 +872,23 @@ export class PurchaseTermOrdersService {
         }
     }
 
-    async getPlattsAverage(productId: string, baseDate: string) {
-        const from = dayjs(baseDate).subtract(5, 'day').toDate()
-
-        const to = dayjs(baseDate).add(5, 'day').toDate()
+    async getPlattsAverage(productId: string, baseDate: string, limit = 11) {
+        const take = Math.min(Math.max(Number(limit || 11), 1), 30)
+        const to = dayjs(baseDate).endOf('day').toDate()
 
         const rows = await this.prisma.commodityPriceQuote.findMany({
             where: {
                 productId,
 
                 quoteDate: {
-                    gte: from,
                     lte: to,
                 },
             },
 
             orderBy: {
-                quoteDate: 'asc',
+                quoteDate: 'desc',
             },
+            take,
         })
 
         if (!rows.length) {
@@ -821,12 +898,14 @@ export class PurchaseTermOrdersService {
             }
         }
 
-        const avg = rows.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / rows.length
+        const sortedRows = [...rows].reverse()
+
+        const avg = sortedRows.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / sortedRows.length
 
         return {
             avgPriceUsdPerBbl: Number(avg.toFixed(4)),
 
-            items: rows.map((x) => ({
+            items: sortedRows.map((x) => ({
                 quoteDate: x.quoteDate,
 
                 priceUsdPerBbl: Number(x.priceUsdPerBbl),
