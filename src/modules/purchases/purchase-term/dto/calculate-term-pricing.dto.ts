@@ -133,6 +133,10 @@ export class CalculateTermPricingDto {
 
     @IsOptional()
     @IsNumber()
+    insuranceAmountVnd?: number
+
+    @IsOptional()
+    @IsNumber()
     inspectionFeeVnd?: number
 
     @IsOptional()
@@ -149,11 +153,23 @@ export class CalculateTermPricingDto {
 
     @IsOptional()
     @IsNumber()
+    transportLossAmountVnd?: number
+
+    @IsOptional()
+    @IsNumber()
+    transportDeductionVnd?: number
+
+    @IsOptional()
+    @IsNumber()
     envTaxVndPerLiter?: number
 
     @IsOptional()
     @IsNumber()
     extraCostVndPerLiter?: number
+
+    @IsOptional()
+    @IsNumber()
+    fundAdjustmentVndPerLiter?: number
 
     @IsOptional()
     @IsNumber()

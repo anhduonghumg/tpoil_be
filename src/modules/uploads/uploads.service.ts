@@ -1,7 +1,7 @@
 // src/common/upload/upload.service.ts
 import { Inject, Injectable } from '@nestjs/common'
 import * as fs from 'fs'
-import { join, extname, resolve } from 'path'
+import { basename, join, extname, resolve } from 'path'
 import * as crypto from 'crypto'
 import type { UploadModuleOptions } from './types'
 import { UPLOAD_OPTIONS } from './tokens'
@@ -20,13 +20,33 @@ export class UploadService {
         return `${Date.now()}_${crypto.randomBytes(8).toString('hex')}${ext || '.bin'}`
     }
 
+    private safeFolder(folder?: string) {
+        if (!folder) return undefined
+
+        const parts = folder
+            .replace(/\\/g, '/')
+            .split('/')
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .map((part) => part.replace(/[^a-zA-Z0-9_-]/g, ''))
+            .filter(Boolean)
+
+        return parts.length ? parts.join('/') : undefined
+    }
+
+    private checksum(buffer: Buffer) {
+        return crypto.createHash('sha256').update(buffer).digest('hex')
+    }
+
     saveLocal(file: Express.Multer.File, folder?: string) {
         const { root, baseUrl } = this.opts.local
-        const targetDir = folder ? join(root, folder) : root
+        const safeFolder = this.safeFolder(folder)
+        const targetDir = safeFolder ? join(root, safeFolder) : root
         this.ensureDir(targetDir)
 
         const filename = this.randomName(file.originalname)
         const destPath = join(targetDir, filename)
+        const sourceBuffer = file.buffer || (file.path && fs.existsSync(file.path) ? fs.readFileSync(file.path) : undefined)
 
         // nếu multer đã viết vào temp path (memoryStorage) → tự ghi
         if (file.buffer) {
@@ -38,10 +58,18 @@ export class UploadService {
             fs.writeFileSync(destPath, file.buffer)
         }
 
-        const relative = folder ? `/${folder}/${filename}` : `/${filename}`
+        const relative = safeFolder ? `/${safeFolder}/${filename}` : `/${filename}`
         const url = `${baseUrl}${relative}`
 
-        return { url, path: destPath }
+        return {
+            url,
+            path: destPath,
+            fileName: filename,
+            originalName: basename(file.originalname),
+            mimeType: file.mimetype,
+            sizeBytes: file.size,
+            checksum: sourceBuffer ? this.checksum(sourceBuffer) : null,
+        }
     }
 
     private toAbsFromUrl(url?: string | null): string | null {

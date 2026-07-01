@@ -3,6 +3,7 @@ import { BadRequestException, Body, Controller, Post, UploadedFile, UseIntercept
 import { FileInterceptor } from '@nestjs/platform-express'
 import { diskStorage } from 'multer'
 import { join } from 'path'
+import * as fs from 'fs'
 import type { Request } from 'express'
 import { FileValidationPipe } from './file-validation.pipe'
 import { defaultUploadConfig } from './config'
@@ -22,6 +23,7 @@ export class UploadController {
                 destination: (_req, _file, cb) => {
                     // tạm ghi vào /uploads/tmp, sau đó service sẽ move đúng folder
                     const dest = join(cfg.local.root, 'tmp')
+                    fs.mkdirSync(dest, { recursive: true })
                     cb(null, dest)
                 },
                 filename: (_req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
@@ -38,7 +40,7 @@ export class UploadController {
         if (!file) throw new BadRequestException('Không có file')
         const rs = await this.service.saveLocal(file, folder || 'employee')
         const requestId = (req.headers['x-request-id'] as string) || (req as any).requestId
-        return success({ url: rs.url }, 'Uploaded', 200, requestId)
+        return success(rs, 'Uploaded', 200, requestId)
     }
 
     @Post('file')
@@ -48,6 +50,7 @@ export class UploadController {
                 destination: (_req, _file, cb) => {
                     // tạm ghi vào /uploads/tmp, sau đó service sẽ move đúng folder
                     const dest = join(cfg.local.root, 'tmp')
+                    fs.mkdirSync(dest, { recursive: true })
                     cb(null, dest)
                 },
                 filename: (_req, file, cb) => cb(null, Date.now() + '-' + file.originalname),
@@ -64,7 +67,7 @@ export class UploadController {
         if (!file) throw new BadRequestException('Không có file')
         const rs = await this.service.saveLocal(file, folder || 'contract')
         const requestId = (req.headers['x-request-id'] as string) || (req as any).requestId
-        return success({ url: rs.url }, 'Uploaded', 200, requestId)
+        return success(rs, 'Uploaded', 200, requestId)
     }
 
     @Post('delete')

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
+import { ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType, TermPurchaseFlowType } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
 import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.query.dto'
@@ -110,6 +110,51 @@ export class PurchaseTermOrdersService {
                 shipment: true,
                 vendor: true,
                 lines: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
+
+        termOrderDocuments: {
+            include: {
+                lines: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
+
+        termPaymentRequests: {
+            include: {
+                batchItems: {
+                    include: {
+                        batch: true,
+                        bankTransaction: true,
+                    },
+                    orderBy: {
+                        createdAt: 'desc',
+                    },
+                },
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
+
+        termBankInstructions: {
+            include: {
+                paymentRequest: true,
+                bankTransaction: true,
+            },
+            orderBy: {
+                createdAt: 'desc',
+            },
+        },
+
+        termSettlementAdjustments: {
+            include: {
+                finalPricingStage: true,
             },
             orderBy: {
                 createdAt: 'desc',
@@ -334,6 +379,7 @@ export class PurchaseTermOrdersService {
                     bizType: PurchaseBizType.TERM,
                     orderType: PurchaseOrderType.SINGLE,
                     status: PurchaseOrderStatus.DRAFT,
+                    termFlowType: dto.termFlowType ?? TermPurchaseFlowType.ESTIMATE_FIRST,
 
                     paymentMode: PaymentMode.PREPAID,
                     paymentTermType: PaymentTermType.SAME_DAY,
@@ -514,6 +560,7 @@ export class PurchaseTermOrdersService {
                     supplierLocationId: dto.supplierLocationId ?? undefined,
 
                     orderType: PurchaseOrderType.SINGLE,
+                    termFlowType: dto.termFlowType ?? undefined,
 
                     orderDate: dto.orderDate !== undefined ? this.toDateOnly(dto.orderDate) : undefined,
 

@@ -11,5 +11,17 @@ export const defaultUploadConfig = (): UploadModuleOptions => ({
     limits: { fileSize: 5 * 1024 * 1024 },
     limitfileSize: { fileSize: 20 * 1024 * 1024 },
     accept: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'],
-    acceptFileTypes: ['application/pdf', 'application/msword', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'],
+    acceptFileTypes: [
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'text/csv',
+        'application/csv',
+        'image/png',
+        'image/jpeg',
+        'image/jpg',
+        'image/webp',
+    ],
 })

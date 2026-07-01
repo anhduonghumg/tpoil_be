@@ -245,7 +245,7 @@ export class PurchaseTermPricingService {
                 mopsAvgUsdPerBbl: new Prisma.Decimal(mops),
                 premiumUsdPerBbl: new Prisma.Decimal(premium),
                 specialConsumptionTaxUsdPerBbl: new Prisma.Decimal(specialTax),
-                unitUsdPerBbl: new Prisma.Decimal(mops + premium + specialTax),
+                unitUsdPerBbl: new Prisma.Decimal(this.round(mops + premium + specialTax, 3)),
 
                 fxRateDate: this.toDateOnly(dto.fxRateDate),
                 fxStage: dto.fxStage ?? FxStage.ESTIMATE,
@@ -257,6 +257,8 @@ export class PurchaseTermPricingService {
 
                 insuranceRate: dto.insuranceRate !== undefined && dto.insuranceRate !== null ? new Prisma.Decimal(dto.insuranceRate) : null,
 
+                insuranceAmountVnd: dto.insuranceAmountVnd !== undefined && dto.insuranceAmountVnd !== null ? new Prisma.Decimal(dto.insuranceAmountVnd) : null,
+
                 inspectionFeeVnd: dto.inspectionFeeVnd !== undefined && dto.inspectionFeeVnd !== null ? new Prisma.Decimal(dto.inspectionFeeVnd) : null,
 
                 transportFeeVnd: dto.transportFeeVnd !== undefined && dto.transportFeeVnd !== null ? new Prisma.Decimal(dto.transportFeeVnd) : null,
@@ -265,9 +267,15 @@ export class PurchaseTermPricingService {
 
                 transportLossRate: dto.transportLossRate !== undefined && dto.transportLossRate !== null ? new Prisma.Decimal(dto.transportLossRate) : null,
 
+                transportLossAmountVnd: dto.transportLossAmountVnd !== undefined && dto.transportLossAmountVnd !== null ? new Prisma.Decimal(dto.transportLossAmountVnd) : null,
+
+                transportDeductionVnd: dto.transportDeductionVnd !== undefined && dto.transportDeductionVnd !== null ? new Prisma.Decimal(dto.transportDeductionVnd) : null,
+
                 envTaxVndPerLiter: dto.envTaxVndPerLiter !== undefined && dto.envTaxVndPerLiter !== null ? new Prisma.Decimal(dto.envTaxVndPerLiter) : null,
 
                 extraCostVndPerLiter: dto.extraCostVndPerLiter !== undefined && dto.extraCostVndPerLiter !== null ? new Prisma.Decimal(dto.extraCostVndPerLiter) : null,
+
+                fundAdjustmentVndPerLiter: dto.fundAdjustmentVndPerLiter !== undefined && dto.fundAdjustmentVndPerLiter !== null ? new Prisma.Decimal(dto.fundAdjustmentVndPerLiter) : null,
 
                 retailPriceVndPerLiter: dto.retailPriceVndPerLiter !== undefined && dto.retailPriceVndPerLiter !== null ? new Prisma.Decimal(dto.retailPriceVndPerLiter) : null,
 
@@ -460,6 +468,11 @@ export class PurchaseTermPricingService {
         return Number.isFinite(n) ? n : 0
     }
 
+    private round(value: number, digits = 3): number {
+        const factor = 10 ** digits
+        return Math.round((value + Number.EPSILON) * factor) / factor
+    }
+
     private async recalculateStage(tx: Prisma.TransactionClient, stageId: string) {
         const stage = await tx.purchasePricingStage.findUnique({
             where: { id: stageId },
@@ -481,7 +494,7 @@ export class PurchaseTermPricingService {
         const premium = this.toNumber(stage.premiumUsdPerBbl)
         const specialTax = this.toNumber(stage.specialConsumptionTaxUsdPerBbl)
 
-        const unitUsdPerBbl = avgPlatts + premium + specialTax
+        const unitUsdPerBbl = this.round(avgPlatts + premium + specialTax, 3)
 
         const billBarrelQty = this.toNumber(stage.billBarrelQty)
         const paymentAmountUsd = unitUsdPerBbl * billBarrelQty
@@ -489,18 +502,29 @@ export class PurchaseTermPricingService {
         const fxRate = this.toNumber(stage.fxRate)
 
         const insuranceRate = this.toNumber(stage.insuranceRate)
-        const insuranceAmountVnd = paymentAmountUsd * fxRate * insuranceRate
+        const inputInsuranceAmountVnd = stage.insuranceAmountVnd === null || stage.insuranceAmountVnd === undefined ? null : this.toNumber(stage.insuranceAmountVnd)
+        const insuranceAmountVnd = inputInsuranceAmountVnd ?? paymentAmountUsd * fxRate * insuranceRate
 
         const inspectionFeeVnd = this.toNumber(stage.inspectionFeeVnd)
         const transportFeeVnd = this.toNumber(stage.transportFeeVnd)
         const storageFeeVnd = this.toNumber(stage.storageFeeVnd)
 
         const transportLossRate = this.toNumber(stage.transportLossRate)
-        const transportLossAmountVnd = paymentAmountUsd * fxRate * transportLossRate
+        const inputTransportLossAmountVnd = stage.transportLossAmountVnd === null || stage.transportLossAmountVnd === undefined ? null : this.toNumber(stage.transportLossAmountVnd)
+        const transportLossAmountVnd = inputTransportLossAmountVnd ?? paymentAmountUsd * fxRate * transportLossRate
+        const transportDeductionVnd = this.toNumber(stage.transportDeductionVnd)
 
         const extraStageCosts = stage.costs.reduce((sum, x) => sum + this.toNumber(x.amountVnd), 0)
 
-        const billTotalVnd = paymentAmountUsd * fxRate + insuranceAmountVnd + inspectionFeeVnd + transportFeeVnd + storageFeeVnd + transportLossAmountVnd + extraStageCosts
+        const billTotalVnd =
+            paymentAmountUsd * fxRate +
+            insuranceAmountVnd +
+            inspectionFeeVnd +
+            transportFeeVnd +
+            storageFeeVnd +
+            transportLossAmountVnd +
+            extraStageCosts -
+            transportDeductionVnd
 
         const tankQtyLiter = this.toNumber(stage.tankQtyLiter)
 
@@ -508,8 +532,10 @@ export class PurchaseTermPricingService {
 
         const envTaxVndPerLiter = this.toNumber(stage.envTaxVndPerLiter)
         const extraCostVndPerLiter = this.toNumber(stage.extraCostVndPerLiter)
+        const fundAdjustmentVndPerLiter = this.toNumber(stage.fundAdjustmentVndPerLiter)
+        const fundAdjustmentAmountVnd = fundAdjustmentVndPerLiter * tankQtyLiter
 
-        const sellingUnitPriceVndPerLiter = tankUnitPriceVndPerLiter + envTaxVndPerLiter + extraCostVndPerLiter
+        const sellingUnitPriceVndPerLiter = tankUnitPriceVndPerLiter + envTaxVndPerLiter + extraCostVndPerLiter + fundAdjustmentVndPerLiter
 
         const temporaryAmountVnd = sellingUnitPriceVndPerLiter * tankQtyLiter
         const contractPaymentRate = this.toNumber(stage.contractPaymentRate)
@@ -544,11 +570,13 @@ export class PurchaseTermPricingService {
 
                 insuranceAmountVnd: new Prisma.Decimal(insuranceAmountVnd),
                 transportLossAmountVnd: new Prisma.Decimal(transportLossAmountVnd),
+                transportDeductionVnd: new Prisma.Decimal(transportDeductionVnd),
 
                 billTotalVnd: new Prisma.Decimal(billTotalVnd),
                 tankUnitPriceVndPerLiter: new Prisma.Decimal(tankUnitPriceVndPerLiter),
                 sellingUnitPriceVndPerLiter: new Prisma.Decimal(sellingUnitPriceVndPerLiter),
                 temporaryAmountVnd: new Prisma.Decimal(temporaryAmountVnd),
+                fundAdjustmentAmountVnd: new Prisma.Decimal(fundAdjustmentAmountVnd),
                 contractPaymentAmountVnd: new Prisma.Decimal(contractPaymentAmountVnd),
                 bankGuaranteeFeeVnd: new Prisma.Decimal(bankGuaranteeFeeVnd),
                 discountVndPerLiter: new Prisma.Decimal(discountVndPerLiter),
@@ -656,6 +684,7 @@ export class PurchaseTermPricingService {
                 const avg = priceDays.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / priceDays.length
 
                 const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+                const specialTax = Number(dto.specialConsumptionTaxUsdPerBbl ?? 0)
 
                 await tx.purchasePricingStage.update({
                     where: {
@@ -664,7 +693,7 @@ export class PurchaseTermPricingService {
                     data: {
                         mopsAvgUsdPerBbl: new Prisma.Decimal(avg),
                         premiumUsdPerBbl: new Prisma.Decimal(premium),
-                        unitUsdPerBbl: new Prisma.Decimal(avg + premium),
+                        unitUsdPerBbl: new Prisma.Decimal(this.round(avg + premium + specialTax, 3)),
                     },
                 })
             }
@@ -928,6 +957,15 @@ export class PurchaseTermPricingService {
         })
 
         addRow({
+            code: 'TRANSPORT_DEDUCTION',
+            label: 'Trừ cước/chi quỹ',
+            value: stage.transportDeductionVnd,
+            unit: 'VND',
+            rowType: PricingSheetRowType.COST,
+            isInput: true,
+        })
+
+        addRow({
             code: 'BILL_TOTAL_VND',
             label: 'Tổng tiền BILL',
             value: stage.billTotalVnd,
@@ -976,6 +1014,25 @@ export class PurchaseTermPricingService {
         })
 
         addRow({
+            code: 'FUND_ADJUSTMENT_PER_LITER',
+            label: 'Trích/chi quỹ',
+            value: stage.fundAdjustmentVndPerLiter,
+            unit: 'VND/lit',
+            rowType: PricingSheetRowType.COST,
+            isInput: true,
+        })
+
+        addRow({
+            code: 'FUND_ADJUSTMENT_AMOUNT',
+            label: 'Thành tiền trích/chi quỹ',
+            value: stage.fundAdjustmentAmountVnd,
+            unit: 'VND',
+            formula: 'Trích/chi quỹ * Số lượng nhập',
+            rowType: PricingSheetRowType.COST,
+            isBold: true,
+        })
+
+        addRow({
             code: 'SELLING_UNIT_PRICE',
             label: 'Đơn giá bán',
             value: stage.sellingUnitPriceVndPerLiter,
@@ -1016,7 +1073,7 @@ export class PurchaseTermPricingService {
 
         addRow({
             code: 'CONTRACT_PAYMENT_AMOUNT',
-            label: 'Giá trị thanh toán trước theo hợp đồng',
+            label: 'Giá trị thanh toán theo đơn hàng',
             value: stage.contractPaymentAmountVnd,
             unit: 'VND',
             formula: 'Thành tiền trước thuế VAT * tỷ lệ thanh toán',

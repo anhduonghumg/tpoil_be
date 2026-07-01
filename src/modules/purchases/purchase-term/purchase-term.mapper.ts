@@ -36,10 +36,16 @@ export class PurchaseTermMapper {
     private static nextActionLabel(nextAction: string): string {
         const map: Record<string, string> = {
             APPROVE_ORDER: 'Sinh đơn đặt hàng',
-            CREATE_RECEIPT: 'Nhận hàng',
+            CREATE_ORDER_DOCUMENT: 'Lập đơn đặt hàng',
+            CREATE_PAYMENT_REQUEST: 'Lập đề nghị thanh toán',
+            CREATE_BANK_INSTRUCTION: 'Lập ủy nhiệm chi',
+            MATCH_BANK_TRANSACTION: 'Đối chiếu giao dịch ngân hàng',
+            CREATE_RECEIPT: 'Giao nhận',
             CALCULATE_TEMP_PRICE: 'Lập bảng giá tạm tính',
-            CALCULATE_INVOICE_PRICE: 'Lập bảng giá theo bill',
-            CALCULATE_OFFICIAL_FX: 'Lập bảng giá chính thức',
+            CALCULATE_INVOICE_PRICE: 'Lập bảng xuất hóa đơn',
+            CALCULATE_OFFICIAL_FX: 'Lập bảng chính thức',
+            CREATE_SETTLEMENT_ADJUSTMENT: 'Điều chỉnh/hoàn tiền',
+            CREATE_BOSS_SHEET: 'Lập bảng sếp',
             COMPLETE_ORDER: 'Hoàn tất hồ sơ',
             VIEW_ONLY: 'Chỉ xem',
         }
@@ -54,48 +60,104 @@ export class PurchaseTermMapper {
         const hasFinal = this.hasStage(order, 'FINAL')
         const hasBossSheet = this.hasStage(order, 'BOSS_SHEET')
         const isCompleted = order.status === 'COMPLETED'
-        const isOrderGenerated = order.status !== 'DRAFT'
+        const isDirectOrder = order.termFlowType === 'DIRECT_ORDER'
+        const hasOrderDocument = (order.termOrderDocuments ?? []).some((doc: any) => doc.status === 'ACTIVE')
+        const hasPaymentRequest = (order.termPaymentRequests ?? []).some((request: any) => request.status !== 'CANCELLED')
+        const hasActiveBatchItem = (order.termPaymentRequests ?? []).some((request: any) =>
+            (request.batchItems ?? []).some((item: any) => item.status !== 'CANCELLED' && item.status !== 'FAILED'),
+        )
+        const hasSentToBankBatchItem = (order.termPaymentRequests ?? []).some((request: any) =>
+            (request.batchItems ?? []).some((item: any) => item.status === 'SENT' || item.status === 'PARTIALLY_PAID' || item.status === 'PAID' || !!item.bankTransactionId),
+        )
+        const hasPaidBatchItem = (order.termPaymentRequests ?? []).some((request: any) =>
+            (request.batchItems ?? []).some((item: any) => item.status === 'PAID' || item.status === 'PARTIALLY_PAID' || !!item.bankTransactionId),
+        )
+        const hasBankInstruction = (order.termBankInstructions ?? []).some((bank: any) => bank.status !== 'CANCELLED') || hasActiveBatchItem
+        const hasMatchedBankTransaction = (order.termBankInstructions ?? []).some((bank: any) => bank.status === 'MATCHED' || !!bank.bankTransactionId) || hasPaidBatchItem
+        const hasAdjustment = (order.termSettlementAdjustments ?? []).some((adjustment: any) => adjustment.status !== 'CANCELLED')
+        const adjustmentNotNeeded = hasFinal && nextAction !== 'CREATE_SETTLEMENT_ADJUSTMENT'
 
         const steps = [
             {
-                key: 'CONTRACT',
-                title: 'Hợp đồng',
+                key: 'TERM_PROFILE',
+                title: 'Hồ sơ TERM',
                 description: order.contractNo ? `Hợp đồng ${order.contractNo}` : 'Cần hợp đồng TERM mua hợp lệ',
                 status: order.contractNo ? 'DONE' : 'CURRENT',
                 action: null,
             },
             {
                 key: 'ESTIMATE_PRICE',
-                title: 'Bảng giá tạm tính',
-                description: hasEstimate ? 'Đã có bảng giá tạm tính' : 'Tạo trước để làm căn cứ đặt hàng và thanh toán tạm',
-                status: hasEstimate ? 'DONE' : nextAction === 'CALCULATE_TEMP_PRICE' ? 'CURRENT' : 'WAITING',
+                title: 'Bảng tạm nếu có',
+                description: isDirectOrder ? 'Luồng này bỏ qua bảng tạm và đi thẳng đơn đặt hàng' : hasEstimate ? 'Đã có bảng giá tạm tính' : 'Lập trước để làm căn cứ đơn đặt hàng',
+                status: isDirectOrder || hasEstimate ? 'DONE' : nextAction === 'CALCULATE_TEMP_PRICE' ? 'CURRENT' : 'WAITING',
                 action: 'CALCULATE_TEMP_PRICE',
             },
             {
                 key: 'PURCHASE_ORDER',
                 title: 'Đơn đặt hàng',
-                description: isOrderGenerated ? 'Đơn đặt hàng đã được sinh/duyệt' : hasEstimate ? 'Sinh đơn đặt hàng từ bảng giá tạm tính' : 'Chờ bảng giá tạm tính',
-                status: isOrderGenerated ? 'DONE' : nextAction === 'APPROVE_ORDER' ? 'CURRENT' : 'WAITING',
-                action: 'APPROVE_ORDER',
+                description: hasOrderDocument ? 'Đã có đơn đặt hàng để in' : isDirectOrder ? 'Lập đơn đặt hàng trực tiếp' : 'Lập đơn đặt hàng từ bảng tạm',
+                status: hasOrderDocument ? 'DONE' : nextAction === 'CREATE_ORDER_DOCUMENT' ? 'CURRENT' : 'WAITING',
+                action: 'CREATE_ORDER_DOCUMENT',
+            },
+            {
+                key: 'PAYMENT_REQUEST',
+                title: 'Đề nghị thanh toán',
+                description: hasPaymentRequest ? 'Đã lập đề nghị thanh toán' : 'Lập phiếu đề nghị thanh toán theo đơn đặt hàng',
+                status: hasPaymentRequest ? 'DONE' : nextAction === 'CREATE_PAYMENT_REQUEST' ? 'CURRENT' : 'WAITING',
+                action: 'CREATE_PAYMENT_REQUEST',
+            },
+            {
+                key: 'BANK_TRANSACTION',
+                title: 'UNC / ngân hàng',
+                description: hasMatchedBankTransaction
+                    ? 'Đã thanh toán/đối chiếu giao dịch ngân hàng'
+                    : hasSentToBankBatchItem
+                      ? 'Đã gửi ngân hàng, chưa thanh toán'
+                      : hasBankInstruction
+                        ? 'Đã vào bảng kê, chờ gửi ngân hàng'
+                        : 'Ngân hàng lập bảng kê thanh toán',
+                status: hasMatchedBankTransaction ? 'DONE' : hasSentToBankBatchItem || nextAction === 'CREATE_BANK_INSTRUCTION' || nextAction === 'MATCH_BANK_TRANSACTION' ? 'CURRENT' : 'WAITING',
+                action: hasBankInstruction ? 'MATCH_BANK_TRANSACTION' : 'CREATE_BANK_INSTRUCTION',
             },
             {
                 key: 'RECEIPT',
                 title: 'Giao nhận',
-                description: hasConfirmedReceipt ? 'Đã xác nhận nhận hàng' : 'Nhập số lượng thực nhận/V15',
+                description: hasConfirmedReceipt ? 'Đã xác nhận giao nhận' : 'Nhập số lượng thực nhận/V15',
                 status: hasConfirmedReceipt ? 'DONE' : nextAction === 'CREATE_RECEIPT' ? 'CURRENT' : 'WAITING',
                 action: 'CREATE_RECEIPT',
             },
             {
-                key: 'FINAL_PRICE',
-                title: 'Bảng giá chốt',
-                description: hasFinal ? 'Đã chốt bảng giá chính thức' : hasBill ? 'Đã có bảng giá theo bill, chờ chốt tỷ giá' : 'Sau giao nhận mới lập bảng giá theo bill',
-                status: hasFinal ? 'DONE' : nextAction === 'CALCULATE_INVOICE_PRICE' || nextAction === 'CALCULATE_OFFICIAL_FX' ? 'CURRENT' : 'WAITING',
-                action: hasBill ? 'CALCULATE_OFFICIAL_FX' : 'CALCULATE_INVOICE_PRICE',
+                key: 'INVOICE_PRICE',
+                title: 'Bảng xuất hóa đơn',
+                description: hasBill ? 'Đã có bảng xuất hóa đơn' : 'Lập bảng sau khi có bill/số liệu giao nhận',
+                status: hasBill ? 'DONE' : nextAction === 'CALCULATE_INVOICE_PRICE' ? 'CURRENT' : 'WAITING',
+                action: 'CALCULATE_INVOICE_PRICE',
+            },
+            {
+                key: 'OFFICIAL_PRICE',
+                title: 'Bảng chính thức',
+                description: hasFinal ? 'Đã chốt bảng chính thức' : 'Lập khi có giá chính thức của nhà máy',
+                status: hasFinal ? 'DONE' : nextAction === 'CALCULATE_OFFICIAL_FX' ? 'CURRENT' : 'WAITING',
+                action: 'CALCULATE_OFFICIAL_FX',
+            },
+            {
+                key: 'ADJUSTMENT',
+                title: 'Điều chỉnh / hoàn tiền',
+                description: hasAdjustment ? 'Đã ghi nhận điều chỉnh/hoàn tiền' : adjustmentNotNeeded ? 'Không phát sinh chênh lệch cần xử lý' : 'Xử lý chênh lệch sau bảng chính thức nếu có',
+                status: hasAdjustment || adjustmentNotNeeded ? 'DONE' : nextAction === 'CREATE_SETTLEMENT_ADJUSTMENT' ? 'CURRENT' : 'WAITING',
+                action: 'CREATE_SETTLEMENT_ADJUSTMENT',
+            },
+            {
+                key: 'BOSS_SHEET',
+                title: 'Bảng sếp',
+                description: hasBossSheet ? 'Đã có bảng sếp' : 'Lập bảng tổng hợp cuối hồ sơ',
+                status: hasBossSheet ? 'DONE' : nextAction === 'CREATE_BOSS_SHEET' ? 'CURRENT' : 'WAITING',
+                action: 'CREATE_BOSS_SHEET',
             },
             {
                 key: 'SETTLEMENT',
-                title: 'Quyết toán',
-                description: isCompleted ? 'Hồ sơ đã hoàn tất' : hasBossSheet ? 'Đã có bảng tổng hợp, chờ hoàn tất' : 'Đối chiếu chênh lệch và chứng từ thanh toán',
+                title: 'Hoàn tất',
+                description: isCompleted ? 'Hồ sơ đã hoàn tất' : hasBossSheet ? 'Đã đủ bảng sếp, chờ hoàn tất hồ sơ' : 'Hoàn tất sau khi đủ chứng từ',
                 status: isCompleted ? 'DONE' : nextAction === 'COMPLETE_ORDER' ? 'CURRENT' : 'WAITING',
                 action: 'COMPLETE_ORDER',
             },
@@ -103,11 +165,14 @@ export class PurchaseTermMapper {
 
         const missing = [
             !order.contractNo ? 'Hợp đồng TERM mua hợp lệ' : null,
-            !hasEstimate ? 'Bảng giá tạm tính' : null,
-            !isOrderGenerated ? 'Đơn đặt hàng sinh từ bảng giá tạm tính' : null,
-            !hasConfirmedReceipt ? 'Biên bản/phiếu nhận hàng đã xác nhận' : null,
-            !hasBill ? 'Bảng giá theo bill' : null,
-            !hasFinal ? 'Bảng giá chính thức' : null,
+            !isDirectOrder && !hasEstimate ? 'Bảng giá tạm tính' : null,
+            !hasOrderDocument ? 'Đơn đặt hàng' : null,
+            !hasPaymentRequest ? 'Đề nghị thanh toán' : null,
+            !hasMatchedBankTransaction ? 'Ủy nhiệm chi/giao dịch ngân hàng đã đối chiếu' : null,
+            !hasConfirmedReceipt ? 'Biên bản/phiếu giao nhận đã xác nhận' : null,
+            !hasBill ? 'Bảng xuất hóa đơn' : null,
+            !hasFinal ? 'Bảng chính thức' : null,
+            !hasBossSheet ? 'Bảng sếp' : null,
         ].filter(Boolean)
 
         return {
@@ -124,8 +189,8 @@ export class PurchaseTermMapper {
         const hasBill = this.hasStage(order, 'BILL_NORMALIZE')
         const hasFinal = this.hasStage(order, 'FINAL')
         const hasConfirmedReceipt = (order.receipts ?? []).some((receipt: any) => receipt.status === 'CONFIRMED')
-        const finalStage = this.latestStage(order, 'FINAL')
-        const isOrderGenerated = order.status !== 'DRAFT'
+        const hasOrderDocument = (order.termOrderDocuments ?? []).some((doc: any) => doc.status === 'ACTIVE')
+        const hasPaymentRequest = (order.termPaymentRequests ?? []).some((request: any) => request.status !== 'CANCELLED')
 
         return [
             {
@@ -143,26 +208,26 @@ export class PurchaseTermMapper {
             {
                 key: 'PURCHASE_ORDER',
                 title: 'Đơn đặt hàng',
-                description: 'Đơn đặt hàng sinh từ bảng giá tạm tính.',
-                status: hasEstimate && isOrderGenerated ? 'READY' : 'WAITING',
+                description: 'Đơn đặt hàng sinh từ bảng tạm hoặc lập trực tiếp.',
+                status: hasOrderDocument ? 'READY' : 'WAITING',
+            },
+            {
+                key: 'PAYMENT_REQUEST',
+                title: 'Phiếu đề nghị thanh toán',
+                description: 'Phiếu đề nghị thanh toán theo đơn đặt hàng.',
+                status: hasPaymentRequest ? 'READY' : 'WAITING',
             },
             {
                 key: 'BILL_PRICE',
-                title: 'Bảng giá theo bill',
+                title: 'Bảng xuất hóa đơn',
                 description: 'Bảng giá sau khi có số liệu giao nhận/bill bồn.',
                 status: hasBill ? 'READY' : 'WAITING',
             },
             {
                 key: 'OFFICIAL_PRICE',
-                title: 'Bảng giá chính thức',
-                description: 'Bảng giá chốt sau khi có tỷ giá chính thức.',
+                title: 'Bảng chính thức',
+                description: 'Bảng giá chốt sau khi có giá chính thức của nhà máy.',
                 status: hasFinal ? 'READY' : 'WAITING',
-            },
-            {
-                key: 'PAYMENT_REQUEST',
-                title: 'Phiếu đề nghị thanh toán',
-                description: finalStage ? 'Đề nghị thanh toán/chốt chênh lệch theo giá chính thức.' : 'Đề nghị thanh toán theo bảng giá tạm tính.',
-                status: hasEstimate || hasFinal ? 'READY' : 'WAITING',
             },
             {
                 key: 'DELIVERY_MINUTES',
@@ -172,6 +237,7 @@ export class PurchaseTermMapper {
             },
         ]
     }
+
     static toOrderListItem(order: any, nextAction: string) {
         const lines = order.lines ?? []
 
@@ -184,6 +250,7 @@ export class PurchaseTermMapper {
             bizType: order.bizType,
             orderType: order.orderType,
             status: order.status,
+            termFlowType: order.termFlowType,
 
             paymentMode: order.paymentMode,
             transportMode: order.transportMode,
@@ -226,6 +293,7 @@ export class PurchaseTermMapper {
             bizType: order.bizType,
             orderType: order.orderType,
             status: order.status,
+            termFlowType: order.termFlowType,
 
             paymentMode: order.paymentMode,
             paymentTermType: order.paymentTermType,
@@ -312,8 +380,6 @@ export class PurchaseTermMapper {
                 updatedAt: x.updatedAt,
             })),
 
-            // pricingRun: (order.pricingRuns ?? [])[0] ? this.toPricingRun((order.pricingRuns ?? [])[0]) : null,
-
             pricingRuns: (order.pricingRuns ?? []).map((run: any) => this.toPricingRun(run)),
 
             shipments: (order.termShipments ?? []).map((shipment: any) => ({
@@ -334,6 +400,72 @@ export class PurchaseTermMapper {
             })),
 
             logisticsCosts: (order.termLogisticsCosts ?? []).map((cost: any) => this.toLogisticsCost(cost)),
+            termOrderDocuments: (order.termOrderDocuments ?? []).map((doc: any) => ({
+                id: doc.id,
+                documentNo: doc.documentNo,
+                documentDate: doc.documentDate,
+                status: doc.status,
+                version: doc.version,
+                sourceType: doc.sourceType,
+                sourcePricingStageId: doc.sourcePricingStageId,
+                totalQtyLiter: this.n(doc.totalQtyLiter),
+                unitPriceVndPerLiter: this.n(doc.unitPriceVndPerLiter),
+                amountVnd: this.n(doc.amountVnd),
+                vatRate: this.n(doc.vatRate),
+                totalAmountVnd: this.n(doc.totalAmountVnd),
+                createdAt: doc.createdAt,
+                updatedAt: doc.updatedAt,
+            })),
+            termPaymentRequests: (order.termPaymentRequests ?? []).map((request: any) => ({
+                id: request.id,
+                requestNo: request.requestNo,
+                requestDate: request.requestDate,
+                supplierName: request.supplierName,
+                amountVnd: this.n(request.amountVnd),
+                currency: request.currency,
+                paymentDeadline: request.paymentDeadline,
+                status: request.status,
+                note: request.note,
+                batchItems: (request.batchItems ?? []).map((item: any) => ({
+                    id: item.id,
+                    batchId: item.batchId,
+                    batchNo: item.batch?.batchNo ?? null,
+                    bankTransactionId: item.bankTransactionId,
+                    amountVnd: this.n(item.amountVnd),
+                    paidAmountVnd: this.n(item.paidAmountVnd),
+                    status: item.status,
+                    createdAt: item.createdAt,
+                    updatedAt: item.updatedAt,
+                })),
+                createdAt: request.createdAt,
+                updatedAt: request.updatedAt,
+            })),
+            termBankInstructions: (order.termBankInstructions ?? []).map((bank: any) => ({
+                id: bank.id,
+                paymentRequestId: bank.paymentRequestId,
+                bankTransactionId: bank.bankTransactionId,
+                instructionNo: bank.instructionNo,
+                instructionDate: bank.instructionDate,
+                amountVnd: this.n(bank.amountVnd),
+                beneficiaryName: bank.beneficiaryName,
+                beneficiaryBankAccount: bank.beneficiaryBankAccount,
+                beneficiaryBankName: bank.beneficiaryBankName,
+                status: bank.status,
+                note: bank.note,
+                createdAt: bank.createdAt,
+                updatedAt: bank.updatedAt,
+            })),
+            termSettlementAdjustments: (order.termSettlementAdjustments ?? []).map((adjustment: any) => ({
+                id: adjustment.id,
+                finalPricingStageId: adjustment.finalPricingStageId,
+                adjustmentType: adjustment.adjustmentType,
+                amountVnd: this.n(adjustment.amountVnd),
+                reason: adjustment.reason,
+                status: adjustment.status,
+                note: adjustment.note,
+                createdAt: adjustment.createdAt,
+                updatedAt: adjustment.updatedAt,
+            })),
 
             nextAction,
             workflow: this.toWorkflow(order, nextAction),
@@ -428,6 +560,8 @@ export class PurchaseTermMapper {
                 insuranceAmountVnd: this.n(stage.insuranceAmountVnd),
                 shippingFeeVnd: this.n(stage.shippingFeeVnd),
                 otherFeeVnd: this.n(stage.otherFeeVnd),
+                transportLossAmountVnd: this.n(stage.transportLossAmountVnd),
+                transportDeductionVnd: this.n(stage.transportDeductionVnd),
 
                 envTaxAmountVnd: this.n(stage.envTaxAmountVnd),
                 vatAmountVnd: this.n(stage.vatAmountVnd),
@@ -439,6 +573,8 @@ export class PurchaseTermMapper {
                 tankUnitPriceVndPerLiter: this.n(stage.tankUnitPriceVndPerLiter),
                 sellingUnitPriceVndPerLiter: this.n(stage.sellingUnitPriceVndPerLiter),
                 temporaryAmountVnd: this.n(stage.temporaryAmountVnd),
+                fundAdjustmentVndPerLiter: this.n(stage.fundAdjustmentVndPerLiter),
+                fundAdjustmentAmountVnd: this.n(stage.fundAdjustmentAmountVnd),
                 contractPaymentRate: this.n(stage.contractPaymentRate),
                 contractPaymentAmountVnd: this.n(stage.contractPaymentAmountVnd),
                 bankGuaranteeRate: this.n(stage.bankGuaranteeRate),

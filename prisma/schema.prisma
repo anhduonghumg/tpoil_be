@@ -248,6 +248,75 @@ enum PurchaseOrderStatus {
   CANCELLED
 }
 
+enum TermOrderDocumentSourceType {
+  ESTIMATE_PRICING
+  DIRECT
+}
+
+enum TermOrderDocumentStatus {
+  ACTIVE
+  SUPERSEDED
+  CANCELLED
+}
+
+enum TermPurchaseFlowType {
+  ESTIMATE_FIRST
+  DIRECT_ORDER
+}
+
+enum TermPaymentRequestStatus {
+  DRAFT
+  SUBMITTED
+  IN_BATCH
+  SENT_TO_BANK
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+enum TermBankInstructionStatus {
+  DRAFT
+  SENT
+  MATCHED
+  CANCELLED
+}
+
+enum TermSettlementAdjustmentType {
+  ADDITIONAL_PAYMENT
+  REFUND
+  NO_ADJUSTMENT
+}
+
+enum TermSettlementAdjustmentStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum TermPaymentBatchStatus {
+  DRAFT
+  SENT_TO_BANK
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+enum TermPaymentBatchItemStatus {
+  PENDING
+  SENT
+  PARTIALLY_PAID
+  PAID
+  FAILED
+  CANCELLED
+}
+
+enum TermPaymentBatchFileType {
+  EXPORTED_LIST
+  BANK_RETURN
+  UNC
+  OTHER
+}
+
 enum PaymentMode {
   PREPAID
   POSTPAID
@@ -1161,6 +1230,7 @@ model PurchaseOrder {
   paymentMode          PaymentMode
   termPremiumUsdPerBbl Decimal?            @db.Decimal(18, 6)
   transportMode        TermTransportMode?
+  termFlowType         TermPurchaseFlowType @default(ESTIMATE_FIRST)
 
   paymentTermType     PaymentTermType @default(SAME_DAY)
   paymentTermDays     Int?
@@ -1191,6 +1261,11 @@ model PurchaseOrder {
   pricingRuns        PurchasePricingRun[]
   termShipments      TermShipment[]
   termLogisticsCosts TermLogisticsCost[]
+  termOrderDocuments PurchaseTermOrderDocument[]
+  termPaymentRequests PurchaseTermPaymentRequest[]
+  termBankInstructions PurchaseTermBankInstruction[]
+  termSettlementAdjustments PurchaseTermSettlementAdjustment[]
+  termPaymentBatchItems TermPaymentBatchItem[]
 
   @@unique([orderNo])
   @@index([supplierCustomerId, orderDate])
@@ -1229,6 +1304,255 @@ model PurchaseOrderLine {
   @@index([purchaseOrderId])
   @@index([productId])
   @@index([supplierLocationId, productId])
+}
+
+model PurchaseTermOrderDocument {
+  id                   String                      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderId      String                      @db.Uuid
+  purchaseOrder        PurchaseOrder               @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sourceType           TermOrderDocumentSourceType
+  sourcePricingStageId String?                     @db.Uuid
+  sourcePricingStage   PurchasePricingStage?       @relation(fields: [sourcePricingStageId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  documentNo   String
+  documentDate DateTime @db.Date
+
+  buyerName    String
+  buyerAddress String?
+  buyerPhone   String?
+  buyerFax     String?
+
+  supplierName    String
+  supplierAddress String?
+  supplierPhone   String?
+
+  contractNo        String?
+  appendixNo        String?
+  deliveryTimeText  String?
+  deliveryLocation  String?
+  paymentMethodText String?
+
+  priceBasisNote    String?
+  officialPriceNote String?
+  includedTaxNote   String?
+
+  totalQtyLiter        Decimal @default(0) @db.Decimal(18, 3)
+  unitPriceVndPerLiter Decimal @default(0) @db.Decimal(18, 6)
+  amountVnd            Decimal @default(0) @db.Decimal(18, 2)
+  vatRate              Decimal @default(0) @db.Decimal(5, 2)
+  totalAmountVnd       Decimal @default(0) @db.Decimal(18, 2)
+
+  status     TermOrderDocumentStatus @default(ACTIVE)
+  version    Int                     @default(1)
+  sourceHash String?
+  note       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines PurchaseTermOrderDocumentLine[]
+  paymentRequests PurchaseTermPaymentRequest[]
+
+  @@index([purchaseOrderId, status])
+  @@index([documentNo])
+  @@index([sourcePricingStageId])
+  @@index([createdAt])
+}
+
+model PurchaseTermOrderDocumentLine {
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  documentId String @db.Uuid
+
+  productId   String? @db.Uuid
+  productCode String?
+  productName String
+
+  qtyLiter             Decimal @db.Decimal(18, 3)
+  unitPriceVndPerLiter Decimal @db.Decimal(18, 6)
+  amountVnd            Decimal @db.Decimal(18, 2)
+  vatRate              Decimal @default(0) @db.Decimal(5, 2)
+  note                 String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  document PurchaseTermOrderDocument @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([documentId])
+  @@index([productId])
+}
+
+model PurchaseTermPaymentRequest {
+  id              String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderId String @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  orderDocumentId String? @db.Uuid
+  orderDocument PurchaseTermOrderDocument? @relation(fields: [orderDocumentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  sourcePricingStageId String? @db.Uuid
+  sourcePricingStage PurchasePricingStage? @relation(fields: [sourcePricingStageId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  requestNo   String
+  requestDate DateTime @db.Date
+  supplierName String
+  content String?
+
+  amountVnd Decimal @default(0) @db.Decimal(18, 2)
+  currency String @default("VND")
+  paymentDeadline DateTime? @db.Date
+
+  status TermPaymentRequestStatus @default(DRAFT)
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bankInstructions PurchaseTermBankInstruction[]
+  batchItems TermPaymentBatchItem[]
+
+  @@index([purchaseOrderId, status])
+  @@index([orderDocumentId])
+  @@index([sourcePricingStageId])
+  @@index([requestNo])
+  @@index([requestDate])
+}
+
+model TermPaymentBatch {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  batchNo String @unique
+  batchDate DateTime @db.Date
+
+  bankAccountId String? @db.Uuid
+  bankAccount BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  totalAmountVnd Decimal @default(0) @db.Decimal(18, 2)
+  itemCount Int @default(0)
+
+  status TermPaymentBatchStatus @default(DRAFT)
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items TermPaymentBatchItem[]
+  files TermPaymentBatchFile[]
+
+  @@index([batchDate])
+  @@index([bankAccountId, status])
+  @@index([status, createdAt])
+}
+
+model TermPaymentBatchItem {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  batchId String @db.Uuid
+  batch TermPaymentBatch @relation(fields: [batchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  paymentRequestId String @db.Uuid
+  paymentRequest PurchaseTermPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  purchaseOrderId String @db.Uuid
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  bankTransactionId String? @db.Uuid
+  bankTransaction BankTransaction? @relation(fields: [bankTransactionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  supplierName String
+  amountVnd Decimal @default(0) @db.Decimal(18, 2)
+  paidAmountVnd Decimal @default(0) @db.Decimal(18, 2)
+
+  beneficiaryName String?
+  beneficiaryBankAccount String?
+  beneficiaryBankName String?
+  transferContent String?
+
+  status TermPaymentBatchItemStatus @default(PENDING)
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([batchId, paymentRequestId])
+  @@index([paymentRequestId, status])
+  @@index([purchaseOrderId, status])
+  @@index([bankTransactionId])
+  @@index([status])
+}
+
+model TermPaymentBatchFile {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  batchId String @db.Uuid
+  batch TermPaymentBatch @relation(fields: [batchId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  fileType TermPaymentBatchFileType @default(OTHER)
+  fileName String
+  fileUrl String
+  fileChecksum String?
+  mimeType String?
+  sizeBytes Int?
+
+  note String?
+  createdAt DateTime @default(now())
+
+  @@index([batchId, fileType])
+  @@index([fileChecksum])
+}
+
+model PurchaseTermBankInstruction {
+  id              String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderId String @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  paymentRequestId String? @db.Uuid
+  paymentRequest PurchaseTermPaymentRequest? @relation(fields: [paymentRequestId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  bankTransactionId String? @db.Uuid
+  bankTransaction BankTransaction? @relation(fields: [bankTransactionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  instructionNo String?
+  instructionDate DateTime? @db.Date
+  amountVnd Decimal @default(0) @db.Decimal(18, 2)
+  beneficiaryName String?
+  beneficiaryBankAccount String?
+  beneficiaryBankName String?
+  content String?
+
+  status TermBankInstructionStatus @default(DRAFT)
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseOrderId, status])
+  @@index([paymentRequestId])
+  @@index([bankTransactionId])
+  @@index([instructionNo])
+  @@index([instructionDate])
+}
+
+model PurchaseTermSettlementAdjustment {
+  id              String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderId String @db.Uuid
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  finalPricingStageId String? @db.Uuid
+  finalPricingStage PurchasePricingStage? @relation(fields: [finalPricingStageId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  adjustmentType TermSettlementAdjustmentType
+  amountVnd Decimal @default(0) @db.Decimal(18, 2)
+  reason String?
+
+  status TermSettlementAdjustmentStatus @default(DRAFT)
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([purchaseOrderId, status])
+  @@index([finalPricingStageId])
+  @@index([adjustmentType])
 }
 
 model TermShipment {
@@ -1726,6 +2050,7 @@ model BankAccount {
 
   imports      BankStatementImport[]
   transactions BankTransaction[]
+  termPaymentBatches TermPaymentBatch[]
 
   @@unique([bankCode, accountNo])
   @@index([isActive])
@@ -1819,6 +2144,8 @@ model BankTransaction {
   purpose     BankTransactionPurpose? @relation(fields: [purposeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   allocations PaymentAllocation[]
+  termBankInstructions PurchaseTermBankInstruction[]
+  termPaymentBatchItems TermPaymentBatchItem[]
 
   isConfirmed Boolean   @default(false)
   confirmedAt DateTime?
@@ -2012,7 +2339,7 @@ model PurchasePricingStage {
 
   specialConsumptionTaxUsdPerBbl Decimal? @db.Decimal(18, 6)
 
-  billBarrelQty Decimal? @db.Decimal(18, 3)
+  billBarrelQty Decimal? @db.Decimal(18, 6)
   tankQtyLiter  Decimal? @db.Decimal(18, 3)
 
   insuranceRate     Decimal? @db.Decimal(18, 6)
@@ -2029,10 +2356,13 @@ model PurchasePricingStage {
   paymentAmountUsd Decimal? @db.Decimal(18, 6)
 
   transportLossAmountVnd      Decimal? @db.Decimal(18, 2)
+  transportDeductionVnd       Decimal? @db.Decimal(18, 2)
   billTotalVnd                Decimal? @db.Decimal(18, 2)
   tankUnitPriceVndPerLiter    Decimal? @db.Decimal(18, 6)
   sellingUnitPriceVndPerLiter Decimal? @db.Decimal(18, 6)
   temporaryAmountVnd          Decimal? @db.Decimal(18, 2)
+  fundAdjustmentVndPerLiter   Decimal? @db.Decimal(18, 6)
+  fundAdjustmentAmountVnd     Decimal? @db.Decimal(18, 2)
   discountVndPerLiter         Decimal? @db.Decimal(18, 6)
   contractPaymentRate         Decimal? @db.Decimal(18, 6)
   contractPaymentAmountVnd    Decimal? @db.Decimal(18, 2)
@@ -2047,6 +2377,9 @@ model PurchasePricingStage {
   run       PurchasePricingRun        @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   priceDays PurchasePricingPriceDay[]
   sheetRows PurchasePricingSheetRow[]
+  termOrderDocuments PurchaseTermOrderDocument[]
+  termPaymentRequests PurchaseTermPaymentRequest[]
+  termSettlementAdjustments PurchaseTermSettlementAdjustment[]
 
   @@unique([runId, stageType])
 }

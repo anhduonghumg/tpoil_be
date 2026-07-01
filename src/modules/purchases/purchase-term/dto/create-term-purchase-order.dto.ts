@@ -1,4 +1,4 @@
-import { TermTransportMode } from '@prisma/client'
+import { TermPurchaseFlowType, TermTransportMode } from '@prisma/client'
 import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
 import { Type } from 'class-transformer'
 
@@ -55,6 +55,10 @@ export class CreateTermPurchaseOrderDto {
     @IsOptional()
     @IsEnum(TermTransportMode)
     transportMode?: TermTransportMode
+
+    @IsOptional()
+    @IsEnum(TermPurchaseFlowType)
+    termFlowType?: TermPurchaseFlowType
 
     @IsOptional()
     @IsString()
