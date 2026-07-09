@@ -8,8 +8,10 @@ import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
 import { BankImportTemplatesService } from '../bank-import-templates/bank-import-templates.service'
 import { DeleteMultipleBankTransactionsDto } from './dto/delete-multiple-bank-transactions.dto'
+import { CreateManualBankTransactionDto } from './dto/create-manual-bank-transaction.dto'
 
 type ParsedBankRow = {
+    rowNo?: number
     txnDate: Date
     direction: BankTxnDirection
     amount: number
@@ -23,6 +25,11 @@ type ParsedBankRow = {
     purposeId?: string
 
     raw: Record<string, any>
+}
+
+type PreparedBankRow = ParsedBankRow & {
+    purposeId?: string
+    fingerprint: string
 }
 
 @Injectable()
@@ -591,6 +598,76 @@ export class BankingService {
         return this.bankImportTemplatesService.listActive(bankCode)
     }
 
+    async createManualTransaction(body: CreateManualBankTransactionDto) {
+        const bankAccount = await this.prisma.bankAccount.findUnique({
+            where: { id: body.bankAccountId },
+        })
+
+        if (!bankAccount) {
+            throw new NotFoundException('BANK_ACCOUNT_NOT_FOUND')
+        }
+
+        const description = this.cleanOptionalText(body.description)
+        if (!description) {
+            throw new BadRequestException('DESCRIPTION_REQUIRED')
+        }
+
+        const txnDate = this.toDateOnly(body.txnDate)
+        const direction = body.direction as BankTxnDirection
+        const amount = Number(body.amount || 0)
+        const documentCode = this.cleanOptionalText(body.documentCode)?.toUpperCase()
+        const externalRef = this.cleanOptionalText(body.externalRef)
+        const counterpartyAcc = this.cleanOptionalText(body.counterpartyAcc)
+
+        const fingerprint = this.buildTxnFingerprint({
+            bankAccountId: body.bankAccountId,
+            txnDate,
+            direction,
+            amount,
+            description,
+            counterpartyAcc,
+            externalRef,
+            documentCode,
+        })
+
+        const existed = await this.prisma.bankTransaction.findFirst({
+            where: {
+                bankAccountId: body.bankAccountId,
+                OR: [...(externalRef ? [{ externalRef }] : []), { fingerprint }],
+            },
+            select: { id: true },
+        })
+
+        if (existed) {
+            throw new BadRequestException('BANK_TRANSACTION_DUPLICATED')
+        }
+
+        const txn = await this.prisma.bankTransaction.create({
+            data: {
+                bankAccountId: body.bankAccountId,
+                txnDate,
+                direction,
+                amount: new Prisma.Decimal(amount),
+                description,
+                counterpartyName: this.cleanOptionalText(body.counterpartyName) ?? null,
+                counterpartyAcc: counterpartyAcc ?? null,
+                externalRef: externalRef ?? null,
+                documentCode: documentCode ?? null,
+                purposeRaw: this.cleanOptionalText(body.purposeRaw) ?? null,
+                purposeId: body.purposeId ?? null,
+                note: this.cleanOptionalText(body.note) ?? null,
+                fingerprint,
+                matchStatus: BankTxnMatchStatus.UNMATCHED,
+                raw: {
+                    source: 'manual',
+                    enteredAt: new Date().toISOString(),
+                },
+            },
+        })
+
+        return this.getTransactionDetail(txn.id)
+    }
+
     async getImportDetail(id: string) {
         const item = await this.prisma.bankStatementImport.findUnique({
             where: { id },
@@ -611,6 +688,87 @@ export class BankingService {
         return item
     }
 
+    async previewImportStatement(file: Express.Multer.File, body: CreateBankImportDto) {
+        if (!file) {
+            throw new BadRequestException('FILE_REQUIRED')
+        }
+
+        if (!file.originalname.toLowerCase().endsWith('.xlsx')) {
+            throw new BadRequestException('ONLY_XLSX_SUPPORTED_IN_PHASE_1')
+        }
+
+        const bankAccount = await this.prisma.bankAccount.findUnique({
+            where: { id: body.bankAccountId },
+        })
+
+        if (!bankAccount) {
+            throw new NotFoundException('BANK_ACCOUNT_NOT_FOUND')
+        }
+
+        const template = await this.resolveImportTemplate(bankAccount.bankCode, body.templateId)
+        const checksum = this.sha256(file.buffer)
+        const existedImport = await this.prisma.bankStatementImport.findFirst({
+            where: {
+                bankAccountId: body.bankAccountId,
+                fileChecksum: checksum,
+            },
+            select: {
+                id: true,
+                createdAt: true,
+            },
+        })
+
+        const parsed = await this.parseXlsxWithExcelJS(file.buffer, template?.columnMap, template?.normalizeRule)
+        const prepared = await this.prepareBankRows(body.bankAccountId, parsed.rows)
+        const duplicateFlags = await this.detectDuplicateFlags(body.bankAccountId, prepared)
+
+        const allRows = prepared.map((row) => ({
+            rowNo: row.rowNo ?? 0,
+            txnDate: row.txnDate,
+            direction: row.direction,
+            amount: row.amount,
+            description: row.description,
+            counterpartyName: row.counterpartyName ?? null,
+            counterpartyAcc: row.counterpartyAcc ?? null,
+            externalRef: row.externalRef ?? null,
+            documentCode: row.documentCode ?? null,
+            purposeRaw: row.purposeRaw ?? null,
+            fingerprint: row.fingerprint,
+            isDuplicate: duplicateFlags.has(row.fingerprint) || (!!row.externalRef && duplicateFlags.has(`ref:${row.externalRef}`)),
+            raw: row.raw,
+        }))
+        const rows = allRows.slice(0, 500)
+
+        const duplicatedCount = allRows.filter((row) => row.isDuplicate).length
+
+        return {
+            fileName: file.originalname,
+            fileChecksum: checksum,
+            existedImport,
+            bankAccount: {
+                id: bankAccount.id,
+                bankCode: bankAccount.bankCode,
+                accountNo: bankAccount.accountNo,
+                accountName: bankAccount.accountName,
+            },
+            template: template
+                ? {
+                      id: template.id,
+                      bankCode: template.bankCode,
+                      name: template.name,
+                      version: template.version,
+                  }
+                : null,
+            summary: {
+                totalRows: prepared.length,
+                previewCount: rows.length,
+                validCount: prepared.length - duplicatedCount,
+                duplicatedCount,
+            },
+            rows,
+        }
+    }
+
     async importStatement(file: Express.Multer.File, body: CreateBankImportDto) {
         if (!file) {
             throw new BadRequestException('FILE_REQUIRED')
@@ -628,15 +786,7 @@ export class BankingService {
             throw new NotFoundException('BANK_ACCOUNT_NOT_FOUND')
         }
 
-        const template = body.templateId
-            ? await this.prisma.bankImportTemplate.findUnique({
-                  where: { id: body.templateId },
-              })
-            : null
-
-        if (body.templateId && !template) {
-            throw new NotFoundException('BANK_IMPORT_TEMPLATE_NOT_FOUND')
-        }
+        const template = await this.resolveImportTemplate(bankAccount.bankCode, body.templateId)
 
         const checksum = this.sha256(file.buffer)
 
@@ -654,7 +804,7 @@ export class BankingService {
         const importJob = await this.prisma.bankStatementImport.create({
             data: {
                 bankAccountId: body.bankAccountId,
-                templateId: body.templateId ?? null,
+                templateId: template?.id ?? null,
                 status: BankImportStatus.PROCESSING,
                 fileUrl: file.originalname,
                 fileChecksum: checksum,
@@ -670,37 +820,7 @@ export class BankingService {
                 throw new BadRequestException('BANK_IMPORT_NO_VALID_ROWS')
             }
 
-            const activePurposes = await this.prisma.bankTransactionPurpose.findMany({
-                where: { isActive: true },
-                select: { id: true, code: true, name: true },
-            })
-
-            const purposeMap = new Map<string, string>()
-            for (const p of activePurposes) {
-                purposeMap.set(this.normalizeText(p.code), p.id)
-                purposeMap.set(this.normalizeText(p.name), p.id)
-            }
-
-            const prepared = parsed.rows.map((row) => {
-                const purposeId = row.purposeRaw ? this.resolvePurposeId(row.purposeRaw, purposeMap) : undefined
-
-                const fingerprint = this.buildTxnFingerprint({
-                    bankAccountId: body.bankAccountId,
-                    txnDate: row.txnDate,
-                    direction: row.direction,
-                    amount: row.amount,
-                    description: row.description,
-                    counterpartyAcc: row.counterpartyAcc,
-                    externalRef: row.externalRef,
-                    documentCode: row.documentCode,
-                })
-
-                return {
-                    ...row,
-                    purposeId,
-                    fingerprint,
-                }
-            })
+            const prepared = await this.prepareBankRows(body.bankAccountId, parsed.rows)
 
             const externalRefs = prepared.map((x) => x.externalRef).filter((x): x is string => !!x)
 
@@ -872,6 +992,7 @@ export class BankingService {
             const purposeRaw = this.cleanOptionalText(mapped.purpose)
 
             result.push({
+                rowNo: rowNumber,
                 txnDate,
                 direction: normalized.direction,
                 amount: normalized.amount,
@@ -914,6 +1035,97 @@ export class BankingService {
         }
 
         return String(value)
+    }
+
+    private toDateOnly(value: string): Date {
+        return new Date(`${value}T00:00:00.000Z`)
+    }
+
+    private async resolveImportTemplate(bankCode: string, templateId?: string) {
+        if (templateId) {
+            const template = await this.prisma.bankImportTemplate.findFirst({
+                where: {
+                    id: templateId,
+                    isActive: true,
+                },
+            })
+
+            if (!template) {
+                throw new NotFoundException('BANK_IMPORT_TEMPLATE_NOT_FOUND')
+            }
+
+            return template
+        }
+
+        const template = await this.prisma.bankImportTemplate.findFirst({
+            where: {
+                bankCode,
+                isActive: true,
+            },
+            orderBy: [{ version: 'desc' }, { createdAt: 'desc' }],
+        })
+
+        if (!template) {
+            throw new NotFoundException('BANK_IMPORT_TEMPLATE_NOT_FOUND')
+        }
+
+        return template
+    }
+
+    private async prepareBankRows(bankAccountId: string, rows: ParsedBankRow[]): Promise<PreparedBankRow[]> {
+        const activePurposes = await this.prisma.bankTransactionPurpose.findMany({
+            where: { isActive: true },
+            select: { id: true, code: true, name: true },
+        })
+
+        const purposeMap = new Map<string, string>()
+        for (const p of activePurposes) {
+            purposeMap.set(this.normalizeText(p.code), p.id)
+            purposeMap.set(this.normalizeText(p.name), p.id)
+        }
+
+        return rows.map((row) => {
+            const purposeId = row.purposeRaw ? this.resolvePurposeId(row.purposeRaw, purposeMap) : undefined
+            const fingerprint = this.buildTxnFingerprint({
+                bankAccountId,
+                txnDate: row.txnDate,
+                direction: row.direction,
+                amount: row.amount,
+                description: row.description,
+                counterpartyAcc: row.counterpartyAcc,
+                externalRef: row.externalRef,
+                documentCode: row.documentCode,
+            })
+
+            return {
+                ...row,
+                purposeId,
+                fingerprint,
+            }
+        })
+    }
+
+    private async detectDuplicateFlags(bankAccountId: string, rows: PreparedBankRow[]) {
+        const externalRefs = rows.map((x) => x.externalRef).filter((x): x is string => !!x)
+        const fingerprints = rows.map((x) => x.fingerprint)
+        const existingTxns = await this.prisma.bankTransaction.findMany({
+            where: {
+                bankAccountId,
+                OR: [...(externalRefs.length ? [{ externalRef: { in: externalRefs } }] : []), { fingerprint: { in: fingerprints } }],
+            },
+            select: {
+                externalRef: true,
+                fingerprint: true,
+            },
+        })
+
+        const flags = new Set<string>()
+        for (const item of existingTxns) {
+            flags.add(item.fingerprint)
+            if (item.externalRef) flags.add(`ref:${item.externalRef}`)
+        }
+
+        return flags
     }
 
     private isEmptyMappedRow(row: Record<string, any>) {

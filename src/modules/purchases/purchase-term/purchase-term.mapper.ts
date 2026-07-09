@@ -240,6 +240,19 @@ export class PurchaseTermMapper {
 
     static toOrderListItem(order: any, nextAction: string) {
         const lines = order.lines ?? []
+        const paymentRequests = order.termPaymentRequests ?? []
+        const paymentStatusRank: Record<string, number> = {
+            PAID: 6,
+            PARTIALLY_PAID: 5,
+            SENT_TO_BANK: 4,
+            IN_BATCH: 3,
+            SUBMITTED: 2,
+            DRAFT: 1,
+        }
+        const paymentStatus =
+            [...paymentRequests]
+                .filter((request: any) => request.status !== 'CANCELLED')
+                .sort((a: any, b: any) => (paymentStatusRank[b.status] ?? 0) - (paymentStatusRank[a.status] ?? 0))[0]?.status ?? null
 
         const totalQty = lines.reduce((sum: number, x: any) => sum + this.n0(x.orderedQty), 0)
 
@@ -254,6 +267,7 @@ export class PurchaseTermMapper {
 
             paymentMode: order.paymentMode,
             transportMode: order.transportMode,
+            charterVessel: !!order.charterVessel,
 
             orderDate: order.orderDate,
             expectedDate: order.expectedDate,
@@ -275,6 +289,7 @@ export class PurchaseTermMapper {
 
             termPremiumUsdPerBbl: this.n(order.termPremiumUsdPerBbl),
             premium: this.n(order.termPremiumUsdPerBbl),
+            paymentStatus,
 
             nextAction,
 
@@ -322,6 +337,7 @@ export class PurchaseTermMapper {
                   }
                 : null,
             transportMode: order.transportMode,
+            charterVessel: !!order.charterVessel,
             deliveryLocation: order.deliveryLocation,
 
             paymentNote: order.paymentNote,
@@ -370,6 +386,15 @@ export class PurchaseTermMapper {
 
                 qty: this.n0(x.qty),
                 standardQtyV15: this.n(x.standardQtyV15),
+                billQty: this.n(x.billQty),
+                tankQty: this.n(x.tankQty),
+                temporaryWithdrawQty: this.n(x.temporaryWithdrawQty),
+                billToTankLossQty: this.n(x.billToTankLossQty),
+                receiptDocumentTemplate: x.receiptDocumentTemplate,
+                sourceFileName: x.sourceFileName,
+                sourceFileUrl: x.sourceFileUrl,
+                sourceFileMimeType: x.sourceFileMimeType,
+                sourceFileSizeBytes: this.n(x.sourceFileSizeBytes),
 
                 tempC: this.n(x.tempC),
                 density: this.n(x.density),
@@ -421,6 +446,7 @@ export class PurchaseTermMapper {
                 requestNo: request.requestNo,
                 requestDate: request.requestDate,
                 supplierName: request.supplierName,
+                content: request.content,
                 amountVnd: this.n(request.amountVnd),
                 currency: request.currency,
                 paymentDeadline: request.paymentDeadline,

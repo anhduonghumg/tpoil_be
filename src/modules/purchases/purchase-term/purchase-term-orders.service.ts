@@ -1,5 +1,17 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { ContractStatus, PaymentMode, PaymentTermType, PricingStageType, Prisma, PurchaseBizType, PurchaseOrderStatus, PurchaseOrderType, TermPurchaseFlowType } from '@prisma/client'
+import {
+    ContractStatus,
+    PaymentMode,
+    PaymentTermType,
+    PricingStageType,
+    Prisma,
+    PurchaseBizType,
+    PurchaseOrderStatus,
+    PurchaseOrderType,
+    TermPaymentRequestStatus,
+    TermPurchaseFlowType,
+    TermTransportMode,
+} from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
 import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.query.dto'
@@ -393,6 +405,7 @@ export class PurchaseTermOrdersService {
                     contractId: contract.id,
                     contractNo: contract.code,
                     transportMode: dto.transportMode ?? null,
+                    charterVessel: dto.transportMode === TermTransportMode.SEA ? !!dto.charterVessel : false,
                     deliveryLocation: dto.deliveryLocation?.trim() || supplier.defaultDeliveryLocation || null,
 
                     paymentNote: dto.paymentNote?.trim() || null,
@@ -416,6 +429,22 @@ export class PurchaseTermOrdersService {
                 include: this.orderInclude,
             })
 
+            if (dto.transportMode === TermTransportMode.SEA && dto.charterVessel) {
+                await tx.shipCharterOrder.create({
+                    data: {
+                        charterOrderNo: `CH-${order.orderNo}`,
+                        sourceType: 'FROM_TERM',
+                        purchaseOrderId: order.id,
+                        cargoName: order.lines.map((line) => line.product.name).join(', '),
+                        plannedQty: order.totalQty ?? new Prisma.Decimal(totalQty),
+                        dischargePort: order.deliveryLocation,
+                        laycanTo: order.expectedDate,
+                        status: 'DRAFT',
+                        note: `Tự động sinh từ đơn TERM ${order.orderNo}`,
+                    },
+                })
+            }
+
             // if (dto.billInfo) {
             //     await this.createInitialPricing(tx, order, dto.billInfo)
             // }
@@ -438,6 +467,18 @@ export class PurchaseTermOrdersService {
             bizType: PurchaseBizType.TERM,
             status: query.status ?? undefined,
             supplierCustomerId: query.supplierCustomerId ?? undefined,
+            termPaymentRequests: query.paymentStatus
+                ? {
+                      some: {
+                          status:
+                              query.paymentStatus === TermPaymentRequestStatus.PAID
+                                  ? {
+                                        in: [TermPaymentRequestStatus.PAID, TermPaymentRequestStatus.PARTIALLY_PAID],
+                                    }
+                                  : query.paymentStatus,
+                      },
+                  }
+                : undefined,
             orderDate:
                 query.fromDate || query.toDate
                     ? {
@@ -567,6 +608,11 @@ export class PurchaseTermOrdersService {
                     expectedDate: dto.expectedDate !== undefined ? this.toDateOnly(dto.expectedDate) : undefined,
 
                     contractNo: dto.contractNo ?? undefined,
+                    transportMode: dto.transportMode ?? undefined,
+                    charterVessel:
+                        dto.charterVessel !== undefined || dto.transportMode !== undefined
+                            ? (dto.transportMode ?? current.transportMode) === TermTransportMode.SEA && !!dto.charterVessel
+                            : undefined,
                     deliveryLocation: dto.deliveryLocation ?? undefined,
 
                     paymentNote: dto.paymentNote ?? undefined,

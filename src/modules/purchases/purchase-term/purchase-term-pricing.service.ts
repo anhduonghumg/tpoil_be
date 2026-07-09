@@ -18,6 +18,33 @@ import {
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 
 import { CalculateTermPricingDto } from './dto/calculate-term-pricing.dto'
+import pdf = require('pdf-parse')
+import Tesseract = require('tesseract.js')
+
+type ImportedPricingFields = {
+    billDate?: string
+    plattsBaseDate?: string
+    priceDays?: Array<{ quoteDate: string; priceUsdPerBbl: number }>
+    mopsAvgUsdPerBbl?: number
+    premiumUsdPerBbl?: number
+    specialConsumptionTaxUsdPerBbl?: number
+    fxRateDate?: string
+    fxRate?: number
+    billBarrelQty?: number
+    tankQtyLiter?: number
+    insuranceAmountVnd?: number
+    inspectionFeeVnd?: number
+    transportFeeVnd?: number
+    storageFeeVnd?: number
+    transportLossAmountVnd?: number
+    transportDeductionVnd?: number
+    envTaxVndPerLiter?: number
+    extraCostVndPerLiter?: number
+    fundAdjustmentVndPerLiter?: number
+    contractPaymentRate?: number
+    bankGuaranteeRate?: number
+    note?: string
+}
 
 @Injectable()
 export class PurchaseTermPricingService {
@@ -53,6 +80,312 @@ export class PurchaseTermPricingService {
          */
 
         return (usdPerBbl * fxRate) / 158.987
+    }
+
+    private stripVietnamese(value: string) {
+        return value
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/đ/g, 'd')
+            .replace(/Đ/g, 'D')
+            .toLowerCase()
+    }
+
+    private parseVietnameseNumber(value?: string | null): number | undefined {
+        if (!value) {
+            return undefined
+        }
+
+        const cleaned = value.replace(/[^\d,.-]/g, '').trim()
+
+        if (!cleaned) {
+            return undefined
+        }
+
+        const normalized = cleaned.includes(',')
+            ? cleaned.replace(/\./g, '').replace(',', '.')
+            : cleaned.replace(/\./g, '')
+
+        const numberValue = Number(normalized)
+
+        return Number.isFinite(numberValue) ? numberValue : undefined
+    }
+
+    private parseQuoteNumber(value?: string | null): number | undefined {
+        if (!value) {
+            return undefined
+        }
+
+        const cleaned = value.replace(/[^\d,.-]/g, '').trim()
+
+        if (!cleaned) {
+            return undefined
+        }
+
+        const normalized = cleaned.includes(',')
+            ? cleaned.replace(/\./g, '').replace(',', '.')
+            : cleaned.replace(',', '.')
+
+        const numberValue = Number(normalized)
+
+        return Number.isFinite(numberValue) ? numberValue : undefined
+    }
+
+    private parseMoneyNumber(value?: string | null): number | undefined {
+        if (!value) {
+            return undefined
+        }
+
+        const cleaned = value.replace(/[^\d,.-]/g, '').trim()
+
+        if (!cleaned) {
+            return undefined
+        }
+
+        const numberValue = Number(cleaned.replace(/[.,]/g, ''))
+
+        return Number.isFinite(numberValue) ? numberValue : undefined
+    }
+
+    private parseVietnameseDate(value?: string | null): string | undefined {
+        if (!value) {
+            return undefined
+        }
+
+        const match = value.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+
+        if (!match) {
+            return undefined
+        }
+
+        const day = match[1].padStart(2, '0')
+        const month = match[2].padStart(2, '0')
+        const year = match[3]
+
+        return `${year}-${month}-${day}`
+    }
+
+    private extractNumbers(line: string) {
+        const matches = line.match(/-?\d{1,3}(?:[.,]\d{3})*(?:,\d+)?|-?\d+(?:,\d+)?/g) ?? []
+        return matches.map((item) => this.parseVietnameseNumber(item)).filter((item): item is number => item !== undefined)
+    }
+
+    private lastNumberFromLine(line?: string) {
+        if (!line) {
+            return undefined
+        }
+
+        const numbers = this.extractNumbers(line)
+        return numbers.length ? numbers[numbers.length - 1] : undefined
+    }
+
+    private lastMoneyFromLine(line?: string) {
+        if (!line) {
+            return undefined
+        }
+
+        const matches = line.match(/-?\d{1,3}(?:[.,]\d{3}){2,}|-?\d{4,}/g) ?? []
+        const values = matches.map((item) => this.parseMoneyNumber(item)).filter((item): item is number => item !== undefined)
+        return values.length ? values[values.length - 1] : undefined
+    }
+
+    private findLine(lines: string[], keywords: string[]) {
+        const normalizedKeywords = keywords.map((item) => this.stripVietnamese(item))
+
+        return lines.find((line) => {
+            const normalizedLine = this.stripVietnamese(line)
+            return normalizedKeywords.every((keyword) => normalizedLine.includes(keyword))
+        })
+    }
+
+    private findLineAny(lines: string[], keywordSets: string[][]) {
+        for (const keywords of keywordSets) {
+            const line = this.findLine(lines, keywords)
+            if (line) {
+                return line
+            }
+        }
+
+        return undefined
+    }
+
+    private async readImageText(file: Express.Multer.File) {
+        const worker = await Tesseract.createWorker(['vie', 'eng'], Tesseract.OEM.LSTM_ONLY, {
+            cachePath: '.cache/tesseract',
+        })
+
+        try {
+            await worker.setParameters({
+                preserve_interword_spaces: '1',
+                user_defined_dpi: '300',
+                tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+            })
+
+            const result = await worker.recognize(file.buffer)
+            return result.data.text || ''
+        } finally {
+            await worker.terminate()
+        }
+    }
+
+    private extractPricingSheetFields(text: string) {
+        const warnings: string[] = []
+        const lines = text
+            .split(/\r?\n/)
+            .map((line) => line.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+
+        const fields: ImportedPricingFields = {
+            insuranceAmountVnd: 0,
+            inspectionFeeVnd: 0,
+            transportFeeVnd: 0,
+            storageFeeVnd: 0,
+            transportLossAmountVnd: 0,
+            transportDeductionVnd: 0,
+            specialConsumptionTaxUsdPerBbl: 0,
+            contractPaymentRate: 100,
+            bankGuaranteeRate: 0,
+        }
+
+        const priceDays: Array<{ quoteDate: string; priceUsdPerBbl: number }> = []
+        const dateValueRegex = /^\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})\s+(\d{1,3}(?:[.,]\d{1,3})?)\s*$/
+
+        for (const line of lines) {
+            const dateValueMatch = line.match(dateValueRegex)
+            const quoteDate = this.parseVietnameseDate(dateValueMatch?.[1])
+            const priceUsdPerBbl = this.parseQuoteNumber(dateValueMatch?.[2])
+
+            if (quoteDate && priceUsdPerBbl !== undefined && priceUsdPerBbl > 0 && priceUsdPerBbl < 1000) {
+                priceDays.push({ quoteDate, priceUsdPerBbl })
+            }
+        }
+
+        if (priceDays.length) {
+            fields.priceDays = priceDays.slice(0, 11)
+            fields.plattsBaseDate = fields.priceDays[fields.priceDays.length - 1]?.quoteDate
+            fields.mopsAvgUsdPerBbl =
+                fields.priceDays.reduce((sum, item) => sum + item.priceUsdPerBbl, 0) / fields.priceDays.length
+        }
+
+        const mops = this.lastNumberFromLine(this.findLine(lines, ['gia trung binh', 'mops']))
+        const premium = this.lastNumberFromLine(this.findLineAny(lines, [['premium'], ['prem'], ['rem']]))
+        const fob = this.lastNumberFromLine(this.findLine(lines, ['fob']))
+        const literQty = this.lastNumberFromLine(this.findLineAny(lines, [['so luong lit'], ['so luong', 'thuc te'], ['so luong', 'it']]))
+        const barrelQty = this.lastNumberFromLine(this.findLineAny(lines, [['so luong thung'], ['so luong thing'], ['so luong', 'thing']]))
+        const fxLine = this.findLine(lines, ['ty gia'])
+        const fxRate = this.lastNumberFromLine(fxLine)
+        const envTax = this.lastNumberFromLine(this.findLine(lines, ['thue moi truong']))
+        const fundAdjustment = this.lastNumberFromLine(this.findLine(lines, ['quy binh on'])) ?? this.lastNumberFromLine(this.findLine(lines, ['trich', 'chi quy']))
+        const extraCostPerLiter = this.lastNumberFromLine(this.findLineAny(lines, [['chi phi khac'], ['chi phi khac']]))
+        const beforeVatAmount = this.lastMoneyFromLine(this.findLineAny(lines, [['thanh tien truoc thue'], ['thanh tien truoc thue vat']]))
+        const contractAmount = this.lastMoneyFromLine(this.findLineAny(lines, [['gia tri thanh toan truoc'], ['gia tri thanh toan truoc theo hop dong']]))
+
+        if (mops !== undefined) {
+            const calculatedMops = fields.priceDays?.length
+                ? fields.priceDays.reduce((sum, item) => sum + item.priceUsdPerBbl, 0) / fields.priceDays.length
+                : undefined
+
+            if (calculatedMops !== undefined && Math.abs(calculatedMops - mops) > 0.01) {
+                warnings.push('Trung bình 11 ngày giá lệch với dòng MOPS trên file, cần kiểm tra lại ngày giá OCR.')
+            }
+
+            fields.mopsAvgUsdPerBbl = mops
+        }
+        if (premium !== undefined) fields.premiumUsdPerBbl = premium
+        if (literQty !== undefined) fields.tankQtyLiter = literQty
+        if (barrelQty !== undefined) fields.billBarrelQty = barrelQty
+        if (fxRate !== undefined) fields.fxRate = fxRate
+        if (envTax !== undefined) fields.envTaxVndPerLiter = envTax
+        if (fundAdjustment !== undefined) fields.fundAdjustmentVndPerLiter = fundAdjustment
+
+        if (extraCostPerLiter !== undefined) {
+            fields.extraCostVndPerLiter = fields.tankQtyLiter ? extraCostPerLiter * fields.tankQtyLiter : extraCostPerLiter
+        }
+
+        if (fob !== undefined && fields.mopsAvgUsdPerBbl !== undefined && fields.premiumUsdPerBbl !== undefined) {
+            fields.specialConsumptionTaxUsdPerBbl = Number((fob - fields.mopsAvgUsdPerBbl - fields.premiumUsdPerBbl).toFixed(3))
+        }
+
+        if (fxLine) {
+            const fxDate = this.parseVietnameseDate(fxLine)
+            if (fxDate) {
+                fields.fxRateDate = fxDate
+            }
+        }
+
+        if (contractAmount !== undefined && beforeVatAmount && beforeVatAmount > 0) {
+            fields.contractPaymentRate = Number(((contractAmount / beforeVatAmount) * 100).toFixed(3))
+        }
+
+        const deliveryLine = this.findLine(lines, ['ngay giao nhan'])
+        const receivingModeLine = this.findLine(lines, ['hinh thuc nhan hang'])
+        const warehouseLine = this.findLine(lines, ['kho den'])
+        const productLine = this.findLine(lines, ['san pham'])
+        const noteParts = [deliveryLine, receivingModeLine, warehouseLine, productLine].filter(Boolean)
+
+        if (noteParts.length) {
+            fields.note = noteParts.join('\n')
+        }
+
+        if (!fields.priceDays?.length) {
+            warnings.push('Không đọc được 11 ngày giá Platts từ file.')
+        }
+
+        if (!fields.fxRate) {
+            warnings.push('Không đọc được tỷ giá tạm tính từ file.')
+        }
+
+        if (!fields.tankQtyLiter) {
+            warnings.push('Không đọc được số lượng lít từ file.')
+        }
+
+        return { fields, warnings }
+    }
+
+    async importPricingSheetPreview(file: Express.Multer.File) {
+        const mimeType = file.mimetype || ''
+        const originalName = file.originalname || ''
+
+        let text = ''
+        let sourceType = 'TEXT'
+
+        if (mimeType.startsWith('image/')) {
+            text = await this.readImageText(file)
+            sourceType = 'IMAGE_OCR'
+        } else if (mimeType === 'application/pdf' || originalName.toLowerCase().endsWith('.pdf')) {
+            const parsed = await pdf(file.buffer)
+            text = parsed.text || ''
+            sourceType = 'PDF_TEXT'
+        } else if (mimeType.startsWith('text/') || originalName.toLowerCase().endsWith('.txt')) {
+            text = file.buffer.toString('utf8')
+        } else {
+            throw new BadRequestException('Chỉ hỗ trợ PDF có text, TXT hoặc ảnh sau khi cấu hình OCR')
+        }
+
+        if (!text.trim()) {
+            return {
+                supported: false,
+                sourceType,
+                message: 'File không có text để bóc dữ liệu.',
+                fields: {},
+                warnings: ['Không đọc được text trong file.'],
+            }
+        }
+
+        const result = this.extractPricingSheetFields(text)
+        const extractedCount = Object.values(result.fields).filter((value) => {
+            if (Array.isArray(value)) return value.length > 0
+            return value !== undefined && value !== null && value !== ''
+        }).length
+
+        return {
+            supported: extractedCount > 0,
+            sourceType,
+            message: extractedCount > 0 ? 'Đã đọc dữ liệu bảng giá. Vui lòng kiểm tra lại trước khi lưu.' : 'Không nhận diện được dữ liệu bảng giá từ file.',
+            fields: result.fields,
+            warnings: result.warnings,
+            rawTextPreview: text.slice(0, 3000),
+        }
     }
 
     /*

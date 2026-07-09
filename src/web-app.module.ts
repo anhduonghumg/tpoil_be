@@ -42,6 +42,7 @@ import { PurchaseTermModule } from './modules/purchases/purchase-term/purchase-t
 import { CommodityPriceQuotesModule } from './modules/commodity-price-quotes/commodity-price-quotes.module'
 import { VcbFxRatesModule } from './modules/vcb-fx-rates/vcb-fx-rates.module'
 import { EnvironmentTaxesModule } from './modules/environment-taxes/environment-taxes.module'
+import { OperationsModule } from './modules/operations/operations.module'
 
 @Module({
     imports: [
@@ -73,6 +74,7 @@ import { EnvironmentTaxesModule } from './modules/environment-taxes/environment-
         CommodityPriceQuotesModule,
         VcbFxRatesModule,
         EnvironmentTaxesModule,
+        OperationsModule,
 
         BankingModule,
         BankPurposesModule,

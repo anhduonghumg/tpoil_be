@@ -78,4 +78,12 @@ export const PERMISSIONS = {
         update: 'sales.update',
         delete: 'sales.delete',
     },
+    operations: {
+        view: 'operations.view',
+        charterManage: 'operations.charter.manage',
+        warehouseManage: 'operations.warehouse.manage',
+        roadManage: 'operations.road.manage',
+        managePartners: 'operations.partners.manage',
+        postTermCosts: 'operations.term_costs.post',
+    },
 } as const

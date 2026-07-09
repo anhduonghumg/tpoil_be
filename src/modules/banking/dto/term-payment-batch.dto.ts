@@ -1,5 +1,6 @@
 import { TermPaymentBatchFileType, TermPaymentBatchItemStatus, TermPaymentBatchStatus } from '@prisma/client'
-import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
+import { Type } from 'class-transformer'
+import { IsArray, IsDateString, IsEnum, IsInt, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
 
 export class QueryTermPaymentBatchesDto {
     @IsOptional()
@@ -15,11 +16,15 @@ export class QueryTermPaymentBatchesDto {
     keyword?: string
 
     @IsOptional()
-    @IsNumber()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
     page?: number
 
     @IsOptional()
-    @IsNumber()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
     pageSize?: number
 }
 
@@ -56,6 +61,7 @@ export class MatchTermPaymentBatchItemDto {
     bankTransactionId!: string
 
     @IsOptional()
+    @Type(() => Number)
     @IsNumber()
     @Min(0)
     paidAmountVnd?: number

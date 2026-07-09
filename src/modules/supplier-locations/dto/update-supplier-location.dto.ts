@@ -28,4 +28,16 @@ export class UpdateSupplierLocationDto {
     @IsOptional()
     @IsBoolean()
     isActive?: boolean
+
+    @IsOptional()
+    @IsString()
+    warehouseType?: string
+
+    @IsOptional()
+    @IsBoolean()
+    isOperationalWarehouse?: boolean
+
+    @IsOptional()
+    @IsString()
+    note?: string
 }

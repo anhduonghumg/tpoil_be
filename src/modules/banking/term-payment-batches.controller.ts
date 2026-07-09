@@ -38,7 +38,7 @@ export class TermPaymentBatchesController {
         FileInterceptor('file', {
             storage: memoryStorage(),
             limits: {
-                fileSize: 20 * 1024 * 1024,
+                fileSize: 8 * 1024 * 1024,
             },
         }),
     )
@@ -49,5 +49,10 @@ export class TermPaymentBatchesController {
     @Post(':id/items/:itemId/match')
     matchItem(@Param('id') id: string, @Param('itemId') itemId: string, @Body() dto: MatchTermPaymentBatchItemDto) {
         return this.service.matchItem(id, itemId, dto)
+    }
+
+    @Post(':id/items/:itemId/confirm-paid')
+    confirmItemPaid(@Param('id') id: string, @Param('itemId') itemId: string) {
+        return this.service.confirmItemPaid(id, itemId)
     }
 }

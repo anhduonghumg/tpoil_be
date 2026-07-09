@@ -6,6 +6,7 @@ import { QueryBankTransactionsDto } from './dto/query-bank-transactions.dto'
 import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
 import { DeleteMultipleBankTransactionsDto } from './dto/delete-multiple-bank-transactions.dto'
+import { CreateManualBankTransactionDto } from './dto/create-manual-bank-transaction.dto'
 
 @Controller('banking')
 export class BankingController {
@@ -19,6 +20,11 @@ export class BankingController {
     @Get('transactions/:id')
     getTransaction(@Param('id') id: string) {
         return this.bankingService.getTransactionDetail(id)
+    }
+
+    @Post('transactions/manual')
+    createManualTransaction(@Body() body: CreateManualBankTransactionDto) {
+        return this.bankingService.createManualTransaction(body)
     }
 
     @Get('transactions/:id/suggestions')
@@ -52,6 +58,19 @@ export class BankingController {
     )
     createImport(@UploadedFile() file: Express.Multer.File, @Body() body: CreateBankImportDto) {
         return this.bankingService.importStatement(file, body)
+    }
+
+    @Post('imports/preview')
+    @UseInterceptors(
+        FileInterceptor('file', {
+            storage: memoryStorage(),
+            limits: {
+                fileSize: 10 * 1024 * 1024,
+            },
+        }),
+    )
+    previewImport(@UploadedFile() file: Express.Multer.File, @Body() body: CreateBankImportDto) {
+        return this.bankingService.previewImportStatement(file, body)
     }
 
     @Delete('transactions/:id')

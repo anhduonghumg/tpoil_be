@@ -9,6 +9,7 @@ import {
     TermBankInstructionStatus,
     TermPaymentRequestStatus,
 } from '@prisma/client'
+import * as crypto from 'crypto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { UploadService } from 'src/modules/uploads/uploads.service'
 import { CreateTermPaymentBatchDto, MatchTermPaymentBatchItemDto, QueryTermPaymentBatchesDto, UploadTermPaymentBatchFileDto } from './dto/term-payment-batch.dto'
@@ -23,6 +24,12 @@ export class TermPaymentBatchesService {
     private toDateOnly(value?: string | null): Date {
         if (!value) return new Date()
         return new Date(`${value}T00:00:00.000Z`)
+    }
+
+    private fileChecksum(file: Express.Multer.File) {
+        const source = file.buffer
+        if (!source) return null
+        return crypto.createHash('sha256').update(source).digest('hex')
     }
 
     private period(date: Date): string {
@@ -338,17 +345,52 @@ export class TermPaymentBatchesService {
         if (!batch) throw new NotFoundException('TERM_PAYMENT_BATCH_NOT_FOUND')
         if (!file) throw new BadRequestException('FILE_REQUIRED')
 
+        const fileType = dto.fileType ?? TermPaymentBatchFileType.OTHER
+        if (fileType !== TermPaymentBatchFileType.EXPORTED_LIST && fileType !== TermPaymentBatchFileType.UNC) {
+            throw new BadRequestException('TERM_PAYMENT_BATCH_FILE_TYPE_NOT_ALLOWED')
+        }
+
+        const existingFiles = await this.prisma.termPaymentBatchFile.findMany({
+            where: { batchId: id },
+            orderBy: { createdAt: 'asc' },
+        })
+
+        const checksum = this.fileChecksum(file)
+        const sameFile = checksum ? existingFiles.find((item) => item.fileChecksum === checksum) : null
+        if (sameFile) {
+            return sameFile
+        }
+
+        const sameType = existingFiles.find((item) => item.fileType === fileType)
+        const uncFileCount = existingFiles.filter((item) => item.fileType === TermPaymentBatchFileType.UNC).length
+        if (fileType === TermPaymentBatchFileType.UNC && uncFileCount >= 3) {
+            throw new BadRequestException('TERM_PAYMENT_BATCH_MAX_3_UNC_FILES')
+        }
+
         const saved = this.uploadService.saveLocal(file, 'term-payment-batches')
+        const data = {
+            fileType,
+            fileName: saved.originalName,
+            fileUrl: saved.url,
+            fileChecksum: saved.checksum ?? checksum,
+            mimeType: saved.mimeType,
+            sizeBytes: saved.sizeBytes,
+            note: dto.note?.trim() || null,
+        }
+
+        if (fileType === TermPaymentBatchFileType.EXPORTED_LIST && sameType) {
+            const updated = await this.prisma.termPaymentBatchFile.update({
+                where: { id: sameType.id },
+                data,
+            })
+            await this.uploadService.deleteByUrls([sameType.fileUrl])
+            return updated
+        }
+
         return this.prisma.termPaymentBatchFile.create({
             data: {
                 batchId: id,
-                fileType: dto.fileType ?? TermPaymentBatchFileType.OTHER,
-                fileName: saved.originalName,
-                fileUrl: saved.url,
-                fileChecksum: saved.checksum,
-                mimeType: saved.mimeType,
-                sizeBytes: saved.sizeBytes,
-                note: dto.note?.trim() || null,
+                ...data,
             },
         })
     }
@@ -359,7 +401,7 @@ export class TermPaymentBatchesService {
                 id: itemId,
                 batchId,
                 status: {
-                    not: TermPaymentBatchItemStatus.CANCELLED,
+                    notIn: [TermPaymentBatchItemStatus.CANCELLED, TermPaymentBatchItemStatus.FAILED],
                 },
             },
             include: {
@@ -367,26 +409,179 @@ export class TermPaymentBatchesService {
             },
         })
         if (!item) throw new NotFoundException('TERM_PAYMENT_BATCH_ITEM_NOT_FOUND')
+        if (item.status === TermPaymentBatchItemStatus.PAID) throw new BadRequestException('TERM_PAYMENT_BATCH_ITEM_ALREADY_PAID')
+
+        const uncFile = await this.prisma.termPaymentBatchFile.findFirst({
+            where: {
+                batchId,
+                fileType: TermPaymentBatchFileType.UNC,
+            },
+            select: { id: true },
+        })
+        if (!uncFile) throw new BadRequestException('TERM_PAYMENT_UNC_FILE_REQUIRED')
 
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id: dto.bankTransactionId },
         })
         if (!txn) throw new BadRequestException('BANK_TRANSACTION_NOT_FOUND')
         if (txn.direction !== BankTxnDirection.OUT) throw new BadRequestException('ONLY_OUT_TRANSACTION_SUPPORTED')
+        if (txn.isConfirmed || txn.matchStatus !== BankTxnMatchStatus.UNMATCHED) {
+            throw new BadRequestException('BANK_TRANSACTION_ALREADY_MATCHED')
+        }
 
-        const paidAmount = dto.paidAmountVnd ?? Math.min(Number(txn.amount || 0), Number(item.amountVnd || 0))
-        const nextStatus =
-            dto.status ??
-            (paidAmount + 0.0001 >= Number(item.amountVnd || 0) ? TermPaymentBatchItemStatus.PAID : TermPaymentBatchItemStatus.PARTIALLY_PAID)
+        const usedTxn = await this.prisma.purchaseTermBankInstruction.findFirst({
+            where: {
+                bankTransactionId: dto.bankTransactionId,
+                status: {
+                    not: TermBankInstructionStatus.CANCELLED,
+                },
+            },
+            select: { id: true },
+        })
+        if (usedTxn) throw new BadRequestException('BANK_TRANSACTION_ALREADY_USED_FOR_TERM_PAYMENT')
 
         return this.prisma.$transaction(async (tx) => {
+            const matchedAggregate = await tx.purchaseTermBankInstruction.aggregate({
+                where: {
+                    paymentRequestId: item.paymentRequestId,
+                    bankTransactionId: {
+                        not: null,
+                    },
+                    status: {
+                        not: TermBankInstructionStatus.CANCELLED,
+                    },
+                },
+                _sum: {
+                    amountVnd: true,
+                },
+            })
+
+            const requiredAmount = Number(item.amountVnd || 0)
+            const previousMatchedAmount = Number(matchedAggregate._sum.amountVnd || 0)
+            const remainingAmount = Math.max(requiredAmount - previousMatchedAmount, 0)
+            if (remainingAmount <= 0) {
+                throw new BadRequestException('TERM_PAYMENT_REQUEST_ALREADY_MATCHED')
+            }
+
+            const matchedAmount = dto.paidAmountVnd ?? Math.min(Number(txn.amount || 0), remainingAmount)
+            if (matchedAmount <= 0) {
+                throw new BadRequestException('TERM_PAYMENT_AMOUNT_INVALID')
+            }
+
+            await tx.purchaseTermBankInstruction.create({
+                data: {
+                    purchaseOrderId: item.purchaseOrderId,
+                    paymentRequestId: item.paymentRequestId,
+                    bankTransactionId: dto.bankTransactionId,
+                    instructionNo: txn.externalRef ?? null,
+                    instructionDate: txn.txnDate,
+                    amountVnd: new Prisma.Decimal(matchedAmount),
+                    beneficiaryName: item.beneficiaryName,
+                    beneficiaryBankAccount: item.beneficiaryBankAccount,
+                    beneficiaryBankName: item.beneficiaryBankName,
+                    content: item.transferContent,
+                    status: TermBankInstructionStatus.SENT,
+                    note: dto.note?.trim() || null,
+                },
+            })
+
             const updated = await tx.termPaymentBatchItem.update({
                 where: { id: itemId },
                 data: {
                     bankTransactionId: dto.bankTransactionId,
-                    paidAmountVnd: new Prisma.Decimal(paidAmount),
-                    status: nextStatus,
+                    status: item.status === TermPaymentBatchItemStatus.PENDING ? TermPaymentBatchItemStatus.SENT : item.status,
                     note: dto.note?.trim() || item.note,
+                },
+            })
+
+            await tx.bankTransaction.update({
+                where: { id: dto.bankTransactionId },
+                data: {
+                    matchStatus: BankTxnMatchStatus.MANUAL_MATCHED,
+                },
+            })
+
+            await this.refreshBatchStatus(tx, batchId)
+
+            return updated
+        })
+    }
+
+    async confirmItemPaid(batchId: string, itemId: string) {
+        const item = await this.prisma.termPaymentBatchItem.findFirst({
+            where: {
+                id: itemId,
+                batchId,
+                status: {
+                    notIn: [TermPaymentBatchItemStatus.CANCELLED, TermPaymentBatchItemStatus.FAILED],
+                },
+            },
+            include: {
+                paymentRequest: true,
+            },
+        })
+        if (!item) throw new NotFoundException('TERM_PAYMENT_BATCH_ITEM_NOT_FOUND')
+        if (item.status === TermPaymentBatchItemStatus.PAID) throw new BadRequestException('TERM_PAYMENT_BATCH_ITEM_ALREADY_PAID')
+
+        return this.prisma.$transaction(async (tx) => {
+            const instructions = await tx.purchaseTermBankInstruction.findMany({
+                where: {
+                    paymentRequestId: item.paymentRequestId,
+                    bankTransactionId: {
+                        not: null,
+                    },
+                    status: {
+                        in: [TermBankInstructionStatus.SENT, TermBankInstructionStatus.MATCHED],
+                    },
+                },
+                select: {
+                    id: true,
+                    bankTransactionId: true,
+                    amountVnd: true,
+                },
+            })
+
+            if (!instructions.length) {
+                throw new BadRequestException('TERM_PAYMENT_MATCHED_TRANSACTION_REQUIRED')
+            }
+
+            const totalPaidAmount = instructions.reduce((sum, instruction) => sum + Number(instruction.amountVnd || 0), 0)
+            const requiredAmount = Number(item.amountVnd || 0)
+            const nextStatus =
+                totalPaidAmount + 0.0001 >= requiredAmount ? TermPaymentBatchItemStatus.PAID : TermPaymentBatchItemStatus.PARTIALLY_PAID
+
+            await tx.purchaseTermBankInstruction.updateMany({
+                where: {
+                    id: {
+                        in: instructions.map((instruction) => instruction.id),
+                    },
+                },
+                data: {
+                    status: TermBankInstructionStatus.MATCHED,
+                },
+            })
+
+            const bankTransactionIds = instructions.map((instruction) => instruction.bankTransactionId).filter((id): id is string => !!id)
+            if (bankTransactionIds.length) {
+                await tx.bankTransaction.updateMany({
+                    where: {
+                        id: {
+                            in: bankTransactionIds,
+                        },
+                    },
+                    data: {
+                        matchStatus: BankTxnMatchStatus.MANUAL_MATCHED,
+                        isConfirmed: true,
+                        confirmedAt: new Date(),
+                    },
+                })
+            }
+
+            const updated = await tx.termPaymentBatchItem.update({
+                where: { id: itemId },
+                data: {
+                    paidAmountVnd: new Prisma.Decimal(totalPaidAmount),
+                    status: nextStatus,
                 },
             })
 
@@ -397,51 +592,6 @@ export class TermPaymentBatchesService {
                         nextStatus === TermPaymentBatchItemStatus.PAID
                             ? TermPaymentRequestStatus.PAID
                             : TermPaymentRequestStatus.PARTIALLY_PAID,
-                },
-            })
-
-            const bankInstruction = await tx.purchaseTermBankInstruction.findFirst({
-                where: {
-                    paymentRequestId: item.paymentRequestId,
-                    status: {
-                        not: TermBankInstructionStatus.CANCELLED,
-                    },
-                },
-            })
-
-            if (bankInstruction) {
-                await tx.purchaseTermBankInstruction.update({
-                    where: { id: bankInstruction.id },
-                    data: {
-                        bankTransactionId: dto.bankTransactionId,
-                        amountVnd: new Prisma.Decimal(paidAmount),
-                        status: TermBankInstructionStatus.MATCHED,
-                        note: dto.note?.trim() || bankInstruction.note,
-                    },
-                })
-            } else {
-                await tx.purchaseTermBankInstruction.create({
-                    data: {
-                    purchaseOrderId: item.purchaseOrderId,
-                    paymentRequestId: item.paymentRequestId,
-                    bankTransactionId: dto.bankTransactionId,
-                    amountVnd: new Prisma.Decimal(paidAmount),
-                    beneficiaryName: item.beneficiaryName,
-                    beneficiaryBankAccount: item.beneficiaryBankAccount,
-                    beneficiaryBankName: item.beneficiaryBankName,
-                    content: item.transferContent,
-                    status: TermBankInstructionStatus.MATCHED,
-                    note: dto.note?.trim() || null,
-                    },
-                })
-            }
-
-            await tx.bankTransaction.update({
-                where: { id: dto.bankTransactionId },
-                data: {
-                    matchStatus: BankTxnMatchStatus.MANUAL_MATCHED,
-                    isConfirmed: true,
-                    confirmedAt: new Date(),
                 },
             })
 

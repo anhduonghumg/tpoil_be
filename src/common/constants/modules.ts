@@ -22,6 +22,7 @@ export const MODULE_CODES = {
     PRICE_BULLETIN: 'Bảng giá',
     BACKGROUND_JOBS: 'Công việc nền',
     JOB_ARTIFACTS: 'Tệp công việc nền',
+    OPERATIONS: 'Vận hành',
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]

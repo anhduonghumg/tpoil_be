@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Prisma, PurchaseBizType, PricingStageType, TermOrderDocumentSourceType, TermOrderDocumentStatus } from '@prisma/client'
 import { createHash } from 'crypto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-import { PrintTermOrderDocumentsDto } from './dto/print-term-order-documents.dto'
+import { GenerateTermOrderDocumentDto, PrintTermOrderDocumentsDto } from './dto/print-term-order-documents.dto'
 
 @Injectable()
 export class PurchaseTermOrderDocumentsService {
@@ -15,7 +15,7 @@ export class PurchaseTermOrderDocumentsService {
 
     constructor(private readonly prisma: PrismaService) {}
 
-    async generate(purchaseOrderId: string) {
+    async generate(purchaseOrderId: string, options: GenerateTermOrderDocumentDto = {}) {
         const order = await this.getOrder(purchaseOrderId)
 
         return this.prisma.$transaction(async (tx) => {
@@ -29,7 +29,7 @@ export class PurchaseTermOrderDocumentsService {
                 },
             })
 
-            const snapshot = this.buildSnapshot(order)
+            const snapshot = this.buildSnapshot(order, options)
 
             return tx.purchaseTermOrderDocument.create({
                 data: {
@@ -109,7 +109,7 @@ export class PurchaseTermOrderDocumentsService {
                 if (byOrderId.has(id)) continue
 
                 try {
-                    const created = await this.generate(id)
+                    const created = await this.generate(id, dto.documentOptions ?? {})
                     byOrderId.set(id, created)
                 } catch (error: any) {
                     skipped.push({
@@ -183,14 +183,14 @@ export class PurchaseTermOrderDocumentsService {
         return order
     }
 
-    private buildSnapshot(order: any) {
+    private buildSnapshot(order: any, options: GenerateTermOrderDocumentDto = {}) {
         const estimate = this.findEstimateStage(order)
 
         if (estimate) {
-            return this.buildFromEstimate(order, estimate)
+            return this.buildFromEstimate(order, estimate, options)
         }
 
-        return this.buildDirect(order)
+        return this.buildDirect(order, options)
     }
 
     private findEstimateStage(order: any) {
@@ -202,7 +202,7 @@ export class PurchaseTermOrderDocumentsService {
         return null
     }
 
-    private buildFromEstimate(order: any, stage: any) {
+    private buildFromEstimate(order: any, stage: any, options: GenerateTermOrderDocumentDto = {}) {
         const qty = this.toNumber(stage.tankQtyLiter) || (stage.lines || []).reduce((sum: number, line: any) => sum + this.toNumber(line.qtyV15 ?? line.qtyActual), 0)
         const totalAmount = this.toNumber(stage.totalAmountVnd ?? stage.temporaryAmountVnd)
         const amountBeforeVat = this.toNumber(stage.temporaryAmountVnd ?? stage.totalAmountVnd)
@@ -226,9 +226,10 @@ export class PurchaseTermOrderDocumentsService {
                     qty,
                     unitPrice,
                     updatedAt: stage.updatedAt,
+                    options,
                 }),
                 priceBasisNote: this.buildPriceBasisNote(stage),
-            }),
+            }, options),
             lines,
         }
     }
@@ -267,7 +268,7 @@ export class PurchaseTermOrderDocumentsService {
         })
     }
 
-    private buildDirect(order: any) {
+    private buildDirect(order: any, options: GenerateTermOrderDocumentDto = {}) {
         if (!order.lines?.length) {
             throw new BadRequestException('TERM_ORDER_LINES_REQUIRED')
         }
@@ -316,15 +317,17 @@ export class PurchaseTermOrderDocumentsService {
                         tax: line.taxRate,
                     })),
                     updatedAt: order.updatedAt,
+                    options,
                 }),
                 priceBasisNote: 'Giá thanh toán trên dựa trên giá nhập tại nhà máy',
-            }),
+            }, options),
             lines,
         }
     }
 
-    private buildHeader(order: any, args: any) {
+    private buildHeader(order: any, args: any, options: GenerateTermOrderDocumentDto = {}) {
         const nextVersion = (order.termOrderDocuments?.length || 0) + 1
+        const paymentMethodText = options.paymentMethodText?.trim() || order.paymentNote || 'Chuyển khoản'
 
         return {
             purchaseOrderId: order.id,
@@ -342,9 +345,9 @@ export class PurchaseTermOrderDocumentsService {
             contractNo: order.contractNo ?? order.contract?.code ?? null,
             appendixNo: null,
             deliveryTimeText: order.expectedDate ? `Dự kiến ngày ${this.formatShortDate(order.expectedDate)}` : null,
-            deliveryLocation: order.deliveryLocation ?? order.supplierLocation?.name ?? null,
-            paymentMethodText: order.paymentNote ?? 'Chuyển khoản',
-            priceBasisNote: args.priceBasisNote,
+            deliveryLocation: this.buildDeliveryLocation(order, options.deliveryMode),
+            paymentMethodText,
+            priceBasisNote: this.buildOriginPriceBasisNote(options.originSource, args.priceBasisNote),
             officialPriceNote: 'Đơn giá thanh toán sẽ điều chỉnh khi có giá chính thức của nhà máy',
             includedTaxNote: 'Đơn giá trên đã bao gồm thuế GTGT, thuế BVMT và quỹ bình ổn',
             totalQtyLiter: new Prisma.Decimal(args.totalQtyLiter),
@@ -376,6 +379,25 @@ export class PurchaseTermOrderDocumentsService {
         if (storageFee > 0) parts.push('đã bao gồm phí thuê kho và hao hụt tồn chứa bơm rót')
 
         return parts.join(', ')
+    }
+
+    private buildDeliveryLocation(order: any, deliveryMode?: GenerateTermOrderDocumentDto['deliveryMode']) {
+        if (deliveryMode === 'FACTORY') return 'Nhà máy'
+        if (deliveryMode === 'WAREHOUSE') return order.deliveryLocation ?? order.supplierLocation?.name ?? 'Kho'
+        return order.deliveryLocation ?? order.supplierLocation?.name ?? null
+    }
+
+    private buildOriginPriceBasisNote(originSource?: GenerateTermOrderDocumentDto['originSource'], fallback?: string | null) {
+        if (originSource === 'BINH_SON') {
+            return 'Giá thanh toán trên dựa trên giá nhập tại Nhà máy lọc dầu Bình Sơn'
+        }
+        if (originSource === 'NGHI_SON') {
+            return 'Giá thanh toán trên dựa trên giá nhập tại NMLD Nghi Sơn'
+        }
+        if (originSource === 'IMPORT') {
+            return 'Giá thanh toán trên dựa trên giá nhập khẩu'
+        }
+        return fallback ?? 'Giá thanh toán trên dựa trên giá nhập tại nhà máy'
     }
 
     private getVatRate(order: any) {

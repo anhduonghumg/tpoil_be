@@ -1,5 +1,5 @@
 import { IsEnum, IsOptional, IsString, IsUUID } from 'class-validator'
-import { PaymentMode, PurchaseOrderStatus, PurchaseOrderType } from '@prisma/client'
+import { PaymentMode, PurchaseOrderStatus, PurchaseOrderType, TermPaymentRequestStatus } from '@prisma/client'
 
 export class ListTermPurchaseOrdersQueryDto {
     @IsOptional()
@@ -17,6 +17,10 @@ export class ListTermPurchaseOrdersQueryDto {
     @IsOptional()
     @IsEnum(PaymentMode)
     paymentMode?: PaymentMode
+
+    @IsOptional()
+    @IsEnum(TermPaymentRequestStatus)
+    paymentStatus?: TermPaymentRequestStatus
 
     @IsOptional()
     @IsUUID()

@@ -21,9 +21,11 @@ import { VcbFxService } from './vcb-fx.service'
 import { PrismaModule } from 'src/infra/prisma/prisma.module'
 import { VcbFxRatesModule } from 'src/modules/vcb-fx-rates/vcb-fx-rates.module'
 import { EnvironmentTaxesModule } from 'src/modules/environment-taxes/environment-taxes.module'
+import { UploadModule } from 'src/modules/uploads/uploads.module'
+import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-availability.service'
 
 @Module({
-    imports: [PrismaModule, VcbFxRatesModule, EnvironmentTaxesModule],
+    imports: [PrismaModule, VcbFxRatesModule, EnvironmentTaxesModule, UploadModule],
     controllers: [
         PurchaseTermOrdersController,
         PurchaseTermOrderDocumentsController,
@@ -45,6 +47,7 @@ import { EnvironmentTaxesModule } from 'src/modules/environment-taxes/environmen
         PurchaseTermShipmentsService,
         PurchaseTermLogisticsCostsService,
         VcbFxService,
+        WarehouseAvailabilityService,
     ],
     exports: [
         PurchaseTermOrdersService,

@@ -2,10 +2,14 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Prisma, GoodsReceiptStatus, PurchaseOrderStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateGoodsReceiptAutoConfirmDto, ListGoodsReceiptsQueryDto } from './dto/create-goods-receipt.dto'
+import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-availability.service'
 
 @Injectable()
 export class GoodsReceiptsService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly availability: WarehouseAvailabilityService,
+    ) {}
 
     private toDateOrThrow(value: string, code: string) {
         const d = new Date(value)
@@ -165,6 +169,15 @@ export class GoodsReceiptsService {
 
                     occurredAt: receiptDate,
                 },
+            })
+
+            await this.availability.receiveGoods({
+                tx,
+                goodsReceiptId: receipt.id,
+                supplierLocationId: resolvedLocId,
+                productId,
+                qty,
+                occurredAt: receiptDate,
             })
 
             await tx.purchaseOrderLine.update({

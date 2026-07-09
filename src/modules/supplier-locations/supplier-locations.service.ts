@@ -76,6 +76,9 @@ export class SupplierLocationsService {
                     name: true,
                     nameInvoice: true,
                     isActive: true,
+                    warehouseType: true,
+                    isOperationalWarehouse: true,
+                    note: true,
                     createdAt: true,
                     updatedAt: true,
                     supplier: { select: { id: true, code: true, name: true } },
@@ -141,6 +144,9 @@ export class SupplierLocationsService {
                     tankCode: dto.tankCode?.trim() || null,
                     tankName: dto.tankName?.trim() || null,
                     isActive: dto.isActive ?? true,
+                    warehouseType: dto.warehouseType?.trim() || null,
+                    isOperationalWarehouse: dto.isOperationalWarehouse ?? true,
+                    note: dto.note?.trim() || null,
                 })),
                 skipDuplicates: true,
             })
@@ -168,6 +174,9 @@ export class SupplierLocationsService {
             ...(dto.tankCode !== undefined ? { tankCode: dto.tankCode?.trim() || null } : {}),
             ...(dto.tankName !== undefined ? { tankName: dto.tankName?.trim() || null } : {}),
             ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+            ...(dto.warehouseType !== undefined ? { warehouseType: dto.warehouseType?.trim() || null } : {}),
+            ...(dto.isOperationalWarehouse !== undefined ? { isOperationalWarehouse: dto.isOperationalWarehouse } : {}),
+            ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
         }
 
         return this.prisma.supplierLocation.update({ where: { id }, data })
@@ -193,6 +202,9 @@ export class SupplierLocationsService {
             ...(dto.tankCode !== undefined ? { tankCode: dto.tankCode?.trim() || null } : {}),
             ...(dto.tankName !== undefined ? { tankName: dto.tankName?.trim() || null } : {}),
             ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+            ...(dto.warehouseType !== undefined ? { warehouseType: dto.warehouseType?.trim() || null } : {}),
+            ...(dto.isOperationalWarehouse !== undefined ? { isOperationalWarehouse: dto.isOperationalWarehouse } : {}),
+            ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
         }
 
         return this.prisma.$transaction(async (tx) => {
@@ -211,6 +223,9 @@ export class SupplierLocationsService {
                         tankCode: dto.tankCode !== undefined ? dto.tankCode?.trim() || null : current.tankCode,
                         tankName: dto.tankName !== undefined ? dto.tankName?.trim() || null : current.tankName,
                         isActive: dto.isActive ?? current.isActive,
+                        warehouseType: dto.warehouseType !== undefined ? dto.warehouseType?.trim() || null : current.warehouseType,
+                        isOperationalWarehouse: dto.isOperationalWarehouse ?? current.isOperationalWarehouse,
+                        note: dto.note !== undefined ? dto.note?.trim() || null : current.note,
                     },
                 })
                 results.push(row)

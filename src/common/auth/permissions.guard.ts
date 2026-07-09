@@ -30,6 +30,12 @@ export class PermissionsGuard implements CanActivate {
 
         const granted = new Set(auth.permissions)
 
+        // System administrators are allowed to access every protected feature.
+        // The frontend already follows this rule when filtering workspace menus.
+        if (granted.has('system.rbac.admin')) {
+            return true
+        }
+
         const ok = requiredPermissions.some((perm) => granted.has(perm))
 
         if (!ok) {

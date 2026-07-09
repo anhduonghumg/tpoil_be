@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Param, Patch, Post, UploadedFile, UseInterceptors } from '@nestjs/common'
+import { FileInterceptor } from '@nestjs/platform-express'
+import { memoryStorage } from 'multer'
 import { CreateTermGoodsReceiptDto } from './dto/create-term-goods-receipt.dto'
 import { UpdateTermGoodsReceiptDto } from './dto/update-term-goods-receipt.dto'
 import { PurchaseTermReceiptsService } from './purchase-term-receipts.service'
@@ -12,9 +14,27 @@ export class PurchaseTermReceiptsController {
         return this.service.listByOrder(orderId)
     }
 
+    @Post(':orderId/receipts/import-preview')
+    @UseInterceptors(
+        FileInterceptor('file', {
+            storage: memoryStorage(),
+            limits: { fileSize: 8 * 1024 * 1024 },
+        }),
+    )
+    importReceiptDocumentPreview(@UploadedFile() file: Express.Multer.File, @Body('template') template: string) {
+        if (!file) throw new BadRequestException('TERM_RECEIPT_DOCUMENT_FILE_REQUIRED')
+        return this.service.importReceiptDocumentPreview(file, template)
+    }
+
     @Post(':orderId/receipts')
-    create(@Param('orderId') orderId: string, @Body() dto: CreateTermGoodsReceiptDto) {
-        return this.service.create(orderId, dto)
+    @UseInterceptors(
+        FileInterceptor('file', {
+            storage: memoryStorage(),
+            limits: { fileSize: 8 * 1024 * 1024 },
+        }),
+    )
+    create(@Param('orderId') orderId: string, @Body() dto: CreateTermGoodsReceiptDto, @UploadedFile() file?: Express.Multer.File) {
+        return this.service.create(orderId, dto, file)
     }
 
     @Get('receipts/:id')

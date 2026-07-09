@@ -28,6 +28,18 @@ export class CreateSupplierLocationDto {
     @IsBoolean()
     isActive?: boolean
 
+    @IsOptional()
+    @IsString()
+    warehouseType?: string
+
+    @IsOptional()
+    @IsBoolean()
+    isOperationalWarehouse?: boolean
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
     @IsArray()
     @ArrayMinSize(1)
     supplierCustomerIds!: string[]
