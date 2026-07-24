@@ -3,27 +3,22 @@ import { Type } from 'class-transformer'
 
 export class ConsumeTermCostLayerItemDto {
     @IsUUID()
+    salesDeliveryLineId!: string
+
+    @IsUUID()
     productId!: string
 
     @IsUUID()
     supplierLocationId!: string
 
     @IsNumber()
-    @Min(0)
+    @Min(0.001)
     qty!: number
 }
 
 export class ConsumeTermCostLayerDto {
     @IsDateString()
     consumeDate!: string
-
-    @IsOptional()
-    @IsString()
-    sourceType?: string
-
-    @IsOptional()
-    @IsString()
-    sourceId?: string
 
     @IsOptional()
     @IsString()

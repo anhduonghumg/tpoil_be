@@ -2,10 +2,16 @@ import { Injectable, NotFoundException } from '@nestjs/common'
 import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
 import { UpdateContractAttachmentDto } from './dto/update-contract-attachment.dto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { DocumentStorageService } from '../uploads/document-storage.service'
+import { UploadService } from '../uploads/uploads.service'
 
 @Injectable()
 export class ContractAttachmentsService {
-    constructor(private prisma: PrismaService) {}
+    constructor(
+        private prisma: PrismaService,
+        private readonly documentStorage: DocumentStorageService,
+        private readonly uploadService: UploadService,
+    ) {}
 
     async listByContract(contractId: string) {
         return this.prisma.contractAttachment.findMany({
@@ -39,9 +45,17 @@ export class ContractAttachmentsService {
     }
 
     async delete(id: string) {
-        return this.prisma.contractAttachment.delete({ where: { id } })
-        // const att = await this.prisma.contractAttachment.findUnique(...)
-        // await prisma.contractAttachment.delete(...)
-        // await uploadService.deleteByUrl(att.fileUrl)
+        const attachment = await this.prisma.contractAttachment.findUnique({ where: { id } })
+        if (!attachment) throw new NotFoundException('Attachment not found')
+
+        const deleted = await this.prisma.contractAttachment.delete({ where: { id } })
+        if (attachment.fileUrl) {
+            if (this.documentStorage.fileIdFromUrl(attachment.fileUrl)) {
+                await this.documentStorage.deleteByUrls([attachment.fileUrl])
+            } else {
+                await this.uploadService.deleteByUrls([attachment.fileUrl])
+            }
+        }
+        return deleted
     }
 }

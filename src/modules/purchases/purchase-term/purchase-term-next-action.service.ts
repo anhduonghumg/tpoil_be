@@ -35,6 +35,7 @@ export class PurchaseTermNextActionService {
             where: { id: purchaseOrderId },
             include: {
                 receipts: true,
+                termProfile: true,
                 termOrderDocuments: true,
                 termPaymentRequests: {
                     include: {
@@ -68,7 +69,7 @@ export class PurchaseTermNextActionService {
         const finalStage = latestStage(PricingStageType.FINAL)
         const hasFinal = !!finalStage
         const hasBossSheet = stages.some((x) => x.stageType === PricingStageType.BOSS_SHEET)
-        const flowType = order.termFlowType ?? TermPurchaseFlowType.ESTIMATE_FIRST
+        const flowType = order.termProfile?.flowType ?? TermPurchaseFlowType.ESTIMATE_FIRST
 
         if (flowType === TermPurchaseFlowType.ESTIMATE_FIRST && !hasEstimate) {
             return 'CALCULATE_TEMP_PRICE'

@@ -15,6 +15,10 @@ export class GoogleDriveService {
         return this.opts.rootFolderId
     }
 
+    getWarehouseRentalContractsFolderId() {
+        return this.opts.warehouseRentalContractsFolderId
+    }
+
     private safeName(name: string) {
         return (name || 'upload.pdf')
             .trim()
@@ -69,20 +73,36 @@ export class GoogleDriveService {
         return this.ensureFolder({ name: base, parentId: args.parentId })
     }
 
-    async uploadPdf(args: { parentId?: string; buffer: Buffer; fileName: string }) {
+    async ensureFolderPath(folder?: string, parentId = this.opts.rootFolderId) {
+        const parts = (folder || 'documents')
+            .replace(/\\/g, '/')
+            .split('/')
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .map((part) => this.safeName(part))
+
+        let currentParentId = parentId
+        for (const name of parts) {
+            currentParentId = await this.ensureFolder({ name, parentId: currentParentId })
+        }
+        return currentParentId
+    }
+
+    async uploadFile(args: { parentId?: string; buffer: Buffer; fileName: string; mimeType?: string }) {
         const parentId = args.parentId ?? this.opts.rootFolderId
         if (!parentId) throw new BadRequestException('parentId is required')
 
         const fileName = this.safeName(args.fileName)
+        const mimeType = args.mimeType || 'application/octet-stream'
 
         const created = await this.drive.files.create({
             requestBody: {
                 name: fileName,
                 parents: [parentId],
-                mimeType: 'application/pdf',
+                mimeType,
             },
             media: {
-                mimeType: 'application/pdf',
+                mimeType,
                 body: Readable.from(args.buffer),
             },
             fields: 'id,name,mimeType,webViewLink,webContentLink,size,md5Checksum',
@@ -94,12 +114,16 @@ export class GoogleDriveService {
         return {
             fileId: created.data.id,
             fileName: created.data.name ?? fileName,
-            mimeType: created.data.mimeType ?? 'application/pdf',
+            mimeType: created.data.mimeType ?? mimeType,
             size: created.data.size ? Number(created.data.size) : null,
             md5: created.data.md5Checksum ?? null,
             webViewLink: created.data.webViewLink ?? null,
             webContentLink: created.data.webContentLink ?? null,
         }
+    }
+
+    async uploadPdf(args: { parentId?: string; buffer: Buffer; fileName: string }) {
+        return this.uploadFile({ ...args, mimeType: 'application/pdf' })
     }
 
     async downloadAsStream(fileId: string) {
@@ -118,5 +142,10 @@ export class GoogleDriveService {
             mimeType: meta.data.mimeType ?? 'application/octet-stream',
             stream: media.data as unknown as NodeJS.ReadableStream,
         }
+    }
+
+    async deleteFile(fileId: string) {
+        if (!fileId) throw new BadRequestException('fileId is required')
+        await this.drive.files.delete({ fileId, supportsAllDrives: true })
     }
 }

@@ -8,7 +8,7 @@ export class CustomerOverviewService {
     constructor(private readonly prisma: PrismaService) {}
 
     async getOverview(customerId: string): Promise<CustomerOverviewResponseDto> {
-        const customer = await this.prisma.customer.findFirst({
+        const customer = await this.prisma.party.findFirst({
             where: { id: customerId, deletedAt: null },
             include: {
                 salesOwnerEmp: {

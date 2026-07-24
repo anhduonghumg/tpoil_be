@@ -1,12 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { GoodsReceiptStatus, InventoryLedgerSourceType, PricingRunStatus, Prisma, PurchaseBizType, PurchaseOrderStatus } from '@prisma/client'
+import { GoodsReceiptStatus, PricingRunStatus, Prisma, PurchaseBizType, PurchaseOrderStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { UploadService } from 'src/modules/uploads/uploads.service'
 import { CreateTermGoodsReceiptDto } from './dto/create-term-goods-receipt.dto'
 import { UpdateTermGoodsReceiptDto } from './dto/update-term-goods-receipt.dto'
 import pdf = require('pdf-parse')
 import Tesseract = require('tesseract.js')
-import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-availability.service'
+import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
 
 type TermReceiptDocumentTemplate = 'TEMPLATE_1' | 'TEMPLATE_2'
 
@@ -15,7 +15,7 @@ export class PurchaseTermReceiptsService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly uploadService: UploadService,
-        private readonly availability: WarehouseAvailabilityService,
+        private readonly receiptPosting: GoodsReceiptPostingService,
     ) {}
 
     private toDateOnly(value?: string | Date | null): Date | undefined {
@@ -199,17 +199,50 @@ export class PurchaseTermReceiptsService {
         }
     }
 
-    private receiptInclude = {
+    private receiptInclude = Prisma.validator<Prisma.GoodsReceiptInclude>()({
         supplier: true,
-        supplierLocation: true,
-        product: true,
+        warehouse: true,
         purchaseOrder: true,
-        purchaseOrderLine: {
+        lines: {
+            orderBy: { lineNo: 'asc' },
             include: {
                 product: true,
-                supplierLocation: true,
+                purchaseOrderLine: {
+                    include: {
+                        product: true,
+                        receivingWarehouse: true,
+                    },
+                },
             },
         },
+    })
+
+    private mapReceipt(receipt: any) {
+        const line = receipt.lines?.[0] ?? null
+        const purchaseOrderLine = line?.purchaseOrderLine
+            ? {
+                  ...line.purchaseOrderLine,
+                  supplierLocationId: line.purchaseOrderLine.receivingWarehouseId,
+                  supplierLocation: line.purchaseOrderLine.receivingWarehouse,
+              }
+            : null
+        return {
+            ...receipt,
+            supplierLocationId: receipt.warehouseId,
+            supplierLocation: receipt.warehouse,
+            purchaseOrderLineId: line?.purchaseOrderLineId ?? null,
+            purchaseOrderLine,
+            productId: line?.productId ?? null,
+            product: line?.product ?? null,
+            qty: line?.actualQty ?? null,
+            standardQtyV15: line?.v15Qty ?? null,
+            tempC: line?.temperatureC ?? null,
+            density: line?.density ?? null,
+            billQty: line?.billQty ?? null,
+            tankQty: line?.tankQty ?? null,
+            temporaryWithdrawQty: line?.temporaryWithdrawQty ?? null,
+            billToTankLossQty: line?.billToTankLossQty ?? null,
+        }
     }
 
     async create(orderId: string, dto: CreateTermGoodsReceiptDto, file?: Express.Multer.File) {
@@ -222,7 +255,7 @@ export class PurchaseTermReceiptsService {
                 lines: {
                     include: {
                         product: true,
-                        supplierLocation: true,
+                        receivingWarehouse: true,
                     },
                 },
             },
@@ -246,13 +279,13 @@ export class PurchaseTermReceiptsService {
             throw new BadRequestException('RECEIPT_PRODUCT_NOT_MATCH_ORDER_LINE')
         }
 
-        const supplierLocationId = dto.supplierLocationId || line.supplierLocationId || order.supplierLocationId
+        const supplierLocationId = dto.supplierLocationId || line.receivingWarehouseId
 
         if (!supplierLocationId) {
             throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
         }
 
-        if (line.supplierLocationId && supplierLocationId !== line.supplierLocationId) {
+        if (line.receivingWarehouseId && supplierLocationId !== line.receivingWarehouseId) {
             throw new BadRequestException('RECEIPT_LOCATION_NOT_MATCH_ORDER_LINE')
         }
 
@@ -267,22 +300,18 @@ export class PurchaseTermReceiptsService {
 
         const receipt = await this.prisma.$transaction(async (tx) => {
             const receiptNo = await this.generateReceiptNo(tx)
+            const warehouse = await tx.warehouse.findUnique({
+                where: { id: supplierLocationId },
+                select: { legalEntity: { select: { partyId: true } } },
+            })
+            if (!warehouse) throw new BadRequestException('SUPPLIER_LOCATION_NOT_FOUND')
 
             return tx.goodsReceipt.create({
                 data: {
                     receiptNo,
                     supplierCustomerId: order.supplierCustomerId,
-                    supplierLocationId,
-                    productId: line.productId,
+                    warehouseId: supplierLocationId,
                     receiptDate: this.toDateOnly(dto.receiptDate)!,
-                    qty: new Prisma.Decimal(termQty.tankQty),
-                    tempC: dto.tempC !== undefined && dto.tempC !== null ? new Prisma.Decimal(dto.tempC) : null,
-                    density: dto.density !== undefined && dto.density !== null ? new Prisma.Decimal(dto.density) : null,
-                    standardQtyV15: new Prisma.Decimal(termQty.temporaryWithdrawQty),
-                    billQty: new Prisma.Decimal(termQty.billQty),
-                    tankQty: new Prisma.Decimal(termQty.tankQty),
-                    temporaryWithdrawQty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
-                    billToTankLossQty: new Prisma.Decimal(termQty.billToTankLossQty),
                     receiptDocumentTemplate: this.normalizeReceiptTemplate(dto.receiptDocumentTemplate),
                     sourceFileName: sourceFile?.originalName ?? null,
                     sourceFileUrl: sourceFile?.url ?? null,
@@ -295,37 +324,46 @@ export class PurchaseTermReceiptsService {
                     note: dto.note?.trim() || null,
                     status: GoodsReceiptStatus.DRAFT,
                     purchaseOrderId: order.id,
-                    purchaseOrderLineId: line.id,
+                    lines: {
+                        create: {
+                            lineNo: 1,
+                            purchaseOrderLineId: line.id,
+                            productId: line.productId,
+                            ownerPartyId: warehouse.legalEntity.partyId,
+                            actualQty: new Prisma.Decimal(termQty.tankQty),
+                            v15Qty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
+                            temperatureC:
+                                dto.tempC !== undefined && dto.tempC !== null ? new Prisma.Decimal(dto.tempC) : null,
+                            density:
+                                dto.density !== undefined && dto.density !== null ? new Prisma.Decimal(dto.density) : null,
+                            billQty: new Prisma.Decimal(termQty.billQty),
+                            tankQty: new Prisma.Decimal(termQty.tankQty),
+                            temporaryWithdrawQty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
+                            billToTankLossQty: new Prisma.Decimal(termQty.billToTankLossQty),
+                        },
+                    },
                 },
                 include: this.receiptInclude,
             })
         })
 
-        return receipt
+        return this.mapReceipt(receipt)
     }
 
     async listByOrder(orderId: string) {
-        return this.prisma.goodsReceipt.findMany({
+        const receipts = await this.prisma.goodsReceipt.findMany({
             where: {
                 purchaseOrderId: orderId,
                 purchaseOrder: {
                     bizType: PurchaseBizType.TERM,
                 },
             },
-            include: {
-                product: true,
-                supplierLocation: true,
-                purchaseOrderLine: {
-                    include: {
-                        product: true,
-                        supplierLocation: true,
-                    },
-                },
-            },
+            include: this.receiptInclude,
             orderBy: {
                 createdAt: 'desc',
             },
         })
+        return receipts.map((receipt) => this.mapReceipt(receipt))
     }
 
     async findById(id: string) {
@@ -343,7 +381,7 @@ export class PurchaseTermReceiptsService {
             throw new NotFoundException('TERM_GOODS_RECEIPT_NOT_FOUND')
         }
 
-        return receipt
+        return this.mapReceipt(receipt)
     }
 
     async update(id: string, dto: UpdateTermGoodsReceiptDto) {
@@ -371,7 +409,7 @@ export class PurchaseTermReceiptsService {
             throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
         }
 
-        if (line.supplierLocationId && supplierLocationId !== line.supplierLocationId) {
+        if (line.receivingWarehouseId && supplierLocationId !== line.receivingWarehouseId) {
             throw new BadRequestException('RECEIPT_LOCATION_NOT_MATCH_ORDER_LINE')
         }
 
@@ -395,26 +433,62 @@ export class PurchaseTermReceiptsService {
             throw new BadRequestException('TERM_GOODS_RECEIPT_INVALID_QTY')
         }
 
-        await this.prisma.goodsReceipt.update({
-            where: { id },
-            data: {
-                supplierLocationId,
-                productId: line.productId,
-                receiptDate: dto.receiptDate !== undefined ? this.toDateOnly(dto.receiptDate) : undefined,
-                qty: new Prisma.Decimal(termQty.tankQty),
-                tempC: dto.tempC !== undefined ? (dto.tempC === null ? null : new Prisma.Decimal(dto.tempC)) : undefined,
-                density: dto.density !== undefined ? (dto.density === null ? null : new Prisma.Decimal(dto.density)) : undefined,
-                standardQtyV15: new Prisma.Decimal(termQty.temporaryWithdrawQty),
-                billQty: new Prisma.Decimal(termQty.billQty),
-                tankQty: new Prisma.Decimal(termQty.tankQty),
-                temporaryWithdrawQty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
-                billToTankLossQty: new Prisma.Decimal(termQty.billToTankLossQty),
-                receiptDocumentTemplate: dto.receiptDocumentTemplate !== undefined ? this.normalizeReceiptTemplate(dto.receiptDocumentTemplate) : undefined,
-                vehicleId: dto.vehicleId !== undefined ? dto.vehicleId : undefined,
-                driverId: dto.driverId !== undefined ? dto.driverId : undefined,
-                shippingFee: dto.shippingFee !== undefined ? (dto.shippingFee === null ? null : new Prisma.Decimal(dto.shippingFee)) : undefined,
-                note: dto.note !== undefined ? dto.note?.trim() || null : undefined,
-            },
+        const receiptLineId = current.lines?.[0]?.id
+        if (!receiptLineId) throw new BadRequestException('TERM_GOODS_RECEIPT_LINE_NOT_FOUND')
+
+        await this.prisma.$transaction(async (tx) => {
+            const warehouse = await tx.warehouse.findUnique({
+                where: { id: supplierLocationId },
+                select: { legalEntity: { select: { partyId: true } } },
+            })
+            if (!warehouse) throw new BadRequestException('SUPPLIER_LOCATION_NOT_FOUND')
+
+            await tx.goodsReceipt.update({
+                where: { id },
+                data: {
+                    warehouseId: supplierLocationId,
+                    receiptDate: dto.receiptDate !== undefined ? this.toDateOnly(dto.receiptDate) : undefined,
+                    receiptDocumentTemplate:
+                        dto.receiptDocumentTemplate !== undefined
+                            ? this.normalizeReceiptTemplate(dto.receiptDocumentTemplate)
+                            : undefined,
+                    vehicleId: dto.vehicleId !== undefined ? dto.vehicleId : undefined,
+                    driverId: dto.driverId !== undefined ? dto.driverId : undefined,
+                    shippingFee:
+                        dto.shippingFee !== undefined
+                            ? dto.shippingFee === null
+                                ? null
+                                : new Prisma.Decimal(dto.shippingFee)
+                            : undefined,
+                    note: dto.note !== undefined ? dto.note?.trim() || null : undefined,
+                    version: { increment: 1 },
+                },
+            })
+            await tx.goodsReceiptLine.update({
+                where: { id: receiptLineId },
+                data: {
+                    productId: line.productId,
+                    ownerPartyId: warehouse.legalEntity.partyId,
+                    actualQty: new Prisma.Decimal(termQty.tankQty),
+                    v15Qty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
+                    temperatureC:
+                        dto.tempC !== undefined
+                            ? dto.tempC === null
+                                ? null
+                                : new Prisma.Decimal(dto.tempC)
+                            : undefined,
+                    density:
+                        dto.density !== undefined
+                            ? dto.density === null
+                                ? null
+                                : new Prisma.Decimal(dto.density)
+                            : undefined,
+                    billQty: new Prisma.Decimal(termQty.billQty),
+                    tankQty: new Prisma.Decimal(termQty.tankQty),
+                    temporaryWithdrawQty: new Prisma.Decimal(termQty.temporaryWithdrawQty),
+                    billToTankLossQty: new Prisma.Decimal(termQty.billToTankLossQty),
+                },
+            })
         })
 
         return this.findById(id)
@@ -464,17 +538,6 @@ export class PurchaseTermReceiptsService {
                 })
             }
 
-            await tx.purchaseOrderLine.update({
-                where: {
-                    id: current.purchaseOrderLineId!,
-                },
-                data: {
-                    withdrawnQty: {
-                        increment: current.qty,
-                    },
-                },
-            })
-
             await this.increasePendingInventory(tx, {
                 supplierLocationId: current.supplierLocationId,
                 productId: current.productId,
@@ -510,17 +573,6 @@ export class PurchaseTermReceiptsService {
             })
 
             if (current.status === GoodsReceiptStatus.CONFIRMED && current.purchaseOrderLineId) {
-                await tx.purchaseOrderLine.update({
-                    where: {
-                        id: current.purchaseOrderLineId,
-                    },
-                    data: {
-                        withdrawnQty: {
-                            decrement: current.qty,
-                        },
-                    },
-                })
-
                 await this.decreasePendingInventory(tx, {
                     supplierLocationId: current.supplierLocationId,
                     productId: current.productId,
@@ -560,54 +612,36 @@ export class PurchaseTermReceiptsService {
             note?: string
         },
     ) {
-        const balance = await tx.inventoryBalance.upsert({
-            where: {
-                supplierLocationId_productId: {
-                    supplierLocationId: args.supplierLocationId,
-                    productId: args.productId,
-                },
-            },
-            create: {
-                supplierLocationId: args.supplierLocationId,
-                productId: args.productId,
-                physicalQty: args.qty,
-                pendingDocQty: args.qty,
-                postedQty: new Prisma.Decimal(0),
-            },
-            update: {
-                physicalQty: {
-                    increment: args.qty,
-                },
-                pendingDocQty: {
-                    increment: args.qty,
+        const receipt = await tx.goodsReceipt.findUniqueOrThrow({
+            where: { id: args.sourceId },
+            select: {
+                lines: {
+                    orderBy: { lineNo: 'asc' },
+                    take: 1,
+                    select: {
+                        purchaseOrderLineId: true,
+                        productId: true,
+                        actualQty: true,
+                        v15Qty: true,
+                        temperatureC: true,
+                        density: true,
+                    },
                 },
             },
         })
-
-        await tx.inventoryLedger.create({
-            data: {
-                supplierLocationId: args.supplierLocationId,
-                productId: args.productId,
-                deltaPhysicalQty: args.qty,
-                deltaPendingDocQty: args.qty,
-                deltaPostedQty: new Prisma.Decimal(0),
-                afterPhysicalQty: balance.physicalQty,
-                afterPendingDocQty: balance.pendingDocQty,
-                afterPostedQty: balance.postedQty,
-                sourceType: InventoryLedgerSourceType.GOODS_RECEIPT,
-                sourceId: args.sourceId,
-                occurredAt: args.occurredAt,
-                note: args.note ?? null,
-            },
-        })
-
-        await this.availability.receiveGoods({
+        const line = receipt.lines[0]
+        if (!line) throw new BadRequestException('TERM_GOODS_RECEIPT_LINE_NOT_FOUND')
+        await this.receiptPosting.postSingleLineReceipt({
             tx,
             goodsReceiptId: args.sourceId,
-            supplierLocationId: args.supplierLocationId,
-            productId: args.productId,
-            qty: args.qty,
-            occurredAt: args.occurredAt,
+            warehouseId: args.supplierLocationId,
+            productId: line.productId,
+            purchaseOrderLineId: line.purchaseOrderLineId,
+            actualQty: line.actualQty,
+            v15Qty: line.v15Qty,
+            temperatureC: line.temperatureC,
+            density: line.density,
+            effectiveAt: args.occurredAt,
         })
     }
 
@@ -622,64 +656,9 @@ export class PurchaseTermReceiptsService {
             note?: string
         },
     ) {
-        const current = await tx.inventoryBalance.findUnique({
-            where: {
-                supplierLocationId_productId: {
-                    supplierLocationId: args.supplierLocationId,
-                    productId: args.productId,
-                },
-            },
-        })
-
-        if (!current) {
-            throw new BadRequestException('INVENTORY_BALANCE_NOT_FOUND')
-        }
-
-        const nextPhysicalQty = new Prisma.Decimal(current.physicalQty).minus(args.qty)
-        const nextPendingDocQty = new Prisma.Decimal(current.pendingDocQty).minus(args.qty)
-
-        if (nextPhysicalQty.lt(0) || nextPendingDocQty.lt(0)) {
-            throw new BadRequestException('INVENTORY_BALANCE_NOT_ENOUGH_TO_VOID_RECEIPT')
-        }
-
-        const balance = await tx.inventoryBalance.update({
-            where: {
-                supplierLocationId_productId: {
-                    supplierLocationId: args.supplierLocationId,
-                    productId: args.productId,
-                },
-            },
-            data: {
-                physicalQty: nextPhysicalQty,
-                pendingDocQty: nextPendingDocQty,
-            },
-        })
-
-        await tx.inventoryLedger.create({
-            data: {
-                supplierLocationId: args.supplierLocationId,
-                productId: args.productId,
-                deltaPhysicalQty: args.qty.negated(),
-                deltaPendingDocQty: args.qty.negated(),
-                deltaPostedQty: new Prisma.Decimal(0),
-                afterPhysicalQty: balance.physicalQty,
-                afterPendingDocQty: balance.pendingDocQty,
-                afterPostedQty: balance.postedQty,
-                sourceType: InventoryLedgerSourceType.GOODS_RECEIPT,
-                sourceId: args.sourceId,
-                occurredAt: args.occurredAt,
-                note: args.note ?? null,
-            },
-        })
-
-        await this.availability.voidGoods({
-            tx,
+        await this.receiptPosting.reverseReceipt(tx, {
             goodsReceiptId: args.sourceId,
-            supplierLocationId: args.supplierLocationId,
-            productId: args.productId,
-            qty: args.qty,
-            occurredAt: args.occurredAt,
-            note: args.note,
+            effectiveAt: args.occurredAt,
         })
     }
 }

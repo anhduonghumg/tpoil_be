@@ -23,6 +23,7 @@ import { BankImportsModule } from './modules/banking/bank-imports/bank-imports.m
 import { PurchaseOrdersModule } from './modules/purchases/purchase-orders/purchase-orders.module'
 import { GoodsReceiptsModule } from './modules/purchases/goods-receipts/goods-receipts.module'
 import { SupplierInvoicesModule } from './modules/purchases/supplier-invoices/supplier-invoices.module'
+import { CommercialLotsModule } from './modules/purchases/commercial-lots/commercial-lots.module'
 import { SupplierSettlementsModule } from './modules/settlements/supplier-settlements.module'
 
 import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.module'
@@ -84,6 +85,7 @@ import { OperationsModule } from './modules/operations/operations.module'
         PurchaseOrdersModule,
         GoodsReceiptsModule,
         SupplierInvoicesModule,
+        CommercialLotsModule,
         SupplierSettlementsModule,
 
         BackgroundJobsModule,

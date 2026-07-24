@@ -7,6 +7,10 @@
     "license": "UNLICENSED",
     "scripts": {
         "build": "nest build",
+        "db:validate": "prisma validate",
+        "db:generate": "prisma generate",
+        "db:seed": "ts-node prisma/seed.ts",
+        "db:reset": "prisma migrate reset --force",
         "start:web": "cross-env APP_TYPE=web nest start --watch",
         "start:web:prod": "cross-env APP_TYPE=web node dist/main.js",
         "start:worker": "cross-env APP_TYPE=worker nest start --watch --entryFile worker",
@@ -133,6 +137,9 @@
         "testRegex": ".*\\.spec\\.ts$",
         "transform": {
             "^.+\\.(t|j)s$": "ts-jest"
+        },
+        "moduleNameMapper": {
+            "^src/(.*)$": "<rootDir>/$1"
         },
         "collectCoverageFrom": [
             "**/*.(t|j)s"

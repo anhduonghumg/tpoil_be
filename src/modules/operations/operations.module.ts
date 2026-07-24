@@ -1,26 +1,28 @@
 import { Module } from '@nestjs/common'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-import { InventoryService } from 'src/modules/inventory/inventory.service'
 import { OperationsController } from './operations.controller'
 import { OperationsDashboardService } from './operations-dashboard.service'
 import { RoadOperationsService } from './road-operations.service'
 import { ShipCharterService } from './ship-charter.service'
-import { WarehouseAvailabilityService } from './warehouse-availability.service'
 import { WarehouseOperationsService } from './warehouse-operations.service'
+import { CustomersModule } from 'src/modules/customers/customers.module'
+import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
+import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
 
 @Module({
+    imports: [CustomersModule],
     controllers: [OperationsController],
     providers: [
         PrismaService,
         PermissionsGuard,
-        InventoryService,
-        WarehouseAvailabilityService,
+        InventoryCoreService,
+        GoodsReceiptPostingService,
         ShipCharterService,
         WarehouseOperationsService,
         RoadOperationsService,
         OperationsDashboardService,
     ],
-    exports: [WarehouseAvailabilityService],
+    exports: [InventoryCoreService, GoodsReceiptPostingService],
 })
 export class OperationsModule {}

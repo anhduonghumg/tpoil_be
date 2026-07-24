@@ -10,11 +10,13 @@ export type GoogleSaCredentials = {
 
 export type GoogleDriveOptions = {
     rootFolderId: string
+    warehouseRentalContractsFolderId?: string
     credentials: GoogleSaCredentials
 }
 
 export function readGoogleDriveOptions(): GoogleDriveOptions {
     const rootFolderId = (process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || '').trim()
+    const warehouseRentalContractsFolderId = (process.env.GOOGLE_DRIVE_WAREHOUSE_RENTAL_CONTRACTS_FOLDER_ID || '').trim() || undefined
     if (!rootFolderId) throw new Error('Missing GOOGLE_DRIVE_ROOT_FOLDER_ID')
 
     const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON
@@ -34,6 +36,7 @@ export function readGoogleDriveOptions(): GoogleDriveOptions {
 
     return {
         rootFolderId,
+        warehouseRentalContractsFolderId,
         credentials: creds as GoogleSaCredentials,
     }
 }

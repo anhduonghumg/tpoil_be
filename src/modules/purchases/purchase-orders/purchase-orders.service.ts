@@ -1,6 +1,14 @@
 // src/modules/purchases/purchase-orders/purchase-orders.service.ts
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { BackgroundJobStatus, Prisma, PurchaseOrderStatus, SupplierInvoiceStatus } from '@prisma/client'
+import {
+    BackgroundJobStatus,
+    ManagerRole,
+    MasterStatus,
+    Prisma,
+    PurchaseOrderStatus,
+    SupplierInvoiceStatus,
+    WarehousePartyRole,
+} from '@prisma/client'
 import { ContractCheckService } from './contract-check.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PaymentTermType } from './dto/purchase-order.dto'
@@ -145,17 +153,45 @@ export class PurchaseOrdersService {
         return d
     }
 
-    private async assertLocationsBelongToSupplier(args: { supplierCustomerId: string; locationIds: string[] }) {
-        const { supplierCustomerId, locationIds } = args
-        if (!locationIds.length) return
-
-        const rows = await this.prisma.supplierLocation.findMany({
+    private async isDepartmentHead(userId?: string | null) {
+        if (!userId) return false
+        const now = new Date()
+        const employee = await this.prisma.employee.findFirst({
             where: {
-                id: { in: locationIds },
-                supplierCustomerId,
-                isActive: true,
+                userId,
+                deletedAt: null,
+                managerRoles: {
+                    some: {
+                        role: { in: [ManagerRole.head, ManagerRole.acting] },
+                        startDate: { lte: now },
+                        OR: [{ endDate: null }, { endDate: { gte: now } }],
+                    },
+                },
             },
             select: { id: true },
+        })
+        return Boolean(employee)
+    }
+
+    async validateContract(supplierCustomerId: string, orderDate: string) {
+        if (!supplierCustomerId) throw new BadRequestException('SUPPLIER_REQUIRED')
+        const onDate = this.toDateOrThrow(orderDate, 'ORDER_DATE_INVALID')
+        return this.contractCheck.checkPurchaseContractWarning({ supplierCustomerId, onDate })
+    }
+
+    private async assertLocationsBelongToSupplier(args: { supplierCustomerId: string; locationIds: string[] }) {
+        const { supplierCustomerId, locationIds } = args
+        if (!locationIds.length) throw new BadRequestException('RECEIVING_WAREHOUSE_REQUIRED')
+
+        const rows = await this.prisma.warehouse.findMany({
+            where: {
+                id: { in: locationIds },
+                status: MasterStatus.ACTIVE,
+                parties: {
+                    some: { partyId: supplierCustomerId, role: WarehousePartyRole.OPERATOR, validTo: null },
+                },
+            },
+            select: { id: true, legalEntityId: true },
         })
 
         const ok = new Set(rows.map((x) => x.id))
@@ -166,6 +202,38 @@ export class PurchaseOrdersService {
                 message: 'Kho NCC không hợp lệ hoặc không thuộc NCC đã chọn.',
                 invalidLocationIds: bad,
             })
+        }
+        const legalEntityIds = [...new Set(rows.map((row) => row.legalEntityId))]
+        if (legalEntityIds.length !== 1) {
+            throw new BadRequestException('PURCHASE_ORDER_WAREHOUSES_MUST_BELONG_TO_ONE_LEGAL_ENTITY')
+        }
+        return legalEntityIds[0]
+    }
+
+    private mapPurchaseOrder<T extends Record<string, any>>(order: T) {
+        const lines = (order.lines ?? []).map((line: any) => ({
+            ...line,
+            supplierLocationId: line.receivingWarehouseId,
+            supplierLocation: line.receivingWarehouse,
+        }))
+        const totalQty = lines.reduce((sum: number, line: any) => sum + Number(line.orderedQty ?? 0), 0)
+        const totalAmount = lines.reduce((sum: number, line: any) => {
+            const qty = Number(line.orderedQty ?? 0)
+            const unitPrice = Number(line.unitPrice ?? 0)
+            const discount = Number(line.discountAmount ?? 0)
+            const taxRate = Number(line.taxRate ?? 0)
+            return sum + (qty * unitPrice - discount) * (1 + taxRate / 100)
+        }, 0)
+        const defaultWarehouse = lines.length > 0 && lines.every((line: any) => line.receivingWarehouseId === lines[0].receivingWarehouseId)
+            ? lines[0].receivingWarehouse ?? null
+            : null
+        return {
+            ...order,
+            lines,
+            supplierLocationId: defaultWarehouse?.id ?? null,
+            supplierLocation: defaultWarehouse,
+            totalQty,
+            totalAmount,
         }
     }
 
@@ -178,15 +246,18 @@ export class PurchaseOrdersService {
 
         const settlementMap = new Map<string, any>()
         for (const inv of invoices) {
-            const st = inv.payableSettlement
+            const st = inv.openItem
             if (st?.id) settlementMap.set(st.id, st)
         }
 
         const settlements = Array.from(settlementMap.values())
 
-        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s.amountTotal ?? 0), 0)
+        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s.originalAmount ?? 0), 0)
 
-        const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s.amountSettled ?? 0), 0)
+        const totalSettledAmount = settlements.reduce(
+            (sum, s) => sum + Number(new Prisma.Decimal(s.originalAmount ?? 0).minus(s.outstandingAmount ?? 0)),
+            0,
+        )
 
         const allSettled = settlements.length > 0 && settlements.every((s) => s.status === 'SETTLED')
 
@@ -200,7 +271,15 @@ export class PurchaseOrdersService {
 
         const orderedQtyTotal = (item.lines ?? []).reduce((sum: number, l: any) => sum + Number(l.orderedQty ?? 0), 0)
 
-        const receivedQtyTotal = (item.receipts ?? []).reduce((sum: number, r: any) => sum + Number(r.qty ?? 0), 0)
+        const receivedQtyTotal = (item.receipts ?? []).reduce(
+            (sum: number, receipt: any) =>
+                sum +
+                (receipt.lines ?? []).reduce(
+                    (lineSum: number, line: any) => lineSum + Number(line.actualQty ?? 0),
+                    0,
+                ),
+            0,
+        )
 
         const remainingQty = Math.max(orderedQtyTotal - receivedQtyTotal, 0)
 
@@ -356,7 +435,7 @@ export class PurchaseOrdersService {
             unitPrice?: number
             taxRate?: number
         }>
-    }) {
+    }, actorId?: string | null) {
         const orderNo = (dto.orderNo ?? '').trim()
         if (!orderNo) throw new BadRequestException('ORDER_NO_REQUIRED')
 
@@ -460,22 +539,30 @@ export class PurchaseOrdersService {
         }
 
         const allLocIds = Array.from(new Set([headerLocId, ...lines.map((x) => x.supplierLocationId)].filter(Boolean) as string[]))
-        await this.assertLocationsBelongToSupplier({
+        const legalEntityId = await this.assertLocationsBelongToSupplier({
             supplierCustomerId: dto.supplierCustomerId,
             locationIds: allLocIds,
         })
 
+        const contract = await this.contractCheck.requireActivePurchaseContract({
+            supplierCustomerId: dto.supplierCustomerId,
+            onDate: orderDate,
+        })
         const warning = await this.contractCheck.checkPurchaseContractWarning({
             supplierCustomerId: dto.supplierCustomerId,
             onDate: orderDate,
         })
+        const autoApproved = await this.isDepartmentHead(actorId)
+        const now = new Date()
 
         // 8) create PO
         const po = await this.prisma.purchaseOrder.create({
             data: {
                 orderNo,
+                legalEntityId,
                 supplierCustomerId: dto.supplierCustomerId,
-                supplierLocationId: headerLocId,
+                contractId: contract.id,
+                contractNo: contract.code,
                 paymentTermType,
                 paymentTermDays,
                 allowPartialPayment,
@@ -484,9 +571,10 @@ export class PurchaseOrdersService {
                 orderDate,
                 expectedDate,
                 note: dto.note?.trim() || null,
-                status: PurchaseOrderStatus.DRAFT,
-                totalQty: computedTotalQty,
-                totalAmount: computedTotalAmount,
+                status: autoApproved ? PurchaseOrderStatus.APPROVED : PurchaseOrderStatus.DRAFT,
+                createdById: actorId ?? null,
+                approvedById: autoApproved ? actorId ?? null : null,
+                approvedAt: autoApproved ? now : null,
                 paymentPlans: {
                     create: paymentPlans.map((p) => ({
                         dueDate: p.dueDate,
@@ -496,36 +584,35 @@ export class PurchaseOrdersService {
                     })),
                 },
                 lines: {
-                    create: lines.map((l) => ({
+                    create: lines.map((l, index) => ({
+                        lineNo: index + 1,
                         productId: l.productId,
-                        supplierLocationId: (l.supplierLocationId ?? headerLocId)!,
+                        receivingWarehouseId: (l.supplierLocationId ?? headerLocId)!,
                         orderedQty: new Prisma.Decimal(l.orderedQty),
                         unitPrice: l.unitPrice == null ? null : new Prisma.Decimal(l.unitPrice),
                         taxRate: l.taxRate == null ? null : new Prisma.Decimal(l.taxRate),
                         discountAmount: new Prisma.Decimal(l.discountAmount ?? 0),
-                        withdrawnQty: new Prisma.Decimal(0),
                     })),
                 },
             },
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
-                supplierLocation: { select: { id: true, code: true, name: true } },
                 paymentPlans: {
                     orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
                 },
                 lines: {
                     include: {
-                        supplierLocation: { select: { id: true, code: true, name: true } },
+                        receivingWarehouse: { select: { id: true, code: true, name: true } },
                         product: { select: { id: true, name: true, code: true } },
                     },
                 },
             },
         })
 
-        return { po, warnings: { contract: warning } }
+        return { po: this.mapPurchaseOrder(po), warnings: { contract: warning } }
     }
 
-    async approve(id: string) {
+    async approve(id: string, actorId?: string | null) {
         const po = await this.prisma.purchaseOrder.findUnique({
             where: { id },
             include: { lines: true },
@@ -533,6 +620,10 @@ export class PurchaseOrdersService {
         if (!po) throw new NotFoundException('PO_NOT_FOUND')
         if (po.status !== PurchaseOrderStatus.DRAFT) throw new BadRequestException('PO_NOT_DRAFT')
 
+        const contract = await this.contractCheck.requireActivePurchaseContract({
+            supplierCustomerId: po.supplierCustomerId,
+            onDate: po.orderDate,
+        })
         const warning = await this.contractCheck.checkPurchaseContractWarning({
             supplierCustomerId: po.supplierCustomerId,
             onDate: po.orderDate,
@@ -540,20 +631,25 @@ export class PurchaseOrdersService {
 
         const approved = await this.prisma.purchaseOrder.update({
             where: { id },
-            data: { status: PurchaseOrderStatus.APPROVED },
+            data: {
+                status: PurchaseOrderStatus.APPROVED,
+                contractId: contract.id,
+                contractNo: contract.code,
+                approvedById: actorId ?? null,
+                approvedAt: new Date(),
+            },
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
-                supplierLocation: { select: { id: true, code: true, name: true } },
                 lines: {
                     include: {
                         product: { select: { id: true, code: true, name: true, uom: true } },
-                        supplierLocation: { select: { id: true, code: true, name: true } },
+                        receivingWarehouse: { select: { id: true, code: true, name: true } },
                     },
                 },
             },
         })
 
-        return { po: approved, warnings: { contract: warning } }
+        return { po: this.mapPurchaseOrder(approved), warnings: { contract: warning } }
     }
 
     async cancel(id: string) {
@@ -762,28 +858,32 @@ export class PurchaseOrdersService {
             where: { id },
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
-                supplierLocation: { select: { id: true, code: true, name: true } },
                 receipts: {
                     select: {
                         id: true,
-                        purchaseOrderLineId: true,
                         receiptNo: true,
                         receiptDate: true,
-                        qty: true,
                         status: true,
-                        supplierLocationId: true,
-                        supplierLocation: {
+                        warehouseId: true,
+                        warehouse: {
                             select: {
                                 id: true,
                                 code: true,
                                 name: true,
                             },
                         },
+                        lines: {
+                            orderBy: { lineNo: 'asc' },
+                            select: {
+                                purchaseOrderLineId: true,
+                                actualQty: true,
+                            },
+                        },
                     },
                 },
                 supplierInvoices: {
                     where: {
-                        status: { not: SupplierInvoiceStatus.VOID },
+                        status: { not: SupplierInvoiceStatus.VOIDED },
                     },
                     orderBy: { createdAt: 'desc' },
                     select: {
@@ -795,13 +895,12 @@ export class PurchaseOrdersService {
                         sourceFileUrl: true,
                         sourceFileChecksum: true,
                         totalAmount: true,
-                        payableSettlementId: true,
-                        payableSettlement: {
+                        openItem: {
                             select: {
                                 id: true,
                                 status: true,
-                                amountTotal: true,
-                                amountSettled: true,
+                                originalAmount: true,
+                                outstandingAmount: true,
                                 dueDate: true,
                             },
                         },
@@ -813,7 +912,7 @@ export class PurchaseOrdersService {
                 lines: {
                     include: {
                         product: { select: { id: true, code: true, name: true, uom: true } },
-                        supplierLocation: { select: { id: true, code: true, name: true } },
+                        receivingWarehouse: { select: { id: true, code: true, name: true } },
                     },
                 },
             },
@@ -823,15 +922,22 @@ export class PurchaseOrdersService {
 
         const orderedQtyTotal = (po.lines ?? []).reduce((sum, l) => sum + Number(l.orderedQty ?? 0), 0)
         const confirmedReceipts = (po.receipts ?? []).filter((x) => x.status === 'CONFIRMED')
-        const receivedQtyTotal = confirmedReceipts.reduce((sum, r) => sum + Number(r.qty ?? 0), 0)
+        const receivedQtyTotal = confirmedReceipts.reduce(
+            (sum, receipt) =>
+                sum + receipt.lines.reduce((lineSum, line) => lineSum + Number(line.actualQty ?? 0), 0),
+            0,
+        )
         const remainingQty = Math.max(orderedQtyTotal - receivedQtyTotal, 0)
         const confirmedReceiptCount = (po.receipts ?? []).filter((x) => x.status === 'CONFIRMED').length
         const invoices = po.supplierInvoices ?? []
 
-        const settlements = invoices.map((x) => x.payableSettlement).filter(Boolean)
+        const settlements = invoices.map((x) => x.openItem).filter(Boolean)
 
-        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.amountTotal ?? 0), 0)
-        const totalSettledAmount = settlements.reduce((sum, s) => sum + Number(s!.amountSettled ?? 0), 0)
+        const totalSettlementAmount = settlements.reduce((sum, s) => sum + Number(s!.originalAmount ?? 0), 0)
+        const totalSettledAmount = settlements.reduce(
+            (sum, s) => sum + Number(new Prisma.Decimal(s!.originalAmount ?? 0).minus(s!.outstandingAmount ?? 0)),
+            0,
+        )
 
         let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID'
         if (totalSettledAmount > 0 && totalSettledAmount + 0.01 >= totalSettlementAmount && totalSettlementAmount > 0) {
@@ -894,7 +1000,28 @@ export class PurchaseOrdersService {
         }
 
         return {
-            ...po,
+            ...this.mapPurchaseOrder(po),
+            receipts: po.receipts.map((receipt) => {
+                const line = receipt.lines[0] ?? null
+                return {
+                    ...receipt,
+                    purchaseOrderLineId: line?.purchaseOrderLineId ?? null,
+                    qty: line?.actualQty ?? null,
+                    supplierLocationId: receipt.warehouseId,
+                    supplierLocation: receipt.warehouse,
+                }
+            }),
+            supplierInvoices: po.supplierInvoices.map((invoice) => ({
+                ...invoice,
+                payableSettlementId: invoice.openItem?.id ?? null,
+                payableSettlement: invoice.openItem
+                    ? {
+                          ...invoice.openItem,
+                          amountTotal: invoice.openItem.originalAmount,
+                          amountSettled: invoice.openItem.originalAmount.minus(invoice.openItem.outstandingAmount),
+                      }
+                    : null,
+            })),
             summary,
         }
     }
@@ -951,30 +1078,30 @@ export class PurchaseOrdersService {
                     status: true,
                     orderDate: true,
                     expectedDate: true,
-                    totalQty: true,
-                    totalAmount: true,
                     createdAt: true,
                     updatedAt: true,
                     supplier: { select: { id: true, code: true, name: true } },
 
                     receipts: {
                         where: { status: 'CONFIRMED' },
-                        select: { id: true, qty: true },
+                        select: {
+                            id: true,
+                            lines: { select: { actualQty: true } },
+                        },
                     },
 
                     supplierInvoices: {
-                        where: { status: { not: SupplierInvoiceStatus.VOID } },
+                        where: { status: { not: SupplierInvoiceStatus.VOIDED } },
                         select: {
                             id: true,
                             status: true,
                             totalAmount: true,
-                            payableSettlementId: true,
-                            payableSettlement: {
+                            openItem: {
                                 select: {
                                     id: true,
                                     status: true,
-                                    amountTotal: true,
-                                    amountSettled: true,
+                                    originalAmount: true,
+                                    outstandingAmount: true,
                                 },
                             },
                         },
@@ -998,11 +1125,14 @@ export class PurchaseOrdersService {
             }),
         ])
 
-        const mappedItems = items.map((item) => ({
-            ...item,
-            lineCount: item.lines?.length ?? 0,
-            summary: this.buildPoSummary(item),
-        }))
+        const mappedItems = items.map((item) => {
+            const mapped = this.mapPurchaseOrder(item)
+            return {
+                ...mapped,
+                lineCount: mapped.lines.length,
+                summary: this.buildPoSummary(mapped),
+            }
+        })
 
         const filteredItems = mappedItems.filter((item) => this.matchBusinessState(item, q.businessState))
 
@@ -1044,16 +1174,16 @@ export class PurchaseOrdersService {
                     select: { id: true },
                 },
                 supplierInvoices: {
-                    where: { status: { not: SupplierInvoiceStatus.VOID } },
+                    where: { status: { not: SupplierInvoiceStatus.VOIDED } },
                     select: {
                         id: true,
                         status: true,
-                        payableSettlement: {
+                        openItem: {
                             select: {
                                 id: true,
                                 status: true,
-                                amountTotal: true,
-                                amountSettled: true,
+                                originalAmount: true,
+                                outstandingAmount: true,
                             },
                         },
                     },
@@ -1190,17 +1320,14 @@ export class PurchaseOrdersService {
                         defaultDeliveryLocation: true,
                     },
                 },
-                supplierLocation: {
-                    select: {
-                        name: true,
-                        address: true,
-                    },
-                },
                 lines: {
-                    orderBy: { id: 'asc' },
+                    orderBy: { lineNo: 'asc' },
                     include: {
                         product: {
                             select: { name: true },
+                        },
+                        receivingWarehouse: {
+                            select: { name: true, address: true },
                         },
                     },
                 },
@@ -1240,9 +1367,9 @@ export class PurchaseOrdersService {
             }
         })
 
-        const totalQty = po.totalQty != null ? Number(po.totalQty) : lines.reduce((sum, l) => sum + l.qty, 0)
+        const totalQty = lines.reduce((sum, l) => sum + l.qty, 0)
 
-        const totalAmount = po.totalAmount != null ? Number(po.totalAmount) : lines.reduce((sum, l) => sum + l.lineTotal, 0)
+        const totalAmount = lines.reduce((sum, l) => sum + l.lineTotal, 0)
 
         return {
             id: po.id,
@@ -1251,7 +1378,7 @@ export class PurchaseOrdersService {
             supplierName: po.supplier.name,
             contractNo,
             deliveryLocation,
-            companyAddress: po.supplierLocation?.address || po.supplier.shippingAddress || historicalAddress || '',
+            companyAddress: po.lines[0]?.receivingWarehouse?.address || po.supplier.shippingAddress || historicalAddress || '',
             companyPhone: po.supplier.contactPhone || '',
             deliveryTimeText: po.expectedDate ? this.formatDate(po.expectedDate) : '',
             paymentModeText: this.mapPaymentModeText(po.paymentMode),
@@ -1485,15 +1612,12 @@ export class PurchaseOrdersService {
             throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
         }
 
-        const totalAmount =
-            po.totalAmount != null
-                ? Number(po.totalAmount)
-                : (po.lines ?? []).reduce((sum, line) => {
-                      const qty = Number(line.orderedQty ?? 0)
-                      const price = Number(line.unitPrice ?? 0)
-                      const discount = Number(line.discountAmount ?? 0)
-                      return sum + qty * price - discount
-                  }, 0)
+        const totalAmount = (po.lines ?? []).reduce((sum, line) => {
+            const qty = Number(line.orderedQty ?? 0)
+            const price = Number(line.unitPrice ?? 0)
+            const discount = Number(line.discountAmount ?? 0)
+            return sum + qty * price - discount
+        }, 0)
 
         const supplierCode = po.supplier?.code || ''
         const supplierName = po.supplier?.name || ''

@@ -85,5 +85,6 @@ export const PERMISSIONS = {
         roadManage: 'operations.road.manage',
         managePartners: 'operations.partners.manage',
         postTermCosts: 'operations.term_costs.post',
+        overrideVesselDocuments: 'operations.charter.vessel_documents.override',
     },
 } as const

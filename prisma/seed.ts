@@ -1,205 +1,158 @@
-// prisma/seed.ts
-
-import { PrismaClient, ScopeType } from '@prisma/client'
+import { PartyRoleType, PrismaClient, ScopeType, WarehousePartyRole } from '@prisma/client'
 import * as bcrypt from 'bcrypt'
+import { PERMISSIONS } from '../src/common/auth/permissions.constant'
+import { seedUsersPermissions } from './02_users_permissions.seed'
+import { seedOperationsPermissions } from './03_operations_permissions.seed'
 
-/*
 const prisma = new PrismaClient()
 
-async function main() {
-    // ===== 1. Seed user admin =====
-    const hash = await bcrypt.hash('admin@tpoil', 12)
+const moduleNames: Record<keyof typeof PERMISSIONS, string> = {
+    system: 'Hệ thống',
+    contracts: 'Hợp đồng',
+    customers: 'Khách hàng và nhà cung cấp',
+    employees: 'Nhân sự',
+    users: 'Tài khoản',
+    roles: 'Vai trò và phân quyền',
+    departments: 'Phòng ban',
+    products: 'Sản phẩm',
+    priceBulletins: 'Bảng giá',
+    banking: 'Ngân hàng',
+    purchases: 'Mua hàng',
+    sales: 'Bán hàng',
+    operations: 'Vận hành',
+}
 
-    const adminUser = await prisma.user.upsert({
-        where: { email: 'admin@tpoil.com' },
-        update: {
-            name: 'Admin',
-            isActive: true,
-        },
-        create: {
-            username: 'admin',
-            email: 'admin@tpoil.com',
-            password: hash,
-            name: 'Admin',
-            isActive: true,
-        },
-    })
-
-    console.log('✅ Seed user admin xong:', adminUser.email)
-
-    // ===== 2. Seed Modules =====
-    const modulesData = [
-        { code: 'contracts', name: 'Hợp đồng' },
-        { code: 'customers', name: 'Khách hàng' },
-        { code: 'employees', name: 'Nhân viên' },
-        { code: 'users', name: 'Tài khoản' }, // 👈 NEW
-        { code: 'system', name: 'Hệ thống' }, // RBAC admin, v.v.
-    ]
-
-    for (const m of modulesData) {
-        await prisma.module.upsert({
-            where: { code: m.code },
-            update: { name: m.name },
-            create: m,
+async function seedPermissionCatalog() {
+    for (const [moduleCode, permissions] of Object.entries(PERMISSIONS) as [keyof typeof PERMISSIONS, object][]) {
+        const moduleRow = await prisma.module.upsert({
+            where: { code: moduleCode },
+            update: { name: moduleNames[moduleCode] },
+            create: { code: moduleCode, name: moduleNames[moduleCode] },
         })
-    }
-
-    const modules = await prisma.module.findMany()
-    const moduleMap = new Map(modules.map((m) => [m.code, m]))
-    console.log(
-        '✅ Seed modules xong:',
-        modules.map((m) => m.code),
-    )
-
-    // ===== 3. Seed Permissions =====
-    const permissionsData = [
-        // Contracts
-        { moduleCode: 'contracts', code: 'contracts.view', name: 'Xem hợp đồng' },
-        { moduleCode: 'contracts', code: 'contracts.create', name: 'Tạo hợp đồng' },
-        { moduleCode: 'contracts', code: 'contracts.update', name: 'Sửa hợp đồng' },
-        { moduleCode: 'contracts', code: 'contracts.delete', name: 'Xoá hợp đồng' },
-        { moduleCode: 'contracts', code: 'contracts.import', name: 'Import hợp đồng từ Excel' },
-
-        // Customers
-        { moduleCode: 'customers', code: 'customers.view', name: 'Xem khách hàng' },
-        { moduleCode: 'customers', code: 'customers.create', name: 'Tạo khách hàng' },
-        { moduleCode: 'customers', code: 'customers.update', name: 'Sửa khách hàng' },
-        { moduleCode: 'customers', code: 'customers.delete', name: 'Xoá khách hàng' },
-
-        // Employees
-        { moduleCode: 'employees', code: 'employees.view', name: 'Xem nhân viên' },
-        { moduleCode: 'employees', code: 'employees.create', name: 'Tạo nhân viên' },
-        { moduleCode: 'employees', code: 'employees.update', name: 'Sửa nhân viên' },
-        { moduleCode: 'employees', code: 'employees.delete', name: 'Xoá nhân viên' },
-
-        // Users 👇 NEW
-        { moduleCode: 'users', code: 'users.view', name: 'Xem tài khoản' },
-        { moduleCode: 'users', code: 'users.create', name: 'Tạo tài khoản' },
-        { moduleCode: 'users', code: 'users.update', name: 'Sửa tài khoản' },
-        { moduleCode: 'users', code: 'users.delete', name: 'Xoá tài khoản' },
-        { moduleCode: 'users', code: 'users.assign_roles', name: 'Gán quyền cho tài khoản' },
-        { moduleCode: 'users', code: 'users.assign_employee', name: 'Gán nhân viên cho tài khoản' },
-        { moduleCode: 'users', code: 'users.reset_password', name: 'Cấp mật khẩu mới' },
-
-        // System
-        {
-            moduleCode: 'system',
-            code: 'system.rbac.admin',
-            name: 'Quản trị phân quyền (RBAC)',
-        },
-    ]
-
-    for (const p of permissionsData) {
-        const module = moduleMap.get(p.moduleCode)
-        if (!module) {
-            console.warn(`⚠️ Không tìm thấy module ${p.moduleCode} để seed permission ${p.code}`)
-            continue
+        for (const code of Object.values(permissions) as string[]) {
+            await prisma.permission.upsert({
+                where: { code },
+                update: { moduleId: moduleRow.id },
+                create: { code, name: code, moduleId: moduleRow.id },
+            })
         }
-
-        await prisma.permission.upsert({
-            where: { code: p.code },
-            update: {
-                name: p.name,
-                moduleId: module.id,
-            },
-            create: {
-                code: p.code,
-                name: p.name,
-                moduleId: module.id,
-            },
-        })
     }
+}
 
-    const allPermissions = await prisma.permission.findMany()
-    console.log(
-        '✅ Seed permissions xong:',
-        allPermissions.map((p) => p.code),
-    )
+async function ensurePartyRole(partyId: string, role: PartyRoleType) {
+    const current = await prisma.partyRole.findFirst({
+        where: { partyId, role, validTo: null },
+        select: { id: true },
+    })
+    if (!current) await prisma.partyRole.create({ data: { partyId, role } })
+}
 
-    // ===== 4. Seed Role "system-admin" (full quyền) =====
+async function main() {
     const adminRole = await prisma.role.upsert({
         where: { code: 'system-admin' },
-        update: {
-            name: 'Quản trị hệ thống',
-            desc: 'Full quyền toàn hệ thống',
-        },
-        create: {
-            code: 'system-admin',
-            name: 'Quản trị hệ thống',
-            desc: 'Full quyền toàn hệ thống',
-        },
+        update: { name: 'Quản trị hệ thống', desc: 'Toàn quyền hệ thống' },
+        create: { code: 'system-admin', name: 'Quản trị hệ thống', desc: 'Toàn quyền hệ thống' },
     })
 
-    console.log('✅ Seed role system-admin xong')
+    await seedPermissionCatalog()
+    await seedUsersPermissions(prisma)
+    await seedOperationsPermissions(prisma)
 
-    // Gán toàn bộ permission cho system-admin (bao gồm users.*)
+    const allPermissions = await prisma.permission.findMany({ select: { id: true } })
     await prisma.rolePermission.createMany({
-        data: allPermissions.map((p) => ({
+        data: allPermissions.map((permission) => ({
             roleId: adminRole.id,
-            permissionId: p.id,
+            permissionId: permission.id,
         })),
         skipDuplicates: true,
     })
 
-    console.log('✅ Gán tất cả permissions cho system-admin xong')
-
-    // ===== 5. Gán binding system-admin (global) cho admin user =====
-    const existingBinding = await prisma.userRoleBinding.findFirst({
-        where: {
-            userId: adminUser.id,
-            roleId: adminRole.id,
-            scopeType: ScopeType.global,
-            scopeId: null,
+    const password = await bcrypt.hash(process.env.SEED_ADMIN_PASSWORD ?? 'admin@tpoil', 12)
+    const admin = await prisma.user.upsert({
+        where: { email: 'admin@tpoil.com' },
+        update: { username: 'admin', password, name: 'Quản trị viên', isActive: true },
+        create: {
+            username: 'admin',
+            email: 'admin@tpoil.com',
+            password,
+            name: 'Quản trị viên',
+            isActive: true,
         },
     })
 
-    if (!existingBinding) {
+    const binding = await prisma.userRoleBinding.findFirst({
+        where: { userId: admin.id, roleId: adminRole.id, scopeType: ScopeType.global, scopeId: null, endAt: null },
+        select: { id: true },
+    })
+    if (!binding) {
         await prisma.userRoleBinding.create({
             data: {
-                userId: adminUser.id,
+                userId: admin.id,
                 roleId: adminRole.id,
                 scopeType: ScopeType.global,
-                scopeId: null,
-                createdBy: adminUser.id,
+                createdBy: admin.id,
             },
         })
-        console.log('✅ Gán role system-admin (global) cho admin@tpoil.com xong')
-    } else {
-        console.log('ℹ️ admin@tpoil.com đã có binding system-admin (global), bỏ qua')
     }
 
-    console.log('🎉 Seed RBAC + admin hoàn tất!')
+    const internalParty = await prisma.party.upsert({
+        where: { code: 'TPOIL' },
+        update: { name: 'TPOIL', masterStatus: 'ACTIVE', deletedAt: null },
+        create: {
+            code: 'TPOIL',
+            name: 'TPOIL',
+            customerRoles: [],
+            masterStatus: 'ACTIVE',
+        },
+    })
+    await ensurePartyRole(internalParty.id, PartyRoleType.INTERNAL_COMPANY)
+    await ensurePartyRole(internalParty.id, PartyRoleType.INVENTORY_OWNER)
+
+    const legalEntity = await prisma.legalEntity.upsert({
+        where: { code: 'TPOIL' },
+        update: { partyId: internalParty.id, baseCurrency: 'VND' },
+        create: { code: 'TPOIL', partyId: internalParty.id, baseCurrency: 'VND' },
+    })
+    const warehouse = await prisma.warehouse.upsert({
+        where: { legalEntityId_code: { legalEntityId: legalEntity.id, code: 'MAIN' } },
+        update: { name: 'Kho chính TPOIL', status: 'ACTIVE' },
+        create: {
+            legalEntityId: legalEntity.id,
+            code: 'MAIN',
+            name: 'Kho chính TPOIL',
+            status: 'ACTIVE',
+        },
+    })
+    const assignment = await prisma.warehousePartyAssignment.findFirst({
+        where: { warehouseId: warehouse.id, partyId: internalParty.id, role: WarehousePartyRole.OPERATOR, validTo: null },
+        select: { id: true },
+    })
+    if (!assignment) {
+        await prisma.warehousePartyAssignment.create({
+            data: {
+                warehouseId: warehouse.id,
+                partyId: internalParty.id,
+                role: WarehousePartyRole.OPERATOR,
+                validFrom: new Date('2020-01-01T00:00:00.000Z'),
+            },
+        })
+    }
+
+    for (const region of [
+        { code: 'VUNG_I', name: 'Vùng I' },
+        { code: 'VUNG_II', name: 'Vùng II' },
+    ]) {
+        await prisma.priceRegion.upsert({
+            where: { code: region.code },
+            update: { name: region.name, isActive: true },
+            create: { ...region, isActive: true },
+        })
+    }
 }
 
 main()
-    .catch((e) => {
-        console.error('❌ Seed lỗi:', e)
+    .catch((error) => {
+        console.error(error)
         process.exit(1)
     })
-    .finally(() => prisma.$disconnect())
-*/
-
-const prisma = new PrismaClient()
-
-async function main() {
-    await prisma.priceRegion.upsert({
-        where: { code: 'VUNG_I' },
-        update: { name: 'Vùng I', isActive: true },
-        create: { code: 'VUNG_I', name: 'Vùng I', isActive: true },
-    })
-
-    await prisma.priceRegion.upsert({
-        where: { code: 'VUNG_II' },
-        update: { name: 'Vùng II', isActive: true },
-        create: { code: 'VUNG_II', name: 'Vùng II', isActive: true },
-    })
-}
-
-main()
-    .catch((e) => {
-        console.error(e)
-        process.exit(1)
-    })
-    .finally(async () => {
-        await prisma.$disconnect()
-    })
+    .finally(async () => prisma.$disconnect())

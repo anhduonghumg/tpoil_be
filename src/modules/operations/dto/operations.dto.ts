@@ -1,6 +1,8 @@
-import { Type } from 'class-transformer'
+import { Transform, Type } from 'class-transformer'
+import { PartialType } from '@nestjs/mapped-types'
 import {
     IsArray,
+    ArrayMinSize,
     IsBoolean,
     IsDateString,
     IsEnum,
@@ -17,21 +19,60 @@ import {
 } from 'class-validator'
 import {
     DriverDocumentType,
-    ExpectedInventorySourceType,
     InspectionType,
     OperationRegistrationStatus,
     OperationalPartyRole,
+    ShipCharterContractStatus,
     ShipCharterOrderSourceType,
     ShipCharterOrderStatus,
+    ShipFreightRateSourceType,
+    ShipFreightRateStatus,
     StorageRentalContractStatus,
     TermTransportMode,
     VehicleDispatchSourceType,
     VehicleDispatchStatus,
     VehicleDocumentType,
-    WarehouseOwnerType,
-    WarehouseReservationSourceType,
-    WarehouseTransferStatus,
+    VesselDocumentType,
 } from '@prisma/client'
+import { CreateCustomerDto } from 'src/modules/customers/dto/create-customer.dto'
+
+export enum WarehouseOwnerType {
+    INTERNAL = 'INTERNAL',
+    CUSTOMER = 'CUSTOMER',
+    SUPPLIER = 'SUPPLIER',
+}
+
+export enum ExpectedInventorySourceType {
+    PURCHASE_ORDER = 'PURCHASE_ORDER',
+    SHIP_CHARTER_ORDER = 'SHIP_CHARTER_ORDER',
+    WAREHOUSE_TRANSFER = 'WAREHOUSE_TRANSFER',
+    MANUAL = 'MANUAL',
+}
+
+export enum WarehouseReservationSourceType {
+    SALES_ORDER = 'SALES_ORDER',
+    MANUAL = 'MANUAL',
+}
+
+export enum WarehouseReservationStatus {
+    ACTIVE = 'ACTIVE',
+    RELEASED = 'RELEASED',
+    CONSUMED = 'CONSUMED',
+    CANCELLED = 'CANCELLED',
+}
+
+export enum WarehouseTransferStatus {
+    DRAFT = 'DRAFT',
+    CONFIRMED = 'CONFIRMED',
+    IN_TRANSIT = 'IN_TRANSIT',
+    COMPLETED = 'COMPLETED',
+    CANCELLED = 'CANCELLED',
+}
+
+const toOptionalBoolean = ({ value }: { value: unknown }) => {
+    if (value === undefined || value === null || value === '') return undefined
+    return value === true || value === 'true'
+}
 
 export class PageQueryDto {
     @IsOptional()
@@ -54,6 +95,18 @@ export class PageQueryDto {
     @IsOptional()
     @IsString()
     status?: string
+
+    @IsOptional()
+    @IsString()
+    sourceType?: string
+
+    @IsOptional()
+    @IsUUID()
+    contractId?: string
+
+    @IsOptional()
+    @IsUUID()
+    purchaseOrderId?: string
 }
 
 export class CreateOperationalRoleDto {
@@ -72,6 +125,26 @@ export class CreateOperationalRoleDto {
     note?: string
 }
 
+export class ShipOwnerListQueryDto extends PageQueryDto {
+    @IsOptional()
+    @IsIn([OperationalPartyRole.SHIP_OWNER, OperationalPartyRole.SEA_CARRIER])
+    role?: OperationalPartyRole
+
+    @IsOptional()
+    @IsBoolean()
+    @Transform(toOptionalBoolean)
+    isActive?: boolean
+}
+
+export class CreateShipOwnerDto extends CreateCustomerDto {
+    @IsArray()
+    @ArrayMinSize(1)
+    @IsIn([OperationalPartyRole.SHIP_OWNER, OperationalPartyRole.SEA_CARRIER], { each: true })
+    declare partnerRoles: OperationalPartyRole[]
+}
+
+export class UpdateShipOwnerDto extends PartialType(CreateShipOwnerDto) {}
+
 export class UpsertVesselDto {
     @IsString()
     @IsNotEmpty()
@@ -86,31 +159,40 @@ export class UpsertVesselDto {
 
     @IsOptional()
     @IsString()
+    mmsiNo?: string
+
+    @IsOptional()
+    @IsString()
     nationality?: string
 
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
+    @Min(0)
     deadweightTonnage?: number
 
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
+    @Min(0)
     capacity?: number
 
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
+    @Min(0)
     length?: number
 
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
+    @Min(0)
     width?: number
 
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
+    @Min(0)
     draft?: number
 
     @IsOptional()
@@ -129,6 +211,52 @@ export class UpsertVesselDto {
     note?: string
 }
 
+export class UpdateVesselDto extends PartialType(UpsertVesselDto) {}
+
+export class VesselListQueryDto extends PageQueryDto {
+    @IsOptional()
+    @IsUUID()
+    ownerCustomerId?: string
+
+    @IsOptional()
+    @IsBoolean()
+    @Transform(toOptionalBoolean)
+    isActive?: boolean
+}
+
+export class VesselDocumentListQueryDto extends PageQueryDto {
+    @IsOptional()
+    @IsEnum(VesselDocumentType)
+    documentType?: VesselDocumentType
+}
+
+export class CreateVesselDocumentDto {
+    @IsEnum(VesselDocumentType)
+    documentType!: VesselDocumentType
+
+    @IsOptional()
+    @IsString()
+    documentNo?: string
+
+    @IsOptional()
+    @IsDateString()
+    issuedDate?: string | null
+
+    @IsOptional()
+    @IsDateString()
+    expiredDate?: string | null
+
+    @IsOptional()
+    @IsString()
+    fileUrl?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+export class UpdateVesselDocumentDto extends PartialType(CreateVesselDocumentDto) {}
+
 export class UpsertShipCharterContractDto {
     @IsString()
     @IsNotEmpty()
@@ -137,11 +265,13 @@ export class UpsertShipCharterContractDto {
     @IsUUID()
     ownerCustomerId!: string
 
+    @IsOptional()
     @IsDateString()
-    signedDate!: string
+    signedDate?: string
 
+    @IsOptional()
     @IsDateString()
-    effectiveFrom!: string
+    effectiveFrom?: string
 
     @IsOptional()
     @IsDateString()
@@ -149,7 +279,63 @@ export class UpsertShipCharterContractDto {
 
     @IsOptional()
     @IsString()
+    qtyBasis?: string
+
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    freightVatIncluded?: boolean
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    defaultLaytimeHours?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    demurrageRatePerDay?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(0)
+    paymentTermDays?: number
+
+    @IsOptional()
+    @IsString()
+    paymentTermText?: string
+
+    @IsOptional()
+    @IsEnum(ShipCharterContractStatus)
+    status?: ShipCharterContractStatus
+
+    @IsOptional()
+    @IsString()
     fileUrl?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    @IsOptional()
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => ShipCharterContractLossRateDto)
+    lossRates?: ShipCharterContractLossRateDto[]
+}
+
+export class ShipCharterContractLossRateDto {
+    @IsString()
+    @IsNotEmpty()
+    productGroup!: string
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    lossRatePercent!: number
 
     @IsOptional()
     @IsString()
@@ -172,6 +358,18 @@ export class UpsertShipCharterAppendixDto {
     vesselId?: string
 
     @IsOptional()
+    @IsUUID()
+    purchaseOrderId?: string
+
+    @IsOptional()
+    @IsUUID()
+    productId?: string
+
+    @IsOptional()
+    @IsUUID()
+    receivingWarehouseId?: string
+
+    @IsOptional()
     @IsString()
     cargoName?: string
 
@@ -179,6 +377,10 @@ export class UpsertShipCharterAppendixDto {
     @Type(() => Number)
     @IsNumber()
     plannedQty?: number
+
+    @IsOptional()
+    @IsString()
+    plannedQtyUnit?: string
 
     @IsOptional()
     @Type(() => Number)
@@ -207,9 +409,32 @@ export class UpsertShipCharterAppendixDto {
     freightRateVndPerLiter?: number
 
     @IsOptional()
+    @IsString()
+    qtyBasis?: string
+
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    vatIncluded?: boolean
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    vatRate?: number
+
+    @IsOptional()
     @Type(() => Number)
     @IsNumber()
     lossRatePercent?: number
+
+    @IsOptional()
+    @IsString()
+    deliveryMethod?: string
+
+    @IsOptional()
+    @IsString()
+    paymentTermText?: string
 
     @IsOptional()
     @IsString()
@@ -243,11 +468,23 @@ export class UpsertShipCharterOrderDto {
 
     @IsOptional()
     @IsUUID()
+    contractId?: string
+
+    @IsOptional()
+    @IsUUID()
     ownerCustomerId?: string
 
     @IsOptional()
     @IsUUID()
     vesselId?: string
+
+    @IsOptional()
+    @IsUUID()
+    receivingWarehouseId?: string
+
+    @IsOptional()
+    @IsUUID()
+    productId?: string
 
     @IsOptional()
     @IsDateString()
@@ -268,6 +505,16 @@ export class UpsertShipCharterOrderDto {
 
     @IsOptional()
     @IsString()
+    plannedQtyUnit?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    qtyTolerancePercent?: number
+
+    @IsOptional()
+    @IsString()
     loadingPort?: string
 
     @IsOptional()
@@ -280,9 +527,29 @@ export class UpsertShipCharterOrderDto {
     freightRateVndPerLiter?: number
 
     @IsOptional()
+    @IsString()
+    qtyBasis?: string
+
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    vatIncluded?: boolean
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    vatRate?: number
+
+    @IsOptional()
     @Type(() => Number)
     @IsNumber()
     lossRatePercent?: number
+
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    insuranceRequired?: boolean
 
     @IsOptional()
     @IsEnum(ShipCharterOrderStatus)
@@ -404,6 +671,10 @@ export class UpsertShippingAgentDto {
 }
 
 export class UpsertShipFreightRateDto {
+    @IsString()
+    @IsNotEmpty()
+    rateCode!: string
+
     @IsOptional()
     @IsUUID()
     ownerCustomerId?: string
@@ -411,6 +682,18 @@ export class UpsertShipFreightRateDto {
     @IsOptional()
     @IsUUID()
     vesselId?: string
+
+    @IsOptional()
+    @IsUUID()
+    contractId?: string
+
+    @IsOptional()
+    @IsUUID()
+    appendixId?: string
+
+    @IsOptional()
+    @IsEnum(ShipFreightRateSourceType)
+    sourceType?: ShipFreightRateSourceType
 
     @IsString()
     loadingPort!: string
@@ -420,11 +703,48 @@ export class UpsertShipFreightRateDto {
 
     @IsOptional()
     @IsString()
+    routeName?: string
+
+    @IsOptional()
+    @IsString()
     productGroup?: string
+
+    @IsOptional()
+    @IsUUID()
+    productId?: string
+
+    @IsOptional()
+    @IsString()
+    qtyBasis?: string
 
     @Type(() => Number)
     @IsNumber()
     freightRateVndPerLiter!: number
+
+    @IsOptional()
+    @IsString()
+    rateUnit?: string
+
+    @IsOptional()
+    @IsString()
+    currency?: string
+
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    vatIncluded?: boolean
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    vatRate?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    allowedLossRatePercent?: number
 
     @IsDateString()
     effectiveFrom!: string
@@ -434,8 +754,72 @@ export class UpsertShipFreightRateDto {
     effectiveTo?: string
 
     @IsOptional()
+    @IsEnum(ShipFreightRateStatus)
+    status?: ShipFreightRateStatus
+
+    @IsOptional()
     @IsString()
     note?: string
+}
+
+export class ShipFreightRateLookupDto {
+    @IsOptional()
+    @IsUUID()
+    ownerCustomerId?: string
+
+    @IsOptional()
+    @IsUUID()
+    vesselId?: string
+
+    @IsString()
+    @IsNotEmpty()
+    loadingPort!: string
+
+    @IsString()
+    @IsNotEmpty()
+    dischargePort!: string
+
+    @IsOptional()
+    @IsUUID()
+    productId?: string
+
+    @IsOptional()
+    @IsString()
+    productGroup?: string
+
+    @IsOptional()
+    @IsDateString()
+    laycanDate?: string
+}
+
+export class CreateCharterOrderFromTermDto {
+    @IsOptional()
+    @IsString()
+    charterOrderNo?: string
+
+    @IsOptional()
+    @IsUUID()
+    termShipmentId?: string
+}
+
+export class ConfirmCharterOrderDto {
+    @IsOptional()
+    @Transform(toOptionalBoolean)
+    @IsBoolean()
+    overrideDocumentCheck?: boolean
+}
+
+export class CreateAppendixFromOrderDto {
+    @IsString()
+    @IsNotEmpty()
+    appendixNo!: string
+
+    @IsDateString()
+    appendixDate!: string
+
+    @IsOptional()
+    @IsString()
+    fileUrl?: string
 }
 
 export class StorageLossRateDto {
@@ -563,7 +947,11 @@ export class CreateExpectedInventoryDto extends OwnerDto {
     sourceId!: string
 
     @IsUUID()
-    supplierLocationId!: string
+    warehouseAreaId!: string
+
+    @IsOptional()
+    @IsUUID()
+    supplierLocationId?: string
 
     @IsUUID()
     productId!: string

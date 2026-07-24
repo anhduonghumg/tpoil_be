@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer'
 import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
-import { CustomerRole, CustomerStatus, CustomerType, PartyType, TaxSource } from '@prisma/client'
+import { CustomerRole, CustomerStatus, CustomerType, OperationalPartyRole, PartyType, TaxSource } from '@prisma/client'
 
 export class CreateCustomerDto {
     @IsOptional()
@@ -33,6 +33,11 @@ export class CreateCustomerDto {
     @IsArray()
     @IsEnum(CustomerRole, { each: true })
     roles!: CustomerRole[]
+
+    @IsOptional()
+    @IsArray()
+    @IsEnum(OperationalPartyRole, { each: true })
+    partnerRoles?: OperationalPartyRole[]
 
     @IsEnum(CustomerType)
     type!: CustomerType

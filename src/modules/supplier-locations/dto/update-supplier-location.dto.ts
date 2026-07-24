@@ -1,6 +1,10 @@
-import { IsArray, IsBoolean, IsNotEmpty, IsOptional, IsString } from 'class-validator'
+import { IsArray, IsBoolean, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator'
 
 export class UpdateSupplierLocationDto {
+    @IsOptional()
+    @IsUUID()
+    areaId?: string
+
     @IsOptional()
     @IsArray()
     supplierCustomerIds?: string[]
@@ -10,20 +14,13 @@ export class UpdateSupplierLocationDto {
     @IsNotEmpty()
     name?: string
 
+    @IsOptional()
     @IsString()
     nameInvoice?: string
 
     @IsOptional()
     @IsString()
     address?: string
-
-    @IsOptional()
-    @IsString()
-    tankCode?: string
-
-    @IsOptional()
-    @IsString()
-    tankName?: string
 
     @IsOptional()
     @IsBoolean()

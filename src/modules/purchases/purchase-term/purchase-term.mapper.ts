@@ -33,6 +33,36 @@ export class PurchaseTermMapper {
         return this.stages(order).find((stage: any) => stage.stageType === stageType) ?? null
     }
 
+    private static defaultWarehouse(order: any): any | null {
+        const lines = order.lines ?? []
+        if (!lines.length) return null
+        const warehouseId = lines[0].receivingWarehouseId
+        return lines.every((line: any) => line.receivingWarehouseId === warehouseId)
+            ? lines[0].receivingWarehouse ?? null
+            : null
+    }
+
+    private static totalAmount(lines: any[]): number {
+        return (lines ?? []).reduce((sum: number, line: any) => {
+            const qty = this.n0(line.orderedQty)
+            const unitPrice = this.n0(line.unitPrice)
+            const discount = this.n0(line.discountAmount)
+            const taxRate = this.n0(line.taxRate)
+            return sum + (qty * unitPrice - discount) * (1 + taxRate / 100)
+        }, 0)
+    }
+
+    private static receivedQty(order: any, purchaseOrderLineId: string): number {
+        return (order.receipts ?? []).reduce(
+            (sum: number, receipt: any) =>
+                sum +
+                (receipt.lines ?? [])
+                    .filter((line: any) => line.purchaseOrderLineId === purchaseOrderLineId)
+                    .reduce((lineSum: number, line: any) => lineSum + this.n0(line.actualQty), 0),
+            0,
+        )
+    }
+
     private static nextActionLabel(nextAction: string): string {
         const map: Record<string, string> = {
             APPROVE_ORDER: 'Sinh đơn đặt hàng',
@@ -60,7 +90,7 @@ export class PurchaseTermMapper {
         const hasFinal = this.hasStage(order, 'FINAL')
         const hasBossSheet = this.hasStage(order, 'BOSS_SHEET')
         const isCompleted = order.status === 'COMPLETED'
-        const isDirectOrder = order.termFlowType === 'DIRECT_ORDER'
+        const isDirectOrder = order.termProfile?.flowType === 'DIRECT_ORDER'
         const hasOrderDocument = (order.termOrderDocuments ?? []).some((doc: any) => doc.status === 'ACTIVE')
         const hasPaymentRequest = (order.termPaymentRequests ?? []).some((request: any) => request.status !== 'CANCELLED')
         const hasActiveBatchItem = (order.termPaymentRequests ?? []).some((request: any) =>
@@ -255,6 +285,7 @@ export class PurchaseTermMapper {
                 .sort((a: any, b: any) => (paymentStatusRank[b.status] ?? 0) - (paymentStatusRank[a.status] ?? 0))[0]?.status ?? null
 
         const totalQty = lines.reduce((sum: number, x: any) => sum + this.n0(x.orderedQty), 0)
+        const defaultWarehouse = this.defaultWarehouse(order)
 
         return {
             id: order.id,
@@ -263,11 +294,11 @@ export class PurchaseTermMapper {
             bizType: order.bizType,
             orderType: order.orderType,
             status: order.status,
-            termFlowType: order.termFlowType,
+            termFlowType: order.termProfile?.flowType,
 
             paymentMode: order.paymentMode,
-            transportMode: order.transportMode,
-            charterVessel: !!order.charterVessel,
+            transportMode: order.termProfile?.transportMode,
+            charterVessel: !!order.termProfile?.charterRequired,
 
             orderDate: order.orderDate,
             expectedDate: order.expectedDate,
@@ -275,8 +306,8 @@ export class PurchaseTermMapper {
             supplierCustomerId: order.supplierCustomerId,
             supplierName: order.supplier?.name || null,
 
-            supplierLocationId: order.supplierLocationId,
-            supplierLocationName: order.supplierLocation?.name || null,
+            supplierLocationId: defaultWarehouse?.id ?? null,
+            supplierLocationName: defaultWarehouse?.name || null,
 
             contractId: order.contractId,
             contractNo: order.contractNo,
@@ -285,10 +316,10 @@ export class PurchaseTermMapper {
             lineCount: lines.length,
 
             totalQty,
-            totalAmount: this.n(order.totalAmount),
+            totalAmount: this.totalAmount(lines),
 
-            termPremiumUsdPerBbl: this.n(order.termPremiumUsdPerBbl),
-            premium: this.n(order.termPremiumUsdPerBbl),
+            termPremiumUsdPerBbl: this.n(order.termProfile?.premiumUsdPerBbl),
+            premium: this.n(order.termProfile?.premiumUsdPerBbl),
             paymentStatus,
 
             nextAction,
@@ -300,6 +331,8 @@ export class PurchaseTermMapper {
 
     static toOrderDetail(order: any, nextAction: string) {
         const lines = order.lines ?? []
+        const defaultWarehouse = this.defaultWarehouse(order)
+        const totalQty = lines.reduce((sum: number, line: any) => sum + this.n0(line.orderedQty), 0)
 
         return {
             id: order.id,
@@ -308,7 +341,7 @@ export class PurchaseTermMapper {
             bizType: order.bizType,
             orderType: order.orderType,
             status: order.status,
-            termFlowType: order.termFlowType,
+            termFlowType: order.termProfile?.flowType,
 
             paymentMode: order.paymentMode,
             paymentTermType: order.paymentTermType,
@@ -321,8 +354,8 @@ export class PurchaseTermMapper {
             supplierName: order.supplier?.name || null,
             supplierCode: order.supplier?.code || null,
 
-            supplierLocationId: order.supplierLocationId,
-            supplierLocationName: order.supplierLocation?.name || null,
+            supplierLocationId: defaultWarehouse?.id ?? null,
+            supplierLocationName: defaultWarehouse?.name || null,
 
             contractNo: order.contractNo,
             contractId: order.contractId,
@@ -336,8 +369,8 @@ export class PurchaseTermMapper {
                       status: order.contract.status,
                   }
                 : null,
-            transportMode: order.transportMode,
-            charterVessel: !!order.charterVessel,
+            transportMode: order.termProfile?.transportMode,
+            charterVessel: !!order.termProfile?.charterRequired,
             deliveryLocation: order.deliveryLocation,
 
             paymentNote: order.paymentNote,
@@ -346,11 +379,11 @@ export class PurchaseTermMapper {
             productSummary: this.productSummary(lines),
             lineCount: lines.length,
 
-            totalQty: this.n(order.totalQty),
-            totalAmount: this.n(order.totalAmount),
+            totalQty,
+            totalAmount: this.totalAmount(lines),
 
-            termPremiumUsdPerBbl: this.n(order.termPremiumUsdPerBbl),
-            premium: this.n(order.termPremiumUsdPerBbl),
+            termPremiumUsdPerBbl: this.n(order.termProfile?.premiumUsdPerBbl),
+            premium: this.n(order.termProfile?.premiumUsdPerBbl),
 
             lines: lines.map((line: any) => ({
                 id: line.id,
@@ -359,55 +392,58 @@ export class PurchaseTermMapper {
                 productCode: line.product?.code || null,
                 productName: line.product?.name || null,
 
-                supplierLocationId: line.supplierLocationId,
-                supplierLocationName: line.supplierLocation?.name || null,
+                supplierLocationId: line.receivingWarehouseId,
+                supplierLocationName: line.receivingWarehouse?.name || null,
 
                 orderedQty: this.n0(line.orderedQty),
                 unitPrice: this.n(line.unitPrice),
                 taxRate: this.n(line.taxRate),
                 discountAmount: this.n0(line.discountAmount),
-                withdrawnQty: this.n0(line.withdrawnQty),
+                withdrawnQty: this.receivedQty(order, line.id),
             })),
 
-            receipts: (order.receipts ?? []).map((x: any) => ({
-                id: x.id,
-                receiptNo: x.receiptNo,
-                status: x.status,
-                receiptDate: x.receiptDate,
+            receipts: (order.receipts ?? []).map((x: any) => {
+                const receiptLine = x.lines?.[0] ?? null
+                return {
+                    id: x.id,
+                    receiptNo: x.receiptNo,
+                    status: x.status,
+                    receiptDate: x.receiptDate,
 
-                purchaseOrderLineId: x.purchaseOrderLineId,
+                    purchaseOrderLineId: receiptLine?.purchaseOrderLineId ?? null,
 
-                supplierLocationId: x.supplierLocationId,
-                supplierLocationName: x.supplierLocation?.name || null,
+                    supplierLocationId: x.warehouseId,
+                    supplierLocationName: x.warehouse?.name || null,
 
-                productId: x.productId,
-                productCode: x.product?.code || null,
-                productName: x.product?.name || null,
+                    productId: receiptLine?.productId ?? null,
+                    productCode: receiptLine?.product?.code || null,
+                    productName: receiptLine?.product?.name || null,
 
-                qty: this.n0(x.qty),
-                standardQtyV15: this.n(x.standardQtyV15),
-                billQty: this.n(x.billQty),
-                tankQty: this.n(x.tankQty),
-                temporaryWithdrawQty: this.n(x.temporaryWithdrawQty),
-                billToTankLossQty: this.n(x.billToTankLossQty),
-                receiptDocumentTemplate: x.receiptDocumentTemplate,
-                sourceFileName: x.sourceFileName,
-                sourceFileUrl: x.sourceFileUrl,
-                sourceFileMimeType: x.sourceFileMimeType,
-                sourceFileSizeBytes: this.n(x.sourceFileSizeBytes),
+                    qty: this.n0(receiptLine?.actualQty),
+                    standardQtyV15: this.n(receiptLine?.v15Qty),
+                    billQty: this.n(receiptLine?.billQty),
+                    tankQty: this.n(receiptLine?.tankQty),
+                    temporaryWithdrawQty: this.n(receiptLine?.temporaryWithdrawQty),
+                    billToTankLossQty: this.n(receiptLine?.billToTankLossQty),
+                    receiptDocumentTemplate: x.receiptDocumentTemplate,
+                    sourceFileName: x.sourceFileName,
+                    sourceFileUrl: x.sourceFileUrl,
+                    sourceFileMimeType: x.sourceFileMimeType,
+                    sourceFileSizeBytes: this.n(x.sourceFileSizeBytes),
 
-                tempC: this.n(x.tempC),
-                density: this.n(x.density),
+                    tempC: this.n(receiptLine?.temperatureC),
+                    density: this.n(receiptLine?.density),
 
-                note: x.note,
+                    note: x.note,
 
-                createdAt: x.createdAt,
-                updatedAt: x.updatedAt,
-            })),
+                    createdAt: x.createdAt,
+                    updatedAt: x.updatedAt,
+                }
+            }),
 
             pricingRuns: (order.pricingRuns ?? []).map((run: any) => this.toPricingRun(run)),
 
-            shipments: (order.termShipments ?? []).map((shipment: any) => ({
+            shipments: (order.shipments ?? []).map((shipment: any) => ({
                 id: shipment.id,
                 transportMode: shipment.transportMode,
                 vesselName: shipment.vesselName,

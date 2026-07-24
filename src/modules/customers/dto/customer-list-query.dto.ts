@@ -6,6 +6,8 @@ export enum CustomerListRole {
     CUSTOMER = 'CUSTOMER',
     SUPPLIER = 'SUPPLIER',
     INTERNAL = 'INTERNAL',
+    SHIP_OWNER = 'SHIP_OWNER',
+    SEA_CARRIER = 'SEA_CARRIER',
 }
 
 export class CustomerListQueryDto {

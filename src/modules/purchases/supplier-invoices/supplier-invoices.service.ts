@@ -1,10 +1,18 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-import { InventoryService } from '../../inventory/inventory.service'
+import { GoodsReceiptPostingService } from '../../inventory/goods-receipt-posting.service'
 import { BackgroundJobsService } from 'src/modules/background-jobs/background-jobs.service'
 import { JobArtifactsService } from 'src/modules/job-artifacts/job-artifacts.service'
 import { GoogleDriveService } from 'src/infra/google-drive/google-drive.service'
-import { BackgroundJobType, SupplierInvoiceStatus, SettlementType, SettlementStatus, InventoryLedgerSourceType, Prisma } from '@prisma/client'
+import {
+    BackgroundJobType,
+    PartyRoleType,
+    PayableEntryType,
+    PayableOpenItemStatus,
+    Prisma,
+    SupplierInvoiceStatus,
+    WarehousePartyRole,
+} from '@prisma/client'
 import * as crypto from 'node:crypto'
 import { ARTIFACT_PDF_INPUT, ARTIFACT_PDF_PREVIEW, QB_SUPPLIER_INVOICE } from './jobs/supplier-invoice-queues'
 import { CreateSupplierInvoiceDto } from './dto/supplier-invoice.dto'
@@ -16,7 +24,7 @@ export class SupplierInvoicesService {
 
     constructor(
         private readonly prisma: PrismaService,
-        private readonly inventory: InventoryService,
+        private readonly receiptPosting: GoodsReceiptPostingService,
         private readonly bgJobs: BackgroundJobsService,
         private readonly artifacts: JobArtifactsService,
         private readonly drive: GoogleDriveService,
@@ -81,12 +89,12 @@ export class SupplierInvoicesService {
             throw new BadRequestException('File is required')
         }
 
-        const supplier = await this.prisma.customer.findUnique({
+        const supplier = await this.prisma.party.findUnique({
             where: { id: args.supplierCustomerId },
-            select: { id: true, isSupplier: true, name: true },
+            select: { id: true, name: true, roles: { where: { role: PartyRoleType.SUPPLIER, validTo: null }, select: { id: true } } },
         })
         if (!supplier) throw new BadRequestException('SUPPLIER_NOT_FOUND')
-        if (!supplier.isSupplier) throw new BadRequestException('NOT_SUPPLIER')
+        if (!supplier.roles.length) throw new BadRequestException('NOT_SUPPLIER')
 
         const checksum = crypto.createHash('sha256').update(args.file.buffer).digest('hex')
         const existing = await this.findExistingFileByChecksum(checksum)
@@ -300,393 +308,441 @@ export class SupplierInvoicesService {
         }
     }
 
+    private normalizeTaxRate(value?: number) {
+        if (value == null) return new Prisma.Decimal(0)
+        const rate = new Prisma.Decimal(value)
+        return rate.greaterThan(1) ? rate.div(100) : rate
+    }
+
     async create(dto: CreateSupplierInvoiceDto) {
-        try {
-            return await this.prisma.$transaction(async (tx) => {
-                const supplier = await tx.customer.findUnique({
-                    where: { id: dto.supplierCustomerId },
-                    select: { id: true, isSupplier: true },
-                })
-                if (!supplier) throw new BadRequestException('SUPPLIER_NOT_FOUND')
-                if (!supplier.isSupplier) throw new BadRequestException('NOT_SUPPLIER')
-
-                if (dto.purchaseOrderId) {
-                    const po = await tx.purchaseOrder.findUnique({
-                        where: { id: dto.purchaseOrderId },
-                        select: { id: true, supplierCustomerId: true },
-                    })
-                    if (!po) throw new BadRequestException('PURCHASE_ORDER_NOT_FOUND')
-                    if (po.supplierCustomerId !== dto.supplierCustomerId) {
-                        throw new BadRequestException('PO_SUPPLIER_MISMATCH')
-                    }
-
-                    const existedForPo = await tx.supplierInvoice.findFirst({
-                        where: {
-                            purchaseOrderId: dto.purchaseOrderId,
-                            status: { not: SupplierInvoiceStatus.VOID },
-                        },
-                        select: { id: true },
-                    })
-                    if (existedForPo) {
-                        throw new BadRequestException('PURCHASE_ORDER_ALREADY_HAS_INVOICE')
-                    }
-                }
-
-                const existed = await tx.supplierInvoice.findFirst({
-                    where: {
-                        supplierCustomerId: dto.supplierCustomerId,
-                        invoiceNo: dto.invoiceNo,
-                        invoiceSymbol: dto.invoiceSymbol ?? null,
-                        status: { not: SupplierInvoiceStatus.VOID },
-                    },
-                    select: { id: true },
-                })
-                if (existed) throw new BadRequestException('INVOICE_DUPLICATE')
-
-                const created = await tx.supplierInvoice.create({
-                    data: {
-                        supplierCustomerId: dto.supplierCustomerId,
-                        purchaseOrderId: dto.purchaseOrderId ?? null,
-                        invoiceNo: dto.invoiceNo,
-                        invoiceSymbol: dto.invoiceSymbol ?? null,
-                        invoiceTemplate: dto.invoiceTemplate ?? null,
-                        invoiceDate: new Date(dto.invoiceDate),
-                        status: SupplierInvoiceStatus.POSTED,
-                        postedAt: new Date(),
-                        note: dto.note ?? null,
-                        totalAmount: null,
-
-                        sourceFileId: dto.sourceFileId ?? null,
-                        sourceFileUrl: dto.sourceFileUrl ?? null,
-                        sourceFileName: dto.sourceFileName ?? null,
-                        sourceFileChecksum: dto.sourceFileChecksum ?? null,
-
-                        lines: {
-                            create: dto.lines.map((l) => ({
-                                supplierLocationId: l.supplierLocationId,
-                                productId: l.productId,
-                                qty: new Prisma.Decimal(l.qty),
-
-                                tempC: l.tempC == null ? null : new Prisma.Decimal(l.tempC),
-                                density: l.density == null ? null : new Prisma.Decimal(l.density),
-                                standardQtyV15: l.standardQtyV15 == null ? null : new Prisma.Decimal(l.standardQtyV15),
-
-                                unitPrice: l.unitPrice == null ? null : new Prisma.Decimal(l.unitPrice),
-                                taxRate: l.taxRate == null ? null : new Prisma.Decimal(l.taxRate),
-                                discountAmount: new Prisma.Decimal(l.discountAmount ?? 0),
-
-                                goodsReceiptId: l.goodsReceiptId ?? null,
-                            })),
-                        },
-                    },
-                    include: { lines: true },
-                })
-
-                for (const line of created.lines) {
-                    const loc = await tx.supplierLocation.findUnique({
-                        where: { id: line.supplierLocationId },
-                        select: { supplierCustomerId: true },
-                    })
-                    if (!loc) throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_FOUND')
-                    if (loc.supplierCustomerId !== created.supplierCustomerId) {
-                        throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_BELONG_SUPPLIER')
-                    }
-
-                    if (line.goodsReceiptId) {
-                        const gr = await tx.goodsReceipt.findUnique({
-                            where: { id: line.goodsReceiptId },
-                            select: {
-                                id: true,
-                                status: true,
-                                supplierCustomerId: true,
-                                supplierLocationId: true,
-                                productId: true,
-                            },
-                        })
-                        if (!gr) throw new BadRequestException('INVOICE_LINE_GR_NOT_FOUND')
-                        if (gr.status !== 'CONFIRMED') {
-                            throw new BadRequestException('INVOICE_LINE_GR_NOT_CONFIRMED')
-                        }
-                        if (gr.supplierCustomerId !== created.supplierCustomerId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_SUPPLIER_MISMATCH')
-                        }
-                        if (gr.supplierLocationId !== line.supplierLocationId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_LOCATION_MISMATCH')
-                        }
-                        if (gr.productId !== line.productId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_PRODUCT_MISMATCH')
-                        }
-                    }
-                }
-
-                // let total = new Prisma.Decimal(0)
-                // for (const line of created.lines) {
-                //     const qty = new Prisma.Decimal(line.qty)
-                //     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                //     total = total.plus(qty.mul(unitPrice))
-                // }
-
-                let total = new Prisma.Decimal(0)
-
-                for (const line of created.lines) {
-                    const qty = new Prisma.Decimal(line.qty)
-                    const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                    const discountAmount = line.discountAmount ? new Prisma.Decimal(line.discountAmount) : new Prisma.Decimal(0)
-                    const taxRate = line.taxRate ? new Prisma.Decimal(line.taxRate) : new Prisma.Decimal(0)
-
-                    const netUnitPriceRaw = unitPrice.minus(discountAmount)
-                    const netUnitPrice = netUnitPriceRaw.lessThan(0) ? new Prisma.Decimal(0) : netUnitPriceRaw
-
-                    const lineNet = qty.mul(netUnitPrice)
-                    const lineTax = lineNet.mul(taxRate).div(100)
-                    const lineTotal = lineNet.plus(lineTax)
-
-                    total = total.plus(lineTotal)
-                }
-
-                const settlement = await tx.supplierSettlement.create({
-                    data: {
-                        supplierCustomerId: created.supplierCustomerId,
-                        type: SettlementType.PAYABLE,
-                        status: SettlementStatus.OPEN,
-                        amountTotal: total,
-                        amountSettled: new Prisma.Decimal(0),
-                        dueDate: null,
-                        note: null,
-                    },
-                })
-
-                const posted = await tx.supplierInvoice.update({
-                    where: { id: created.id },
-                    data: {
-                        totalAmount: total,
-                        payableSettlementId: settlement.id,
-                    },
-                    include: {
-                        lines: true,
-                        supplier: true,
-                        payableSettlement: true,
-                        purchaseOrder: true,
-                    },
-                })
-
-                for (const line of posted.lines) {
-                    await this.inventory.applyDeltaAndAppendLedger({
-                        tx,
-                        supplierLocationId: line.supplierLocationId,
-                        productId: line.productId,
-                        delta: {
-                            deltaPendingDocQty: new Prisma.Decimal(line.qty).mul(-1),
-                            deltaPostedQty: line.qty,
-                        },
-                        sourceType: InventoryLedgerSourceType.SUPPLIER_INVOICE,
-                        sourceId: posted.id,
-                        occurredAt: posted.invoiceDate,
-                        note: dto.note ?? null,
-                    })
-                }
-
-                return posted
+        const invoiceId = await this.prisma.$transaction(async (tx) => {
+            const supplier = await tx.party.findUnique({
+                where: { id: dto.supplierCustomerId },
+                select: {
+                    id: true,
+                    roles: { where: { role: PartyRoleType.SUPPLIER, validTo: null }, select: { id: true } },
+                },
             })
-        } catch (e: any) {
-            if (e?.code === 'INVENTORY_NEGATIVE_PENDING') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_PENDING')
+            if (!supplier) throw new BadRequestException('SUPPLIER_NOT_FOUND')
+            if (!supplier.roles.length) throw new BadRequestException('NOT_SUPPLIER')
+
+            if (dto.purchaseOrderId) {
+                const po = await tx.purchaseOrder.findUnique({
+                    where: { id: dto.purchaseOrderId },
+                    select: { supplierCustomerId: true },
+                })
+                if (!po) throw new BadRequestException('PURCHASE_ORDER_NOT_FOUND')
+                if (po.supplierCustomerId !== dto.supplierCustomerId) {
+                    throw new BadRequestException('PO_SUPPLIER_MISMATCH')
+                }
             }
-            if (e?.code === 'INVENTORY_NEGATIVE_POSTED') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_POSTED')
+
+            const preparedLines: Prisma.SupplierInvoiceLineCreateWithoutInvoiceInput[] = []
+            let legalEntityId: string | null = null
+            let totalAmount = new Prisma.Decimal(0)
+
+            for (const [index, input] of dto.lines.entries()) {
+                const warehouse = await tx.warehouse.findUnique({
+                    where: { id: input.supplierLocationId },
+                    select: {
+                        legalEntityId: true,
+                        parties: {
+                            where: {
+                                partyId: dto.supplierCustomerId,
+                                role: WarehousePartyRole.OPERATOR,
+                                validTo: null,
+                            },
+                            select: { id: true },
+                        },
+                    },
+                })
+                if (!warehouse) throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_FOUND')
+                if (!warehouse.parties.length) {
+                    throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_BELONG_SUPPLIER')
+                }
+                if (legalEntityId && legalEntityId !== warehouse.legalEntityId) {
+                    throw new BadRequestException('INVOICE_LINES_MUST_BELONG_TO_ONE_LEGAL_ENTITY')
+                }
+                legalEntityId = warehouse.legalEntityId
+
+                let receiptLineId: string | null = null
+                if (input.goodsReceiptId) {
+                    const receiptLine = await tx.goodsReceiptLine.findFirst({
+                        where: { goodsReceiptId: input.goodsReceiptId, productId: input.productId },
+                        include: { goodsReceipt: true },
+                    })
+                    if (!receiptLine) throw new BadRequestException('INVOICE_LINE_GR_NOT_FOUND')
+                    if (receiptLine.goodsReceipt.status !== 'CONFIRMED') {
+                        throw new BadRequestException('INVOICE_LINE_GR_NOT_CONFIRMED')
+                    }
+                    if (receiptLine.goodsReceipt.supplierCustomerId !== dto.supplierCustomerId) {
+                        throw new BadRequestException('INVOICE_LINE_GR_SUPPLIER_MISMATCH')
+                    }
+                    if (receiptLine.goodsReceipt.warehouseId !== input.supplierLocationId) {
+                        throw new BadRequestException('INVOICE_LINE_GR_LOCATION_MISMATCH')
+                    }
+                    const allocated = await tx.supplierInvoiceLine.aggregate({
+                        where: {
+                            receiptLineId: receiptLine.id,
+                            invoice: { status: { not: SupplierInvoiceStatus.VOIDED } },
+                        },
+                        _sum: { actualQty: true },
+                    })
+                    if (
+                        new Prisma.Decimal(allocated._sum.actualQty ?? 0)
+                            .plus(input.qty)
+                            .greaterThan(receiptLine.actualQty)
+                    ) {
+                        throw new BadRequestException('INVOICE_QTY_EXCEEDS_RECEIPT_QTY')
+                    }
+                    receiptLineId = receiptLine.id
+                }
+
+                const purchaseOrderLine = dto.purchaseOrderId
+                    ? await tx.purchaseOrderLine.findFirst({
+                          where: { purchaseOrderId: dto.purchaseOrderId, productId: input.productId },
+                          select: { id: true },
+                      })
+                    : null
+                const qty = new Prisma.Decimal(input.qty)
+                const unitPrice = new Prisma.Decimal(input.unitPrice ?? 0)
+                const discountPerUnit = new Prisma.Decimal(input.discountAmount ?? 0)
+                const netUnitPrice = Prisma.Decimal.max(unitPrice.minus(discountPerUnit), 0)
+                const netAmount = qty.mul(netUnitPrice)
+                const taxRate = this.normalizeTaxRate(input.taxRate)
+                const taxAmount = netAmount.mul(taxRate)
+                totalAmount = totalAmount.plus(netAmount).plus(taxAmount)
+                preparedLines.push({
+                    lineNo: index + 1,
+                    product: { connect: { id: input.productId } },
+                    ...(purchaseOrderLine
+                        ? { purchaseOrderLine: { connect: { id: purchaseOrderLine.id } } }
+                        : {}),
+                    ...(receiptLineId ? { receiptLine: { connect: { id: receiptLineId } } } : {}),
+                    actualQty: qty,
+                    unitPrice,
+                    netAmount,
+                    taxRate,
+                    taxAmount,
+                })
             }
-            throw e
-        }
+            if (!legalEntityId) throw new BadRequestException('INVOICE_LEGAL_ENTITY_NOT_FOUND')
+
+            const duplicate = await tx.supplierInvoice.findFirst({
+                where: {
+                    legalEntityId,
+                    supplierCustomerId: dto.supplierCustomerId,
+                    invoiceNo: dto.invoiceNo.trim(),
+                    invoiceSymbol: dto.invoiceSymbol?.trim() || '',
+                },
+                select: { id: true },
+            })
+            if (duplicate) throw new BadRequestException('INVOICE_DUPLICATE')
+
+            const invoice = await tx.supplierInvoice.create({
+                data: {
+                    legalEntityId,
+                    supplierCustomerId: dto.supplierCustomerId,
+                    purchaseOrderId: dto.purchaseOrderId ?? null,
+                    invoiceNo: dto.invoiceNo.trim(),
+                    invoiceSymbol: dto.invoiceSymbol?.trim() || '',
+                    invoiceTemplate: dto.invoiceTemplate?.trim() || null,
+                    invoiceDate: new Date(dto.invoiceDate),
+                    totalAmount,
+                    note: dto.note?.trim() || null,
+                    sourceFileId: dto.sourceFileId ?? null,
+                    sourceFileUrl: dto.sourceFileUrl ?? null,
+                    sourceFileName: dto.sourceFileName ?? null,
+                    sourceFileChecksum: dto.sourceFileChecksum ?? null,
+                    lines: { create: preparedLines },
+                },
+                include: { lines: true },
+            })
+            // A received lot invoice is immediately visible in business/accounting inventory.
+            await this.postCommercialLotInvoice(tx, invoice)
+            return invoice.id
+        })
+        return this.detail(invoiceId)
     }
 
     async detail(id: string) {
         const inv = await this.prisma.supplierInvoice.findUnique({
             where: { id },
             include: {
+                supplier: true,
+                legalEntity: true,
+                purchaseOrder: true,
+                openItem: { include: { allocations: true, entries: true } },
                 lines: {
+                    orderBy: { lineNo: 'asc' },
                     include: {
                         product: true,
-                        supplierLocation: true,
+                        purchaseOrderLine: { include: { receivingWarehouse: true } },
+                        receiptLine: {
+                            include: {
+                                goodsReceipt: { include: { warehouse: true } },
+                            },
+                        },
                     },
                 },
-                supplier: true,
-                purchaseOrder: true,
-                payableSettlement: true,
             },
         })
         if (!inv) throw new NotFoundException('INVOICE_NOT_FOUND')
-        return inv
-    }
-
-    async post(id: string, payload?: { note?: string }) {
-        try {
-            return await this.prisma.$transaction(async (tx) => {
-                const inv = await tx.supplierInvoice.findUnique({
-                    where: { id },
-                    include: { lines: true },
-                })
-                if (!inv) throw new NotFoundException('INVOICE_NOT_FOUND')
-                if (inv.status !== SupplierInvoiceStatus.DRAFT) {
-                    throw new BadRequestException('INVOICE_NOT_DRAFT')
+        const payableSettlement = inv.openItem
+            ? {
+                  ...inv.openItem,
+                  supplierCustomerId: inv.openItem.supplierPartyId,
+                  type: inv.openItem.settlementType,
+                  amountTotal: inv.openItem.originalAmount,
+                  amountSettled: inv.openItem.originalAmount.minus(inv.openItem.outstandingAmount),
+                  status:
+                      inv.openItem.status === PayableOpenItemStatus.PARTIALLY_SETTLED
+                          ? 'PARTIAL'
+                          : inv.openItem.status === PayableOpenItemStatus.VOIDED
+                            ? 'VOID'
+                            : inv.openItem.status,
+              }
+            : null
+        return {
+            ...inv,
+            status: inv.status === SupplierInvoiceStatus.VOIDED ? 'VOID' : inv.status,
+            payableSettlementId: inv.openItem?.id ?? null,
+            payableSettlement,
+            lines: inv.lines.map((line) => {
+                const receipt = line.receiptLine?.goodsReceipt
+                const supplierLocation = receipt?.warehouse ?? line.purchaseOrderLine?.receivingWarehouse ?? null
+                return {
+                    ...line,
+                    supplierLocationId: supplierLocation?.id ?? null,
+                    supplierLocation,
+                    qty: line.actualQty,
+                    standardQtyV15: line.receiptLine?.v15Qty ?? null,
+                    tempC: line.receiptLine?.temperatureC ?? null,
+                    density: line.receiptLine?.density ?? null,
+                    discountAmount: new Prisma.Decimal(0),
+                    taxRate: line.taxRate.mul(100),
+                    goodsReceiptId: line.receiptLine?.goodsReceiptId ?? null,
                 }
-
-                for (const line of inv.lines) {
-                    const loc = await tx.supplierLocation.findUnique({
-                        where: { id: line.supplierLocationId },
-                        select: { supplierCustomerId: true },
-                    })
-                    if (!loc) throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_FOUND')
-                    if (loc.supplierCustomerId !== inv.supplierCustomerId) {
-                        throw new BadRequestException('INVOICE_LINE_LOCATION_NOT_BELONG_SUPPLIER')
-                    }
-
-                    if (line.goodsReceiptId) {
-                        const gr = await tx.goodsReceipt.findUnique({
-                            where: { id: line.goodsReceiptId },
-                            select: {
-                                id: true,
-                                status: true,
-                                supplierCustomerId: true,
-                                supplierLocationId: true,
-                                productId: true,
-                            },
-                        })
-                        
-                        if (!gr) throw new BadRequestException('INVOICE_LINE_GR_NOT_FOUND')
-                        if (gr.status !== 'CONFIRMED') throw new BadRequestException('INVOICE_LINE_GR_NOT_CONFIRMED')
-                        if (gr.supplierCustomerId !== inv.supplierCustomerId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_SUPPLIER_MISMATCH')
-                        }
-                        if (gr.supplierLocationId !== line.supplierLocationId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_LOCATION_MISMATCH')
-                        }
-                        if (gr.productId !== line.productId) {
-                            throw new BadRequestException('INVOICE_LINE_GR_PRODUCT_MISMATCH')
-                        }
-                    }
-                }
-
-                // let total = new Prisma.Decimal(0)
-                // for (const line of inv.lines) {
-                //     const qty = new Prisma.Decimal(line.qty)
-                //     const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                //     total = total.plus(qty.mul(unitPrice))
-                // }
-
-                let total = new Prisma.Decimal(0)
-
-                for (const line of inv.lines) {
-                    const qty = new Prisma.Decimal(line.qty)
-                    const unitPrice = line.unitPrice ? new Prisma.Decimal(line.unitPrice) : new Prisma.Decimal(0)
-                    const discountAmount = line.discountAmount ? new Prisma.Decimal(line.discountAmount) : new Prisma.Decimal(0)
-                    const taxRate = line.taxRate ? new Prisma.Decimal(line.taxRate) : new Prisma.Decimal(0)
-
-                    const netUnitPriceRaw = unitPrice.minus(discountAmount)
-                    const netUnitPrice = netUnitPriceRaw.lessThan(0) ? new Prisma.Decimal(0) : netUnitPriceRaw
-
-                    const lineNet = qty.mul(netUnitPrice)
-                    const lineTax = lineNet.mul(taxRate).div(100)
-                    const lineTotal = lineNet.plus(lineTax)
-
-                    total = total.plus(lineTotal)
-                }
-
-                const settlement = await tx.supplierSettlement.create({
-                    data: {
-                        supplierCustomerId: inv.supplierCustomerId,
-                        type: SettlementType.PAYABLE,
-                        status: SettlementStatus.OPEN,
-                        amountTotal: total,
-                        amountSettled: new Prisma.Decimal(0),
-                        dueDate: null,
-                        note: null,
-                    },
-                })
-
-                const posted = await tx.supplierInvoice.update({
-                    where: { id: inv.id },
-                    data: {
-                        status: SupplierInvoiceStatus.POSTED,
-                        postedAt: new Date(),
-                        totalAmount: total,
-                        note: payload?.note ?? inv.note,
-                        payableSettlementId: settlement.id,
-                    },
-                    include: { lines: true, payableSettlement: true },
-                })
-
-                for (const line of posted.lines) {
-                    await this.inventory.applyDeltaAndAppendLedger({
-                        tx,
-                        supplierLocationId: line.supplierLocationId,
-                        productId: line.productId,
-                        delta: {
-                            deltaPendingDocQty: new Prisma.Decimal(line.qty).mul(-1),
-                            deltaPostedQty: line.qty,
-                        },
-                        sourceType: InventoryLedgerSourceType.SUPPLIER_INVOICE,
-                        sourceId: posted.id,
-                        occurredAt: posted.invoiceDate,
-                        note: payload?.note ?? null,
-                    })
-                }
-
-                return posted
-            })
-        } catch (e: any) {
-            if (e?.code === 'INVENTORY_NEGATIVE_PENDING') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_PENDING')
-            }
-            if (e?.code === 'INVENTORY_NEGATIVE_POSTED') {
-                throw new BadRequestException('INVENTORY_NEGATIVE_POSTED')
-            }
-            throw e
+            }),
         }
     }
 
-    async void(id: string, payload?: { reason?: string }) {
-        return this.prisma.$transaction(async (tx) => {
+    private async postCommercialLotInvoice(tx: Prisma.TransactionClient, invoice: any) {
+        if (!invoice.purchaseOrderId) return
+        const purchaseOrder = await tx.purchaseOrder.findUnique({
+            where: { id: invoice.purchaseOrderId },
+            select: {
+                id: true,
+                orderType: true,
+                supplierCustomerId: true,
+                status: true,
+            },
+        })
+        if (!purchaseOrder || purchaseOrder.orderType !== 'LOT') return
+
+        for (const invoiceLine of invoice.lines) {
+            if (!invoiceLine.purchaseOrderLineId || invoiceLine.actualQty == null) {
+                throw new BadRequestException('LOT_INVOICE_LINE_MUST_MATCH_PURCHASE_ORDER_LINE')
+            }
+            const existingAllocation = await tx.commercialLotInvoiceAllocation.findUnique({
+                where: { supplierInvoiceLineId: invoiceLine.id },
+                select: { id: true },
+            })
+            if (existingAllocation) continue
+
+            const purchaseOrderLine = await tx.purchaseOrderLine.findUnique({
+                where: { id: invoiceLine.purchaseOrderLineId },
+                select: {
+                    id: true,
+                    purchaseOrderId: true,
+                    productId: true,
+                    receivingWarehouseId: true,
+                    orderedQty: true,
+                },
+            })
+            if (!purchaseOrderLine || purchaseOrderLine.purchaseOrderId !== purchaseOrder.id) {
+                throw new BadRequestException('LOT_INVOICE_LINE_PO_MISMATCH')
+            }
+            if (!purchaseOrderLine.receivingWarehouseId) {
+                throw new BadRequestException('LOT_PLANNED_WAREHOUSE_REQUIRED')
+            }
+
+            const position = await tx.commercialLotPosition.upsert({
+                where: { purchaseOrderLineId: purchaseOrderLine.id },
+                create: {
+                    purchaseOrderLineId: purchaseOrderLine.id,
+                    supplierCustomerId: purchaseOrder.supplierCustomerId,
+                    plannedWarehouseId: purchaseOrderLine.receivingWarehouseId,
+                    productId: purchaseOrderLine.productId,
+                },
+                update: {},
+            })
+            const qty = new Prisma.Decimal(invoiceLine.actualQty)
+            const nextInvoicedQty = position.invoicedQty.plus(qty)
+            if (nextInvoicedQty.greaterThan(purchaseOrderLine.orderedQty)) {
+                throw new BadRequestException({
+                    code: 'LOT_INVOICE_QTY_EXCEEDS_ORDERED_QTY',
+                    message: 'Tổng lượng hóa đơn không được vượt số lượng đặt mua.',
+                })
+            }
+
+            await tx.commercialLotInvoiceAllocation.create({
+                data: {
+                    commercialLotPositionId: position.id,
+                    supplierInvoiceLineId: invoiceLine.id,
+                    qty,
+                    accountingValue: invoiceLine.netAmount,
+                },
+            })
+            await tx.commercialLotPosition.update({
+                where: { id: position.id },
+                data: {
+                    invoicedQty: { increment: qty },
+                    accountingValue: { increment: invoiceLine.netAmount },
+                    version: { increment: 1 },
+                },
+            })
+        }
+
+        if (purchaseOrder.status === 'APPROVED') {
+            await tx.purchaseOrder.update({
+                where: { id: purchaseOrder.id },
+                data: { status: 'IN_PROGRESS', version: { increment: 1 } },
+            })
+        }
+    }
+
+    async post(id: string, payload?: { note?: string }) {
+        await this.prisma.$transaction(async (tx) => {
             const inv = await tx.supplierInvoice.findUnique({
                 where: { id },
-                include: { lines: true, payableSettlement: { include: { allocations: true } } },
+                include: { lines: { include: { receiptLine: true } }, openItem: true },
+            })
+            if (!inv) throw new NotFoundException('INVOICE_NOT_FOUND')
+            if (inv.status === SupplierInvoiceStatus.POSTED && inv.openItem) return
+            if (inv.status !== SupplierInvoiceStatus.DRAFT) throw new BadRequestException('INVOICE_NOT_DRAFT')
+
+            const now = new Date()
+            const updated = await tx.supplierInvoice.updateMany({
+                where: { id, status: SupplierInvoiceStatus.DRAFT, version: inv.version },
+                data: {
+                    status: SupplierInvoiceStatus.POSTED,
+                    postedAt: now,
+                    note: payload?.note ?? inv.note,
+                    version: { increment: 1 },
+                },
+            })
+            if (updated.count !== 1) throw new BadRequestException('INVOICE_CONCURRENTLY_CHANGED')
+
+            await tx.payableOpenItem.create({
+                data: {
+                    supplierInvoiceId: inv.id,
+                    legalEntityId: inv.legalEntityId,
+                    supplierPartyId: inv.supplierCustomerId,
+                    currency: inv.currency,
+                    originalAmount: inv.totalAmount,
+                    outstandingAmount: inv.totalAmount,
+                    entries: {
+                        create: {
+                            type: PayableEntryType.OPEN,
+                            amountDelta: inv.totalAmount,
+                            idempotencyKey: `invoice:${inv.id}:open`,
+                            effectiveAt: now,
+                        },
+                    },
+                },
+            })
+            await this.postCommercialLotInvoice(tx, inv)
+            const receiptIds = [
+                ...new Set(inv.lines.map((line) => line.receiptLine?.goodsReceiptId).filter(Boolean)),
+            ] as string[]
+            for (const goodsReceiptId of receiptIds) {
+                await this.receiptPosting.releasePendingForInvoice(tx, {
+                    goodsReceiptId,
+                    occurredAt: now,
+                })
+            }
+        })
+        return this.detail(id)
+    }
+
+    async void(id: string, payload?: { reason?: string }) {
+        await this.prisma.$transaction(async (tx) => {
+            const inv = await tx.supplierInvoice.findUnique({
+                where: { id },
+                include: {
+                    lines: {
+                        include: {
+                            receiptLine: true,
+                            commercialLotAllocation: { include: { commercialLotPosition: true } },
+                        },
+                    },
+                    openItem: { include: { allocations: { where: { status: 'ACTIVE' } } } },
+                },
             })
             if (!inv) throw new NotFoundException('INVOICE_NOT_FOUND')
             if (inv.status !== SupplierInvoiceStatus.POSTED) throw new BadRequestException('INVOICE_NOT_POSTED')
+            if (inv.openItem?.allocations.length) throw new BadRequestException('SETTLEMENT_ALREADY_ALLOCATED')
 
-            if (inv.payableSettlement?.allocations?.length) {
-                throw new BadRequestException('SETTLEMENT_ALREADY_ALLOCATED')
-            }
-
-            const voided = await tx.supplierInvoice.update({
-                where: { id: inv.id },
-                data: { status: SupplierInvoiceStatus.VOID },
-                include: { lines: true },
-            })
-
-            for (const line of voided.lines) {
-                await this.inventory.applyDeltaAndAppendLedger({
-                    tx,
-                    supplierLocationId: line.supplierLocationId,
-                    productId: line.productId,
-                    delta: {
-                        deltaPendingDocQty: line.qty,
-                        deltaPostedQty: new Prisma.Decimal(line.qty).mul(-1),
+            const now = new Date()
+            for (const line of inv.lines) {
+                const allocation = line.commercialLotAllocation
+                if (!allocation) continue
+                const position = allocation.commercialLotPosition
+                const remainingInvoiced = position.invoicedQty.minus(allocation.qty)
+                if (position.withdrawnQty.greaterThan(remainingInvoiced)) {
+                    throw new BadRequestException({
+                        code: 'LOT_INVOICE_ALREADY_WITHDRAWN',
+                        message: 'Không thể hủy hóa đơn vì hàng của hóa đơn đã được rút.',
+                    })
+                }
+                await tx.commercialLotInvoiceAllocation.delete({ where: { id: allocation.id } })
+                await tx.commercialLotPosition.update({
+                    where: { id: position.id },
+                    data: {
+                        invoicedQty: { decrement: allocation.qty },
+                        accountingValue: { decrement: allocation.accountingValue },
+                        version: { increment: 1 },
                     },
-                    sourceType: InventoryLedgerSourceType.SUPPLIER_INVOICE,
-                    sourceId: voided.id,
-                    occurredAt: new Date(),
-                    note: payload?.reason ?? null,
                 })
             }
-
-            if (inv.payableSettlementId) {
-                await tx.supplierSettlement.update({
-                    where: { id: inv.payableSettlementId },
-                    data: { status: 'VOID' },
+            if (inv.openItem) {
+                await tx.payableLedgerEntry.create({
+                    data: {
+                        openItemId: inv.openItem.id,
+                        type: PayableEntryType.REVERSAL,
+                        amountDelta: inv.openItem.outstandingAmount.negated(),
+                        idempotencyKey: `invoice:${inv.id}:void`,
+                        effectiveAt: now,
+                    },
+                })
+                await tx.payableOpenItem.update({
+                    where: { id: inv.openItem.id },
+                    data: {
+                        outstandingAmount: 0,
+                        status: PayableOpenItemStatus.VOIDED,
+                        version: { increment: 1 },
+                    },
                 })
             }
-
-            return voided
+            await tx.supplierInvoice.update({
+                where: { id: inv.id },
+                data: {
+                    status: SupplierInvoiceStatus.VOIDED,
+                    note: payload?.reason ?? inv.note,
+                    version: { increment: 1 },
+                },
+            })
+            const receiptIds = [
+                ...new Set(inv.lines.map((line) => line.receiptLine?.goodsReceiptId).filter(Boolean)),
+            ] as string[]
+            for (const goodsReceiptId of receiptIds) {
+                await this.receiptPosting.restorePendingForVoidedInvoice(tx, {
+                    goodsReceiptId,
+                    occurredAt: now,
+                })
+            }
         })
+        return this.detail(id)
     }
 }

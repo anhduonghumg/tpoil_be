@@ -1,0 +1,1 @@
+ALTER TABLE "Vessel" ADD COLUMN "mmsiNo" TEXT;

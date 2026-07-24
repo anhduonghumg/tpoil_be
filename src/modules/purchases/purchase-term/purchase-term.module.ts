@@ -22,7 +22,8 @@ import { PrismaModule } from 'src/infra/prisma/prisma.module'
 import { VcbFxRatesModule } from 'src/modules/vcb-fx-rates/vcb-fx-rates.module'
 import { EnvironmentTaxesModule } from 'src/modules/environment-taxes/environment-taxes.module'
 import { UploadModule } from 'src/modules/uploads/uploads.module'
-import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-availability.service'
+import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
+import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
 
 @Module({
     imports: [PrismaModule, VcbFxRatesModule, EnvironmentTaxesModule, UploadModule],
@@ -47,7 +48,8 @@ import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-a
         PurchaseTermShipmentsService,
         PurchaseTermLogisticsCostsService,
         VcbFxService,
-        WarehouseAvailabilityService,
+        InventoryCoreService,
+        GoodsReceiptPostingService,
     ],
     exports: [
         PurchaseTermOrdersService,

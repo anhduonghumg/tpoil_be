@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma, PurchaseBizType, TermShipmentStatus, TermTransportMode } from '@prisma/client'
+import { Prisma, PurchaseBizType, PurchaseShipmentStatus, TermTransportMode } from '@prisma/client'
+import { randomUUID } from 'crypto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermShipmentDto, UpdateTermShipmentDto } from './dto/term-shipment.dto'
 
@@ -20,7 +21,8 @@ export class PurchaseTermShipmentsService {
             select: {
                 id: true,
                 bizType: true,
-                transportMode: true,
+                termProfile: { select: { transportMode: true } },
+                lines: { select: { id: true, orderedQty: true } },
             },
         })
 
@@ -34,19 +36,21 @@ export class PurchaseTermShipmentsService {
     async list(purchaseOrderId: string) {
         await this.ensureTermOrder(purchaseOrderId)
 
-        return this.prisma.termShipment.findMany({
+        return this.prisma.purchaseShipment.findMany({
             where: { purchaseOrderId },
+            include: { lines: true },
             orderBy: { createdAt: 'desc' },
         })
     }
 
     async create(purchaseOrderId: string, dto: CreateTermShipmentDto) {
         const order = await this.ensureTermOrder(purchaseOrderId)
-        const transportMode = dto.transportMode ?? order.transportMode ?? TermTransportMode.SEA
+        const transportMode = dto.transportMode ?? order.termProfile?.transportMode ?? TermTransportMode.SEA
 
-        return this.prisma.termShipment.create({
+        return this.prisma.purchaseShipment.create({
             data: {
                 purchaseOrderId,
+                shipmentNo: `SHP-${randomUUID().slice(0, 8).toUpperCase()}`,
                 transportMode,
                 vesselName: dto.vesselName?.trim() || null,
                 voyageNo: dto.voyageNo?.trim() || null,
@@ -57,8 +61,15 @@ export class PurchaseTermShipmentsService {
                 eta: this.toDate(dto.eta),
                 surveyorName: dto.surveyorName?.trim() || null,
                 note: dto.note?.trim() || null,
-                status: dto.status ?? TermShipmentStatus.DRAFT,
+                status: dto.status ?? PurchaseShipmentStatus.DRAFT,
+                lines: {
+                    create: order.lines.map((line) => ({
+                        purchaseOrderLineId: line.id,
+                        plannedActualQty: line.orderedQty,
+                    })),
+                },
             },
+            include: { lines: true },
         })
     }
 
@@ -66,7 +77,7 @@ export class PurchaseTermShipmentsService {
         await this.ensureTermOrder(purchaseOrderId)
         await this.ensureShipment(purchaseOrderId, shipmentId)
 
-        return this.prisma.termShipment.update({
+        return this.prisma.purchaseShipment.update({
             where: { id: shipmentId },
             data: {
                 transportMode: dto.transportMode,
@@ -80,6 +91,7 @@ export class PurchaseTermShipmentsService {
                 surveyorName: dto.surveyorName !== undefined ? dto.surveyorName?.trim() || null : undefined,
                 note: dto.note !== undefined ? dto.note?.trim() || null : undefined,
                 status: dto.status,
+                version: { increment: 1 },
             },
         })
     }
@@ -89,21 +101,22 @@ export class PurchaseTermShipmentsService {
         const shipment = await this.ensureShipment(purchaseOrderId, shipmentId)
 
         if (shipment._count.logisticsCosts > 0) {
-            return this.prisma.termShipment.update({
+            return this.prisma.purchaseShipment.update({
                 where: { id: shipmentId },
-                data: { status: TermShipmentStatus.VOID },
+                data: { status: PurchaseShipmentStatus.VOID, version: { increment: 1 } },
             })
         }
 
-        await this.prisma.termShipment.delete({
-            where: { id: shipmentId },
+        await this.prisma.$transaction(async (tx) => {
+            await tx.purchaseShipmentLine.deleteMany({ where: { shipmentId } })
+            await tx.purchaseShipment.delete({ where: { id: shipmentId } })
         })
 
         return { deleted: true }
     }
 
     private async ensureShipment(purchaseOrderId: string, shipmentId: string) {
-        const shipment = await this.prisma.termShipment.findFirst({
+        const shipment = await this.prisma.purchaseShipment.findFirst({
             where: {
                 id: shipmentId,
                 purchaseOrderId,

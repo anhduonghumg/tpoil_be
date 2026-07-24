@@ -3,7 +3,7 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateContractDto } from './dto/create-contract.dto'
 import { UpdateContractDto } from './dto/update-contract.dto'
 import { ContractListQueryDto } from './dto/contract-list-query.dto'
-import { ContractStatus, Prisma } from '@prisma/client'
+import { ContractKind, ContractStatus, Prisma } from '@prisma/client'
 import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
 import { AssignCustomerToContractDto } from './dto/assign-customer.dto'
 import { addDays, diffInDays, startOfDay, subDays, formatDate } from 'src/common/utils/date.utils'
@@ -15,12 +15,18 @@ import { MailService } from 'src/mail/mail.service'
 import { CreateContractAttachmentDto } from './dto/create-contract-attachment.dto'
 import { ImportContractsDto, ImportContractsResult, ImportContractsResultItem } from './dto/import-contracts.dto'
 import dayjs from 'dayjs'
+import { DocumentStorageService } from '../uploads/document-storage.service'
+import { UploadService } from '../uploads/uploads.service'
+
+const PURCHASE_CONTRACT_TYPE_CODES = new Set(['WAREHOUSE_RENTAL', 'HDMBXD'])
 
 @Injectable()
 export class ContractsService {
     constructor(
         private prisma: PrismaService,
         private readonly mailService: MailService,
+        private readonly documentStorage: DocumentStorageService,
+        private readonly uploadService: UploadService,
     ) {}
 
     private async getContractOrThrow(contractId: string) {
@@ -29,22 +35,59 @@ export class ContractsService {
         })
 
         if (!contract || contract.deletedAt) {
-            throw new NotFoundException('Không tìm thấy hợp đồng')
+            throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y há»£p Ä‘á»“ng')
         }
 
         return contract
     }
 
     private async getCustomerOrThrow(customerId: string) {
-        const customer = await this.prisma.customer.findFirst({
+        const customer = await this.prisma.party.findFirst({
             where: { id: customerId, deletedAt: null },
         })
 
         if (!customer) {
-            throw new NotFoundException('Không tìm thấy khách hàng')
+            throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y khÃ¡ch hÃ ng')
         }
 
         return customer
+    }
+
+    private async isWarehouseRentalContractType(tx: Prisma.TransactionClient | PrismaService, contractTypeId: string) {
+        const type = await tx.contractType.findFirst({
+            where: { id: contractTypeId, deletedAt: null },
+            select: { code: true },
+        })
+        if (!type) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y loáº¡i há»£p Ä‘á»“ng')
+        return type.code === 'WAREHOUSE_RENTAL'
+    }
+
+    private async isPurchaseContractType(tx: Prisma.TransactionClient | PrismaService, contractTypeId: string) {
+        const type = await tx.contractType.findFirst({
+            where: { id: contractTypeId, deletedAt: null },
+            select: { code: true },
+        })
+        if (!type) throw new NotFoundException('Không tìm thấy loại hợp đồng')
+        return PURCHASE_CONTRACT_TYPE_CODES.has(type.code)
+    }
+
+    private async replaceWarehouseRentalLinks(tx: Prisma.TransactionClient, contractId: string, warehouseIds: string[]) {
+        const uniqueWarehouseIds = [...new Set(warehouseIds)]
+        if (uniqueWarehouseIds.length) {
+            const warehouses = await tx.warehouse.findMany({
+                where: { id: { in: uniqueWarehouseIds } },
+                select: { id: true },
+            })
+            if (warehouses.length !== uniqueWarehouseIds.length) {
+                throw new BadRequestException('CÃ³ kho khÃ´ng tá»“n táº¡i hoáº·c Ä‘Ã£ bá»‹ xÃ³a')
+            }
+        }
+        await tx.warehouseRentalContractLink.deleteMany({ where: { contractId } })
+        if (uniqueWarehouseIds.length) {
+            await tx.warehouseRentalContractLink.createMany({
+                data: uniqueWarehouseIds.map((warehouseId) => ({ contractId, warehouseId })),
+            })
+        }
     }
 
     private async findOverlapsForCustomer(params: { customerId: string; startDate: Date; endDate: Date; excludeContractId?: string }) {
@@ -74,15 +117,15 @@ export class ContractsService {
         const customer = await this.getCustomerOrThrow(dto.customerId)
 
         if (contract.status === ContractStatus.Cancelled) {
-            throw new BadRequestException('Không thể gán hợp đồng đã hủy')
+            throw new BadRequestException('KhÃ´ng thá»ƒ gÃ¡n há»£p Ä‘á»“ng Ä‘Ã£ há»§y')
         }
 
-        // HĐ đã gán KH khác rồi
+        // HÄ Ä‘Ã£ gÃ¡n KH khÃ¡c rá»“i
         if (contract.customerId && contract.customerId !== customer.id) {
-            throw new ConflictException('Hợp đồng đã được gán cho khách hàng khác')
+            throw new ConflictException('Há»£p Ä‘á»“ng Ä‘Ã£ Ä‘Æ°á»£c gÃ¡n cho khÃ¡ch hÃ ng khÃ¡c')
         }
 
-        // Check trùng thời gian với các HĐ khác của KH này
+        // Check trÃ¹ng thá»i gian vá»›i cÃ¡c HÄ khÃ¡c cá»§a KH nÃ y
         const overlaps = await this.findOverlapsForCustomer({
             customerId: customer.id,
             startDate: contract.startDate,
@@ -92,7 +135,7 @@ export class ContractsService {
 
         if (overlaps.length > 0) {
             const o = overlaps[0]
-            throw new ConflictException(`Thời gian hợp đồng trùng với ${o.code} (${o.startDate.toISOString()} – ${o.endDate.toISOString()})`)
+            throw new ConflictException(`Thá»i gian há»£p Ä‘á»“ng trÃ¹ng vá»›i ${o.code} (${o.startDate.toISOString()} â€“ ${o.endDate.toISOString()})`)
         }
 
         const updated = await this.prisma.contract.update({
@@ -104,7 +147,7 @@ export class ContractsService {
     }
 
     /**
-     * N HĐ → 1 KH (màn Customer: gán nhiều hợp đồng cho 1 khách)
+     * N HÄ â†’ 1 KH (mÃ n Customer: gÃ¡n nhiá»u há»£p Ä‘á»“ng cho 1 khÃ¡ch)
      */
     async assignContractsToCustomer(customerId: string, dto: AssignContractsToCustomerDto) {
         const customer = await this.getCustomerOrThrow(customerId)
@@ -118,15 +161,15 @@ export class ContractsService {
                     const contract = await tx.contract.findUnique({ where: { id: contractId } })
 
                     if (!contract || contract.deletedAt) {
-                        throw new BadRequestException('Không tìm thấy hợp đồng')
+                        throw new BadRequestException('KhÃ´ng tÃ¬m tháº¥y há»£p Ä‘á»“ng')
                     }
 
                     if (contract.status === ContractStatus.Cancelled) {
-                        throw new BadRequestException('Không thể gán hợp đồng đã hủy')
+                        throw new BadRequestException('KhÃ´ng thá»ƒ gÃ¡n há»£p Ä‘á»“ng Ä‘Ã£ há»§y')
                     }
 
                     if (contract.customerId && contract.customerId !== customer.id) {
-                        throw new ConflictException('Hợp đồng đã được gán cho khách hàng khác')
+                        throw new ConflictException('Há»£p Ä‘á»“ng Ä‘Ã£ Ä‘Æ°á»£c gÃ¡n cho khÃ¡ch hÃ ng khÃ¡c')
                     }
 
                     const overlaps = await this.findOverlapsForCustomer({
@@ -138,7 +181,7 @@ export class ContractsService {
 
                     if (overlaps.length > 0) {
                         const o = overlaps[0]
-                        throw new ConflictException(`Hợp đồng đã được gán cho khách hàng khác ${o.code} (${o.startDate.toISOString()} – ${o.endDate.toISOString()})`)
+                        throw new ConflictException(`Há»£p Ä‘á»“ng Ä‘Ã£ Ä‘Æ°á»£c gÃ¡n cho khÃ¡ch hÃ ng khÃ¡c ${o.code} (${o.startDate.toISOString()} â€“ ${o.endDate.toISOString()})`)
                     }
 
                     await tx.contract.update({
@@ -151,8 +194,8 @@ export class ContractsService {
             } catch (e: any) {
                 failed.push({
                     contractId,
-                    code: e?.name || 'không xác định',
-                    reason: e?.message || 'Lỗi Không xác định',
+                    code: e?.name || 'khÃ´ng xÃ¡c Ä‘á»‹nh',
+                    reason: e?.message || 'Lá»—i KhÃ´ng xÃ¡c Ä‘á»‹nh',
                 })
             }
         }
@@ -165,7 +208,7 @@ export class ContractsService {
     }
 
     /**
-     * Gỡ gán 1 HĐ khỏi 1 KH (màn Customer)
+     * Gá»¡ gÃ¡n 1 HÄ khá»i 1 KH (mÃ n Customer)
      */
     async unassignContractsFromCustomer(customerId: string, contractIds: string[]) {
         const customer = await this.getCustomerOrThrow(customerId)
@@ -181,15 +224,15 @@ export class ContractsService {
                     })
 
                     if (!contract || contract.deletedAt) {
-                        throw new NotFoundException('Không tìm thấy hợp đồng')
+                        throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y há»£p Ä‘á»“ng')
                     }
 
                     if (contract.customerId !== customer.id) {
-                        throw new BadRequestException('Hợp đồng không thuộc khách hàng này')
+                        throw new BadRequestException('Há»£p Ä‘á»“ng khÃ´ng thuá»™c khÃ¡ch hÃ ng nÃ y')
                     }
 
                     if (contract.status === ContractStatus.Cancelled) {
-                        throw new BadRequestException('Không thể gỡ hợp đồng đã hủy')
+                        throw new BadRequestException('KhÃ´ng thá»ƒ gá»¡ há»£p Ä‘á»“ng Ä‘Ã£ há»§y')
                     }
 
                     await tx.contract.update({
@@ -216,7 +259,7 @@ export class ContractsService {
 
     // LIST
     async list(query: ContractListQueryDto) {
-        const { keyword, customerId, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
+        const { keyword, customerId, contractTypeId, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
 
         const startFromDate = startFrom ? new Date(startFrom) : undefined
         const startToDate = startTo ? new Date(startTo) : undefined
@@ -230,6 +273,7 @@ export class ContractsService {
                   }
                 : {}),
             ...(customerId ? { customerId } : {}),
+            ...(contractTypeId ? { contractTypeId } : {}),
             ...(status ? { status } : {}),
             ...(riskLevel ? { riskLevel } : {}),
             ...(startFromDate || startToDate
@@ -266,9 +310,11 @@ export class ContractsService {
                             fileName: true,
                             fileUrl: true,
                             externalUrl: true,
+                            category: true,
                         },
                     },
                     renewalOf: { select: { id: true, code: true } },
+                    warehouseRentalLinks: { select: { warehouse: { select: { id: true, code: true, name: true } } } },
                 },
             }),
             this.prisma.contract.count({ where }),
@@ -301,6 +347,7 @@ export class ContractsService {
             attachments: c.attachments ?? [],
             renewalOfId: c.renewalOfId ?? null,
             renewalOfCode: c.renewalOf?.code ?? null,
+            warehouses: c.warehouseRentalLinks.map((link) => link.warehouse),
         }))
 
         return { items, total, page, pageSize }
@@ -308,6 +355,14 @@ export class ContractsService {
 
     async create(dto: CreateContractDto) {
         return this.prisma.$transaction(async (tx) => {
+            const isWarehouseRental = await this.isWarehouseRentalContractType(tx, dto.contractTypeId)
+            const isPurchaseContract = await this.isPurchaseContractType(tx, dto.contractTypeId)
+            if (dto.warehouseIds !== undefined && !isWarehouseRental) {
+                throw new BadRequestException('Chá»‰ há»£p Ä‘á»“ng thuÃª kho má»›i Ä‘Æ°á»£c phÃ©p gÃ¡n kho')
+            }
+            if (isWarehouseRental && !dto.warehouseIds?.length) {
+                throw new BadRequestException('Há»£p Ä‘á»“ng thuÃª kho cáº§n gÃ¡n Ã­t nháº¥t má»™t kho')
+            }
             let origin: { id: string; customerId: string | null; endDate: Date } | null = null
 
             if (dto.renewalOfId) {
@@ -317,16 +372,16 @@ export class ContractsService {
                 })
 
                 if (!origin) {
-                    throw new NotFoundException('Hợp đồng gốc không tồn tại')
+                    throw new NotFoundException('Há»£p Ä‘á»“ng gá»‘c khÃ´ng tá»“n táº¡i')
                 }
 
                 if (dto.customerId && origin.customerId && dto.customerId !== origin.customerId) {
-                    throw new BadRequestException('Gia hạn phải cùng khách hàng với hợp đồng gốc')
+                    throw new BadRequestException('Gia háº¡n pháº£i cÃ¹ng khÃ¡ch hÃ ng vá»›i há»£p Ä‘á»“ng gá»‘c')
                 }
 
                 const newStart = new Date(dto.startDate)
                 if (newStart <= origin.endDate) {
-                    throw new BadRequestException('Ngày bắt đầu của hợp đồng gia hạn phải sau ngày kết thúc của hợp đồng gốc')
+                    throw new BadRequestException('NgÃ y báº¯t Ä‘áº§u cá»§a há»£p Ä‘á»“ng gia háº¡n pháº£i sau ngÃ y káº¿t thÃºc cá»§a há»£p Ä‘á»“ng gá»‘c')
                 }
             }
 
@@ -346,8 +401,13 @@ export class ContractsService {
                     deliveryScope: dto.deliveryScope ?? null,
                     renewalOfId: dto.renewalOfId ?? null,
                     approvalRequestId: dto.approvalRequestId ?? null,
+                    kind: isPurchaseContract ? ContractKind.PURCHASE : dto.kind ?? ContractKind.SALES,
                 },
             })
+
+            if (isWarehouseRental && dto.warehouseIds) {
+                await this.replaceWarehouseRentalLinks(tx, newContract.id, dto.warehouseIds)
+            }
 
             if (origin) {
                 await tx.contract.update({
@@ -382,10 +442,11 @@ export class ContractsService {
                 renewalOf: true,
                 renewals: true,
                 attachments: true,
+                warehouseRentalLinks: { include: { warehouse: { select: { id: true, code: true, name: true } } } },
             },
         })
 
-        if (!contract) throw new NotFoundException('Không tìm thấy hợp đồng')
+        if (!contract) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y há»£p Ä‘á»“ng')
         return contract
     }
 
@@ -397,6 +458,16 @@ export class ContractsService {
 
             if (!existing) {
                 throw new NotFoundException('Contract not found')
+            }
+
+            const contractTypeId = dto.contractTypeId ?? existing.contractTypeId
+            const isWarehouseRental = await this.isWarehouseRentalContractType(tx, contractTypeId)
+            const isPurchaseContract = await this.isPurchaseContractType(tx, contractTypeId)
+            if (dto.warehouseIds !== undefined && !isWarehouseRental) {
+                throw new BadRequestException('Chá»‰ há»£p Ä‘á»“ng thuÃª kho má»›i Ä‘Æ°á»£c phÃ©p gÃ¡n kho')
+            }
+            if (isWarehouseRental && dto.warehouseIds !== undefined && !dto.warehouseIds.length) {
+                throw new BadRequestException('Há»£p Ä‘á»“ng thuÃª kho cáº§n gÃ¡n Ã­t nháº¥t má»™t kho')
             }
 
             const oldRenewalOfId = existing.renewalOfId
@@ -424,7 +495,7 @@ export class ContractsService {
                     throw new BadRequestException('New contract startDate must be after origin endDate')
                 }
 
-                // Đặt HĐ gốc mới sang Terminated
+                // Äáº·t HÄ gá»‘c má»›i sang Terminated
                 await tx.contract.update({
                     where: { id: newOrigin.id },
                     data: { status: ContractStatus.Terminated },
@@ -464,8 +535,13 @@ export class ContractsService {
                     deliveryScope: dto.deliveryScope ?? existing.deliveryScope,
                     renewalOfId: newRenewalOfId,
                     approvalRequestId: dto.approvalRequestId ?? existing.approvalRequestId,
+                    kind: isPurchaseContract ? ContractKind.PURCHASE : dto.kind ?? existing.kind,
                 },
             })
+
+            if (isWarehouseRental && dto.warehouseIds !== undefined) {
+                await this.replaceWarehouseRentalLinks(tx, id, dto.warehouseIds)
+            }
 
             if (updated.renewalOfId && updated.status === 'Active') {
                 await tx.contract.update({
@@ -479,7 +555,13 @@ export class ContractsService {
     }
 
     async remove(id: string) {
-        return this.prisma.$transaction(async (tx) => {
+        const attachments = await this.prisma.contractAttachment.findMany({
+            where: { contractId: id },
+            select: { fileUrl: true },
+        })
+        const fileUrls = attachments.map((item) => item.fileUrl).filter((url): url is string => Boolean(url))
+
+        const result = await this.prisma.$transaction(async (tx) => {
             const existing = await tx.contract.findUnique({
                 where: { id },
             })
@@ -515,13 +597,29 @@ export class ContractsService {
 
             return { success: true }
         })
+
+        // Storage cleanup runs after the database transaction so a failed delete never removes a live reference.
+        const driveUrls = fileUrls.filter((url) => this.documentStorage.fileIdFromUrl(url))
+        const localUrls = fileUrls.filter((url) => !this.documentStorage.fileIdFromUrl(url))
+        const [driveCleanup, localCleanup] = await Promise.all([
+            this.documentStorage.deleteByUrls(driveUrls),
+            this.uploadService.deleteByUrls(localUrls),
+        ])
+
+        return {
+            ...result,
+            fileCleanup: {
+                deleted: driveCleanup.deleted + localCleanup.deleted,
+                failed: [...driveCleanup.failed, ...localCleanup.failed],
+            },
+        }
     }
 
     /**
-     * Đếm số HĐ sắp hết hạn / đã quá hạn tại 1 ngày tham chiếu.
-     * Dùng cho:
+     * Äáº¿m sá»‘ HÄ sáº¯p háº¿t háº¡n / Ä‘Ã£ quÃ¡ háº¡n táº¡i 1 ngÃ y tham chiáº¿u.
+     * DÃ¹ng cho:
      * - Bell (bootstrap)
-     * - Summary của màn báo cáo
+     * - Summary cá»§a mÃ n bÃ¡o cÃ¡o
      */
 
     async getContractExpiryCounts(referenceDate: Date = new Date()): Promise<ContractExpiryCounts> {
@@ -532,7 +630,7 @@ export class ContractsService {
 
         const activeStatus = ContractStatus.Active
 
-        // Sắp hết hạn: endDate ∈ [ref, ref + N]
+        // Sáº¯p háº¿t háº¡n: endDate âˆˆ [ref, ref + N]
         const [expiringCount, expiredCount] = await Promise.all([
             this.prisma.contract.count({
                 where: {
@@ -544,7 +642,7 @@ export class ContractsService {
                     },
                 },
             }),
-            // Đã quá hạn gần đây: endDate ∈ (ref - M, ref)
+            // ÄÃ£ quÃ¡ háº¡n gáº§n Ä‘Ã¢y: endDate âˆˆ (ref - M, ref)
             this.prisma.contract.count({
                 where: {
                     deletedAt: null,
@@ -565,11 +663,11 @@ export class ContractsService {
     }
 
     /**
-     * Lấy danh sách HĐ sắp hết hạn / đã quá hạn (chi tiết)
-     * Dùng cho:
-     * - Màn "Báo cáo HĐ hết/sắp hết hạn"
+     * Láº¥y danh sÃ¡ch HÄ sáº¯p háº¿t háº¡n / Ä‘Ã£ quÃ¡ háº¡n (chi tiáº¿t)
+     * DÃ¹ng cho:
+     * - MÃ n "BÃ¡o cÃ¡o HÄ háº¿t/sáº¯p háº¿t háº¡n"
      * - Export Excel
-     * - Gửi email (cron & resend)
+     * - Gá»­i email (cron & resend)
      */
     async getContractExpiryList(params: ContractExpiryListParams = {}): Promise<ContractExpiryListResult> {
         let { referenceDate, status = 'all', page = 1, pageSize = 20 } = params
@@ -591,7 +689,7 @@ export class ContractsService {
         const expiredStart = subDays(ref, CONTRACT_EXPIRED_WITHIN_DAYS)
         const activeStatus = ContractStatus.Active
 
-        // where cho từng nhóm
+        // where cho tá»«ng nhÃ³m
         const expiringWhere = {
             deletedAt: null,
             status: activeStatus,
@@ -729,7 +827,7 @@ export class ContractsService {
         }
     }
 
-    // TÌM HĐ SẮP HẾT HẠN / ĐÃ HẾT HẠN
+    // TÃŒM HÄ Sáº®P Háº¾T Háº N / ÄÃƒ Háº¾T Háº N
     async generateContractExpiryExcel(params: ContractExpiryListParams = {}) {
         const result = await this.getContractExpiryList({
             ...params,
@@ -741,15 +839,15 @@ export class ContractsService {
         const sheet = workbook.addWorksheet('Expiry Report')
 
         sheet.columns = [
-            { header: 'Mã HĐ', key: 'contractCode', width: 18 },
-            { header: 'Tên hợp đồng', key: 'contractName', width: 40 },
-            { header: 'Khách hàng', key: 'customerName', width: 30 },
-            { header: 'Loại HĐ', key: 'contractTypeName', width: 18 },
-            { header: 'Ngày hiệu lực', key: 'startDate', width: 15 },
-            { header: 'Ngày hết hạn', key: 'endDate', width: 15 },
-            { header: 'Trạng thái hạn', key: 'derivedStatusLabel', width: 18 },
-            { header: 'Sales phụ trách', key: 'salesOwnerName', width: 25 },
-            { header: 'Kế toán phụ trách', key: 'accountingOwnerName', width: 25 },
+            { header: 'MÃ£ HÄ', key: 'contractCode', width: 18 },
+            { header: 'TÃªn há»£p Ä‘á»“ng', key: 'contractName', width: 40 },
+            { header: 'KhÃ¡ch hÃ ng', key: 'customerName', width: 30 },
+            { header: 'Loáº¡i HÄ', key: 'contractTypeName', width: 18 },
+            { header: 'NgÃ y hiá»‡u lá»±c', key: 'startDate', width: 15 },
+            { header: 'NgÃ y háº¿t háº¡n', key: 'endDate', width: 15 },
+            { header: 'Tráº¡ng thÃ¡i háº¡n', key: 'derivedStatusLabel', width: 18 },
+            { header: 'Sales phá»¥ trÃ¡ch', key: 'salesOwnerName', width: 25 },
+            { header: 'Káº¿ toÃ¡n phá»¥ trÃ¡ch', key: 'accountingOwnerName', width: 25 },
         ]
 
         for (const item of result.items) {
@@ -762,8 +860,8 @@ export class ContractsService {
                 endDate: formatDate(item.endDate),
                 derivedStatusLabel:
                     item.derivedStatus === 'expiring'
-                        ? `Sắp hết hạn${item.daysToEnd != null ? ` (${item.daysToEnd} ngày nữa)` : ''}`
-                        : `Đã quá hạn${item.daysSinceEnd != null ? ` (${item.daysSinceEnd} ngày)` : ''}`,
+                        ? `Sáº¯p háº¿t háº¡n${item.daysToEnd != null ? ` (${item.daysToEnd} ngÃ y ná»¯a)` : ''}`
+                        : `ÄÃ£ quÃ¡ háº¡n${item.daysSinceEnd != null ? ` (${item.daysSinceEnd} ngÃ y)` : ''}`,
                 salesOwnerName: item.salesOwnerName,
                 accountingOwnerName: item.accountingOwnerName,
             })
@@ -776,7 +874,7 @@ export class ContractsService {
     async sendContractExpiryEmail(payload: ContractExpiryEmailDto) {
         const { referenceDate, status = 'all', to, cc = [], replyTo } = payload
 
-        // 1. Tạo báo cáo + file Excel
+        // 1. Táº¡o bÃ¡o cÃ¡o + file Excel
         const { buffer, result } = await this.generateContractExpiryExcel({
             referenceDate,
             status,
@@ -784,13 +882,13 @@ export class ContractsService {
 
         const refDateLabel = referenceDate ? formatDate(typeof referenceDate === 'string' ? new Date(referenceDate) : referenceDate) : formatDate(new Date())
 
-        // 2. Lấy danh sách customerId trong report
+        // 2. Láº¥y danh sÃ¡ch customerId trong report
         const customerIds = Array.from(new Set(result.items.map((x) => x.customerId).filter((x): x is string => !!x)))
 
-        // 3. Query Email người phụ trách (sales + kế toán)
+        // 3. Query Email ngÆ°á»i phá»¥ trÃ¡ch (sales + káº¿ toÃ¡n)
         let ownerEmails: string[] = []
         if (customerIds.length) {
-            const owners = await this.prisma.customer.findMany({
+            const owners = await this.prisma.party.findMany({
                 where: { id: { in: customerIds } },
                 select: {
                     salesOwnerEmp: { select: { workEmail: true } },
@@ -802,17 +900,17 @@ export class ContractsService {
         }
 
         const mergedCc = Array.from(new Set<string>([...cc, ...ownerEmails])).filter((e) => !to.includes(e))
-        const subject = `Báo cáo hợp đồng sắp/đã hết hạn - ngày ${refDateLabel}`
-        const text = `Ngày ${refDateLabel}: Có ${result.expiringCount} hợp đồng sắp hết hạn, ${result.expiredCount} hợp đồng đã quá hạn.\nChi tiết xem file đính kèm.`
+        const subject = `BÃ¡o cÃ¡o há»£p Ä‘á»“ng sáº¯p/Ä‘Ã£ háº¿t háº¡n - ngÃ y ${refDateLabel}`
+        const text = `NgÃ y ${refDateLabel}: CÃ³ ${result.expiringCount} há»£p Ä‘á»“ng sáº¯p háº¿t háº¡n, ${result.expiredCount} há»£p Ä‘á»“ng Ä‘Ã£ quÃ¡ háº¡n.\nChi tiáº¿t xem file Ä‘Ã­nh kÃ¨m.`
 
         const html = `
-                    <p>Chào anh/chị,</p>
-                    <p>Ngày <b>${refDateLabel}</b>:</p>
+                    <p>ChÃ o anh/chá»‹,</p>
+                    <p>NgÃ y <b>${refDateLabel}</b>:</p>
                     <ul>
-                        <li><b>${result.expiringCount}</b> hợp đồng sắp hết hạn</li>
-                        <li><b>${result.expiredCount}</b> hợp đồng đã quá hạn</li>
+                        <li><b>${result.expiringCount}</b> há»£p Ä‘á»“ng sáº¯p háº¿t háº¡n</li>
+                        <li><b>${result.expiredCount}</b> há»£p Ä‘á»“ng Ä‘Ã£ quÃ¡ háº¡n</li>
                     </ul>
-                    <p>Chi tiết xem file Excel đính kèm.</p>
+                    <p>Chi tiáº¿t xem file Excel Ä‘Ã­nh kÃ¨m.</p>
                     `
 
         await this.mailService.sendMail({
@@ -911,12 +1009,12 @@ export class ContractsService {
     }
 
     /**
-     * Import hợp đồng từ Excel
+     * Import há»£p Ä‘á»“ng tá»« Excel
      * - Map customerCode -> customerId
      * - Map contractTypeCode -> contractTypeId
      * - Map renewalOfCode -> contractId
-     * - Tạo HĐ mới
-     * - Nếu có renewalOfId -> tự động set status = Terminated cho HĐ gốc
+     * - Táº¡o HÄ má»›i
+     * - Náº¿u cÃ³ renewalOfId -> tá»± Ä‘á»™ng set status = Terminated cho HÄ gá»‘c
      */
     async importFromExcel(dto: ImportContractsDto): Promise<ImportContractsResult> {
         const rows = dto.rows ?? []
@@ -930,13 +1028,13 @@ export class ContractsService {
             }
         }
 
-        // ===== 1. Chuẩn bị dữ liệu lookup (code -> entity) =====
+        // ===== 1. Chuáº©n bá»‹ dá»¯ liá»‡u lookup (code -> entity) =====
         const customerCodes = Array.from(new Set(rows.map((r) => r.customerCode).filter(Boolean)))
         const contractTypeCodes = Array.from(new Set(rows.map((r) => r.contractTypeCode).filter(Boolean)))
         const renewalCodes = Array.from(new Set(rows.map((r) => r.renewalOfCode).filter((c): c is string => !!c && c.trim().length > 0)))
 
         const [customers, contractTypes, originContracts] = await Promise.all([
-            this.prisma.customer.findMany({
+            this.prisma.party.findMany({
                 where: { code: { in: customerCodes } },
                 select: { id: true, code: true },
             }),
@@ -965,11 +1063,11 @@ export class ContractsService {
 
             const trimmed = value.trim()
 
-            // Thử DD/MM/YYYY
+            // Thá»­ DD/MM/YYYY
             let d = dayjs(trimmed, 'DD/MM/YYYY', true)
             if (d.isValid()) return d.toDate()
 
-            // Thử YYYY-MM-DD
+            // Thá»­ YYYY-MM-DD
             d = dayjs(trimmed, 'YYYY-MM-DD', true)
             if (d.isValid()) return d.toDate()
 
@@ -982,10 +1080,10 @@ export class ContractsService {
             rowIndex: number
             code: string
             data: Prisma.ContractUncheckedCreateInput
-            originContractId?: string // để auto Terminated
+            originContractId?: string // Ä‘á»ƒ auto Terminated
         }[] = []
 
-        // ===== 3. Validate từng dòng & build payload =====
+        // ===== 3. Validate tá»«ng dÃ²ng & build payload =====
         rows.forEach((row, index) => {
             const rowLabel = row.code || `row-${index + 1}`
 
@@ -993,27 +1091,27 @@ export class ContractsService {
 
             const customer = customerMap.get(row.customerCode)
             if (!customer) {
-                errors.push(`Không tìm thấy khách hàng với mã: ${row.customerCode}`)
+                errors.push(`KhÃ´ng tÃ¬m tháº¥y khÃ¡ch hÃ ng vá»›i mÃ£: ${row.customerCode}`)
             }
 
             const contractType = contractTypeMap.get(row.contractTypeCode)
             if (!contractType) {
-                errors.push(`Không tìm thấy loại hợp đồng với mã: ${row.contractTypeCode}`)
+                errors.push(`KhÃ´ng tÃ¬m tháº¥y loáº¡i há»£p Ä‘á»“ng vá»›i mÃ£: ${row.contractTypeCode}`)
             }
 
             const startDate = parseDate(row.startDate)
             const endDate = parseDate(row.endDate)
-            if (!startDate) errors.push(`Ngày bắt đầu không hợp lệ: ${row.startDate}`)
-            if (!endDate) errors.push(`Ngày kết thúc không hợp lệ: ${row.endDate}`)
+            if (!startDate) errors.push(`NgÃ y báº¯t Ä‘áº§u khÃ´ng há»£p lá»‡: ${row.startDate}`)
+            if (!endDate) errors.push(`NgÃ y káº¿t thÃºc khÃ´ng há»£p lá»‡: ${row.endDate}`)
             if (startDate && endDate && endDate < startDate) {
-                errors.push('Ngày kết thúc phải >= ngày bắt đầu')
+                errors.push('NgÃ y káº¿t thÃºc pháº£i >= ngÃ y báº¯t Ä‘áº§u')
             }
 
             let originContractId: string | undefined = undefined
             if (row.renewalOfCode) {
                 const originId = originContractMap.get(row.renewalOfCode)
                 if (!originId) {
-                    errors.push(`Không tìm thấy hợp đồng gốc với mã: ${row.renewalOfCode}`)
+                    errors.push(`KhÃ´ng tÃ¬m tháº¥y há»£p Ä‘á»“ng gá»‘c vá»›i mÃ£: ${row.renewalOfCode}`)
                 } else {
                     originContractId = originId
                 }
@@ -1092,7 +1190,7 @@ export class ContractsService {
                         index: payload.rowIndex,
                         code: payload.code,
                         success: false,
-                        error: e?.message || 'Lỗi không xác định khi ghi DB',
+                        error: e?.message || 'Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh khi ghi DB',
                     })
                 }
             }
@@ -1116,30 +1214,30 @@ export class ContractsService {
     async generateImportTemplate(): Promise<Buffer> {
         const workbook = new ExcelJS.Workbook()
 
-        const sheet = workbook.addWorksheet('Nhập hợp đồng')
+        const sheet = workbook.addWorksheet('Nháº­p há»£p Ä‘á»“ng')
 
         sheet.columns = [
-            { header: 'Mã HĐ', key: 'code', width: 18 },
-            { header: 'Tên hợp đồng', key: 'name', width: 40 },
-            { header: 'Mã KH', key: 'customerCode', width: 18 },
-            { header: 'Mã loại HĐ', key: 'contractTypeCode', width: 18 },
-            { header: 'Ngày bắt đầu', key: 'startDate', width: 20 },
-            { header: 'Ngày kết thúc', key: 'endDate', width: 20 },
-            { header: 'Trạng thái', key: 'status', width: 20 },
-            { header: 'Kỳ thanh toán (ngày)', key: 'paymentTermDays', width: 22 },
-            { header: 'Hạn mức tín dụng override', key: 'creditLimitOverride', width: 26 },
-            { header: 'Rủi ro', key: 'riskLevel', width: 16 },
+            { header: 'MÃ£ HÄ', key: 'code', width: 18 },
+            { header: 'TÃªn há»£p Ä‘á»“ng', key: 'name', width: 40 },
+            { header: 'MÃ£ KH', key: 'customerCode', width: 18 },
+            { header: 'MÃ£ loáº¡i HÄ', key: 'contractTypeCode', width: 18 },
+            { header: 'NgÃ y báº¯t Ä‘áº§u', key: 'startDate', width: 20 },
+            { header: 'NgÃ y káº¿t thÃºc', key: 'endDate', width: 20 },
+            { header: 'Tráº¡ng thÃ¡i', key: 'status', width: 20 },
+            { header: 'Ká»³ thanh toÃ¡n (ngÃ y)', key: 'paymentTermDays', width: 22 },
+            { header: 'Háº¡n má»©c tÃ­n dá»¥ng override', key: 'creditLimitOverride', width: 26 },
+            { header: 'Rá»§i ro', key: 'riskLevel', width: 16 },
             { header: 'SLA', key: 'sla', width: 30 },
-            { header: 'Phạm vi giao hàng', key: 'deliveryScope', width: 30 },
-            { header: 'Mã HĐ gốc (gia hạn)', key: 'renewalOfCode', width: 24 },
+            { header: 'Pháº¡m vi giao hÃ ng', key: 'deliveryScope', width: 30 },
+            { header: 'MÃ£ HÄ gá»‘c (gia háº¡n)', key: 'renewalOfCode', width: 24 },
         ]
 
         sheet.getRow(1).font = { bold: true }
 
-        // Ví dụ 1
+        // VÃ­ dá»¥ 1
         sheet.addRow({
             code: 'HD-2025-001',
-            name: 'Hợp đồng cung cấp xăng dầu năm 2025',
+            name: 'Há»£p Ä‘á»“ng cung cáº¥p xÄƒng dáº§u nÄƒm 2025',
             customerCode: 'CUST001',
             contractTypeCode: 'TERM',
             startDate: '01/01/2025',
@@ -1149,14 +1247,14 @@ export class ContractsService {
             creditLimitOverride: 1000000000,
             riskLevel: 'Medium',
             sla: '{"deliveryTime":"24h","support":"24/7"}',
-            deliveryScope: '{"region":"Miền Bắc"}',
+            deliveryScope: '{"region":"Miá»n Báº¯c"}',
             renewalOfCode: '',
         })
 
-        // Ví dụ 2
+        // VÃ­ dá»¥ 2
         sheet.addRow({
             code: 'HD-2025-002',
-            name: 'Hợp đồng khung phân phối dầu DO',
+            name: 'Há»£p Ä‘á»“ng khung phÃ¢n phá»‘i dáº§u DO',
             customerCode: 'CUST002',
             contractTypeCode: 'FRAME',
             startDate: '2025-02-01',
@@ -1170,16 +1268,16 @@ export class ContractsService {
             renewalOfCode: 'HD-2024-010',
         })
 
-        const guide = workbook.addWorksheet('Hướng dẫn')
-        guide.addRow(['Các cột bắt buộc:', 'Mã HĐ', 'Tên hợp đồng', 'Mã KH', 'Mã loại HĐ', 'Ngày bắt đầu', 'Ngày kết thúc', 'Trạng thái', 'Rủi ro'])
+        const guide = workbook.addWorksheet('HÆ°á»›ng dáº«n')
+        guide.addRow(['CÃ¡c cá»™t báº¯t buá»™c:', 'MÃ£ HÄ', 'TÃªn há»£p Ä‘á»“ng', 'MÃ£ KH', 'MÃ£ loáº¡i HÄ', 'NgÃ y báº¯t Ä‘áº§u', 'NgÃ y káº¿t thÃºc', 'Tráº¡ng thÃ¡i', 'Rá»§i ro'])
         guide.addRow([])
-        guide.addRow(['Trạng thái hợp lệ:', 'Draft', 'Pending', 'Active', 'Terminated', 'Cancelled'])
-        guide.addRow(['Rủi ro hợp lệ:', 'Low', 'Medium', 'High'])
+        guide.addRow(['Tráº¡ng thÃ¡i há»£p lá»‡:', 'Draft', 'Pending', 'Active', 'Terminated', 'Cancelled'])
+        guide.addRow(['Rá»§i ro há»£p lá»‡:', 'Low', 'Medium', 'High'])
         guide.addRow([])
-        guide.addRow(['Lưu ý:'])
-        guide.addRow(['- Ngày hỗ trợ 2 dạng: DD/MM/YYYY hoặc YYYY-MM-DD.'])
-        guide.addRow(['- "Mã HĐ gốc (gia hạn)" là mã hợp đồng cũ nếu đây là hợp đồng gia hạn, hệ thống sẽ tự set Terminated cho HĐ gốc.'])
-        guide.addRow(['- Nếu không dùng hạn mức override, để trống "Hạn mức tín dụng override".'])
+        guide.addRow(['LÆ°u Ã½:'])
+        guide.addRow(['- NgÃ y há»— trá»£ 2 dáº¡ng: DD/MM/YYYY hoáº·c YYYY-MM-DD.'])
+        guide.addRow(['- "MÃ£ HÄ gá»‘c (gia háº¡n)" lÃ  mÃ£ há»£p Ä‘á»“ng cÅ© náº¿u Ä‘Ã¢y lÃ  há»£p Ä‘á»“ng gia háº¡n, há»‡ thá»‘ng sáº½ tá»± set Terminated cho HÄ gá»‘c.'])
+        guide.addRow(['- Náº¿u khÃ´ng dÃ¹ng háº¡n má»©c override, Ä‘á»ƒ trá»‘ng "Háº¡n má»©c tÃ­n dá»¥ng override".'])
 
         const data = await workbook.xlsx.writeBuffer()
         return Buffer.from(data)

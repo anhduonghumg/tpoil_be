@@ -32,7 +32,7 @@ export class ProductsService {
 
         return items.map((x) => ({
             id: x.id,
-            code: x.code ?? '',
+            code: x.code,
             name: x.name,
             uom: x.uom,
             label: `${x.name}${x.code ? ` (${x.code})` : ''}`,
@@ -74,7 +74,7 @@ export class ProductsService {
     create(dto: ProductCreateDto) {
         return this.prisma.product.create({
             data: {
-                code: dto.code,
+                code: dto.code.trim().toUpperCase(),
                 name: dto.name,
                 nameMisa: dto.nameMisa,
                 uom: dto.uom,
@@ -88,10 +88,11 @@ export class ProductsService {
         return this.prisma.product.update({
             where: { id },
             data: {
-                code: dto.code,
+                code: dto.code?.trim().toUpperCase(),
                 name: dto.name,
                 nameMisa: dto.nameMisa,
                 uom: dto.uom,
+                version: { increment: 1 },
             },
         })
     }

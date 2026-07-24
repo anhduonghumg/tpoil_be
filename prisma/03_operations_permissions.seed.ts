@@ -1,10 +1,4 @@
-import {
-    AvailabilityLedgerSourceType,
-    PrismaClient,
-    WarehouseOwnerType,
-} from '@prisma/client'
-
-const prisma = new PrismaClient()
+import { PrismaClient } from '@prisma/client'
 
 const permissions = [
     ['operations.view', 'Xem phân hệ vận hành'],
@@ -13,19 +7,20 @@ const permissions = [
     ['operations.road.manage', 'Quản lý xe và điều xe'],
     ['operations.partners.manage', 'Quản lý vai trò đối tác vận hành'],
     ['operations.term_costs.post', 'Đưa chi phí vận hành vào giá vốn TERM'],
+    ['operations.charter.vessel_documents.override', 'Cho phép xác nhận đơn khi hồ sơ tàu chưa hợp lệ'],
 ] as const
 
-export async function seedOperationsPermissions() {
-    const moduleRow = await prisma.module.upsert({
+export async function seedOperationsPermissions(db: PrismaClient) {
+    const moduleRow = await db.module.upsert({
         where: { code: 'operations' },
         update: { name: 'Vận hành' },
         create: { code: 'operations', name: 'Vận hành' },
     })
 
-    const permissionRows = []
+    const permissionRows: Array<{ id: string }> = []
     for (const [code, name] of permissions) {
         permissionRows.push(
-            await prisma.permission.upsert({
+            await db.permission.upsert({
                 where: { code },
                 update: { name, moduleId: moduleRow.id },
                 create: { code, name, moduleId: moduleRow.id },
@@ -33,12 +28,12 @@ export async function seedOperationsPermissions() {
         )
     }
 
-    const systemAdmin = await prisma.role.findUnique({
+    const systemAdmin = await db.role.findUnique({
         where: { code: 'system-admin' },
         select: { id: true },
     })
     if (systemAdmin) {
-        await prisma.rolePermission.createMany({
+        await db.rolePermission.createMany({
             data: permissionRows.map((permission) => ({
                 roleId: systemAdmin.id,
                 permissionId: permission.id,
@@ -47,65 +42,15 @@ export async function seedOperationsPermissions() {
         })
     }
 
-    const accountingBalances = await prisma.inventoryBalance.findMany()
-    for (const accounting of accountingBalances) {
-        const balance = await prisma.warehouseAvailabilityBalance.upsert({
-            where: {
-                supplierLocationId_productId_ownerKey: {
-                    supplierLocationId: accounting.supplierLocationId,
-                    productId: accounting.productId,
-                    ownerKey: 'INTERNAL',
-                },
-            },
-            update: {},
-            create: {
-                supplierLocationId: accounting.supplierLocationId,
-                productId: accounting.productId,
-                ownerType: WarehouseOwnerType.INTERNAL,
-                ownerKey: 'INTERNAL',
-                availableQty: accounting.physicalQty,
-            },
-        })
-        await prisma.warehouseAvailabilityLedger.upsert({
-            where: {
-                sourceType_sourceId_sourceAction_supplierLocationId_productId_ownerKey: {
-                    sourceType: AvailabilityLedgerSourceType.MANUAL,
-                    sourceId: balance.id,
-                    sourceAction: 'MIGRATION_BACKFILL',
-                    supplierLocationId: balance.supplierLocationId,
-                    productId: balance.productId,
-                    ownerKey: balance.ownerKey,
-                },
-            },
-            update: {},
-            create: {
-                supplierLocationId: balance.supplierLocationId,
-                productId: balance.productId,
-                ownerType: balance.ownerType,
-                ownerKey: balance.ownerKey,
-                deltaAvailableQty: balance.availableQty,
-                afterAvailableQty: balance.availableQty,
-                afterReservedQty: balance.reservedQty,
-                afterInTransitQty: balance.inTransitQty,
-                afterExpectedQty: balance.expectedQty,
-                sourceType: AvailabilityLedgerSourceType.MANUAL,
-                sourceId: balance.id,
-                sourceAction: 'MIGRATION_BACKFILL',
-                occurredAt: new Date(),
-                note: 'Khởi tạo tồn kinh doanh từ InventoryBalance.physicalQty',
-            },
-        })
-    }
-
     return {
         moduleId: moduleRow.id,
         permissionCount: permissionRows.length,
-        availabilityBackfillCount: accountingBalances.length,
     }
 }
 
 if (require.main === module) {
-    seedOperationsPermissions()
+    const prisma = new PrismaClient()
+    seedOperationsPermissions(prisma)
         .then((result) => console.log(JSON.stringify(result)))
         .catch((error) => {
             console.error(error)

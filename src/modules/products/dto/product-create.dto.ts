@@ -1,10 +1,10 @@
-import { IsEnum, IsOptional, IsString } from 'class-validator'
+import { IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator'
 import { QtyUom } from '@prisma/client'
 
 export class ProductCreateDto {
-    @IsOptional()
     @IsString()
-    code?: string
+    @IsNotEmpty()
+    code!: string
 
     @IsString()
     name!: string

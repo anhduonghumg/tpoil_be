@@ -1,6 +1,6 @@
 // src/modules/purchases/purchase-orders/purchase-orders.controller.ts
-import { Body, Controller, Get, NotFoundException, Param, Post, Query, Res, UseGuards, UseInterceptors } from '@nestjs/common'
-import type { Response } from 'express'
+import { Body, Controller, Get, NotFoundException, Param, Post, Query, Req, Res, UseGuards, UseInterceptors } from '@nestjs/common'
+import type { Request, Response } from 'express'
 import path from 'path'
 import { PurchaseOrdersService } from './purchase-orders.service'
 import { ApprovePurchaseOrderDto, BulkPurchaseOrderIdsDto, CreatePurchaseOrderDto, ListPurchaseOrdersQueryDto } from './dto/purchase-order.dto'
@@ -32,19 +32,24 @@ export class PurchaseOrdersController {
         return this.service.getTabCounts(query)
     }
 
+    @Get('validate-contract')
+    validateContract(@Query('supplierCustomerId') supplierCustomerId: string, @Query('orderDate') orderDate: string) {
+        return this.service.validateContract(supplierCustomerId, orderDate)
+    }
+
     @Get(':id')
     detail(@Param('id') id: string) {
         return this.service.detail(id)
     }
 
     @Post()
-    create(@Body() dto: CreatePurchaseOrderDto) {
-        return this.service.create(dto)
+    create(@Body() dto: CreatePurchaseOrderDto, @Req() req: Request) {
+        return this.service.create(dto, (req as any).user?.id)
     }
 
     @Post(':id/approve')
-    approve(@Param('id') id: string, @Body() _dto: ApprovePurchaseOrderDto) {
-        return this.service.approve(id)
+    approve(@Param('id') id: string, @Body() _dto: ApprovePurchaseOrderDto, @Req() req: Request) {
+        return this.service.approve(id, (req as any).user?.id)
     }
 
     @Post(':id/cancel')

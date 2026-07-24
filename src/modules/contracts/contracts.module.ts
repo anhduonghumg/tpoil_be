@@ -10,9 +10,10 @@ import { MailModule } from 'src/mail/mail.module'
 import { CronModule } from '../cron/cron.module'
 import { ContractExpiryCronService } from './cron/contract-expiry.cron.service'
 import { ContractsCronRegister } from './cron/contracts-cron.register'
+import { UploadModule } from '../uploads/uploads.module'
 
 @Module({
-    imports: [PrismaModule, MailModule, AuditModule, CronModule],
+    imports: [PrismaModule, MailModule, AuditModule, CronModule, UploadModule],
     controllers: [ContractsController, ContractAttachmentsController],
     providers: [ContractsService, ContractAttachmentsService, PrismaService, ContractExpiryCronService, ContractsCronRegister],
     exports: [ContractsService, ContractAttachmentsService],

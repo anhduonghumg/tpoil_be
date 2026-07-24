@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common'
 import {
-    ExpectedInventoryStatus,
+    ReconciliationVarianceStatus,
+    ExpectedSupplyStatus,
+    InventoryDocumentStatus,
+    InventoryMovementStatus,
     OperationRegistrationStatus,
     Prisma,
     ShipCharterOrderStatus,
     VehicleDispatchStatus,
     VehicleDocumentType,
-    WarehouseTransferStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 
@@ -48,7 +50,8 @@ export class OperationsDashboardService {
             expiringVehicleInsurance,
             expiringLicenses,
             availability,
-            accounting,
+            dispatched,
+            arrived,
             transfersInTransit,
             reconciliationVariance,
             expectedSoon,
@@ -110,26 +113,61 @@ export class OperationsDashboardService {
             this.prisma.driverDocument.count({
                 where: { documentType: 'DRIVER_LICENSE', expiredDate: { gte: now, lte: warningDate } },
             }),
-            this.prisma.warehouseAvailabilityBalance.aggregate({
-                _sum: { availableQty: true, reservedQty: true, inTransitQty: true, expectedQty: true },
+            this.prisma.inventoryAvailabilityBalance.aggregate({
+                _sum: {
+                    onHandActualQty: true,
+                    reservedActualQty: true,
+                    pendingActualQty: true,
+                    blockedActualQty: true,
+                },
             }),
-            this.prisma.inventoryBalance.aggregate({
-                _sum: { physicalQty: true, pendingDocQty: true, postedQty: true },
+            this.prisma.inventoryDispatchLine.aggregate({
+                where: { dispatch: { status: InventoryDocumentStatus.POSTED } },
+                _sum: { actualQty: true },
             }),
-            this.prisma.warehouseTransfer.count({
-                where: { status: { in: [WarehouseTransferStatus.CONFIRMED, WarehouseTransferStatus.IN_TRANSIT] } },
+            this.prisma.inventoryArrivalLine.aggregate({
+                where: { arrival: { status: InventoryDocumentStatus.POSTED } },
+                _sum: { actualQty: true },
             }),
-            this.prisma.reconcileVariance.count({ where: { resolvedAt: null, varianceQty: { not: 0 } } }),
-            this.prisma.expectedInventory.count({
+            this.prisma.inventoryMovement.count({
                 where: {
-                    status: { in: [ExpectedInventoryStatus.OPEN, ExpectedInventoryStatus.PARTIALLY_RECEIVED] },
-                    expectedDate: { gte: todayStart, lte: warningDate },
+                    status: {
+                        in: [InventoryMovementStatus.IN_TRANSIT, InventoryMovementStatus.PARTIALLY_ARRIVED],
+                    },
+                },
+            }),
+            this.prisma.reconciliationVariance.count({
+                where: {
+                    status: {
+                        in: [
+                            ReconciliationVarianceStatus.OPEN,
+                            ReconciliationVarianceStatus.EXPLAINED,
+                        ],
+                    },
+                    varianceActualQty: { not: 0 },
+                },
+            }),
+            this.prisma.expectedSupply.count({
+                where: {
+                    status: { in: [ExpectedSupplyStatus.OPEN, ExpectedSupplyStatus.PARTIALLY_FULFILLED] },
+                    expectedAt: { gte: todayStart, lte: warningDate },
                 },
             }),
         ])
 
-        const available = new Prisma.Decimal(availability._sum.availableQty ?? 0)
-        const reserved = new Prisma.Decimal(availability._sum.reservedQty ?? 0)
+        const physical = new Prisma.Decimal(availability._sum.onHandActualQty ?? 0)
+        const reserved = new Prisma.Decimal(availability._sum.reservedActualQty ?? 0)
+        const pending = new Prisma.Decimal(availability._sum.pendingActualQty ?? 0)
+        const blocked = new Prisma.Decimal(availability._sum.blockedActualQty ?? 0)
+        const sellable = physical.minus(reserved).minus(pending).minus(blocked)
+        const inTransit = new Prisma.Decimal(dispatched._sum.actualQty ?? 0).minus(arrived._sum.actualQty ?? 0)
+        const expected = await this.prisma.expectedSupply.aggregate({
+            where: { status: { in: [ExpectedSupplyStatus.OPEN, ExpectedSupplyStatus.PARTIALLY_FULFILLED] } },
+            _sum: { expectedActualQty: true, fulfilledActualQty: true },
+        })
+        const expectedQty = new Prisma.Decimal(expected._sum.expectedActualQty ?? 0).minus(
+            expected._sum.fulfilledActualQty ?? 0,
+        )
 
         return {
             shipCharter: {
@@ -153,14 +191,15 @@ export class OperationsDashboardService {
                 expiringLicenses,
             },
             warehouse: {
-                availableQty: available,
+                availableQty: physical.minus(pending).minus(blocked),
                 reservedQty: reserved,
-                sellableQty: available.minus(reserved),
-                inTransitQty: availability._sum.inTransitQty ?? new Prisma.Decimal(0),
-                expectedQty: availability._sum.expectedQty ?? new Prisma.Decimal(0),
-                physicalQty: accounting._sum.physicalQty ?? new Prisma.Decimal(0),
-                pendingDocQty: accounting._sum.pendingDocQty ?? new Prisma.Decimal(0),
-                postedQty: accounting._sum.postedQty ?? new Prisma.Decimal(0),
+                sellableQty: sellable,
+                inTransitQty: inTransit,
+                expectedQty,
+                physicalQty: physical,
+                pendingDocQty: pending,
+                postedQty: physical.minus(pending),
+                blockedQty: blocked,
                 transfersInTransit,
                 reconciliationVariance,
                 expectedSoon,

@@ -1,5 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { BankImportStatus, BankTxnDirection, BankTxnMatchStatus, Prisma, SettlementStatus } from '@prisma/client'
+import {
+    BankImportStatus,
+    BankTxnDirection,
+    BankTxnMatchStatus,
+    PayableAllocationStatus,
+    PayableEntryType,
+    PayableOpenItemStatus,
+    Prisma,
+} from '@prisma/client'
 import * as ExcelJS from 'exceljs'
 import * as crypto from 'crypto'
 import { PrismaService } from '../../infra/prisma/prisma.service'
@@ -38,6 +46,45 @@ export class BankingService {
         private readonly prisma: PrismaService,
         private readonly bankImportTemplatesService: BankImportTemplatesService,
     ) {}
+
+    private legacyAllocation(allocation: any) {
+        const openItem = allocation.openItem
+        return {
+            ...allocation,
+            allocatedAmount: allocation.amountInBankCurrency,
+            settlementId: allocation.openItemId,
+            settlement: openItem
+                ? {
+                      ...openItem,
+                      supplierCustomerId: openItem.supplierPartyId,
+                      amountTotal: openItem.originalAmount,
+                      amountSettled: new Prisma.Decimal(openItem.originalAmount).minus(openItem.outstandingAmount),
+                      invoices: openItem.invoice ? [openItem.invoice] : [],
+                  }
+                : null,
+        }
+    }
+
+    private transactionResponse(item: any) {
+        const allocations = (item.payableAllocations ?? []).map((allocation: any) =>
+            this.legacyAllocation(allocation),
+        )
+        const allocatedAmount = allocations
+            .filter((allocation: any) => allocation.status === PayableAllocationStatus.ACTIVE)
+            .reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedAmount), 0)
+        return {
+            ...item,
+            allocations,
+            amount: Number(item.amount),
+            allocatedAmount,
+            remainingAmount: Number(item.amount) - allocatedAmount,
+            purposeName: item.purpose?.name ?? null,
+            canDelete:
+                item.matchStatus === BankTxnMatchStatus.UNMATCHED &&
+                item.isConfirmed !== true &&
+                allocations.length === 0,
+        }
+    }
 
     async listTransactions(query: QueryBankTransactionsDto) {
         const page = query.page ?? 1
@@ -84,11 +131,11 @@ export class BankingService {
                             name: true,
                         },
                     },
-                    allocations: {
+                    payableAllocations: {
                         include: {
-                            settlement: {
+                            openItem: {
                                 include: {
-                                    invoices: {
+                                    invoice: {
                                         select: {
                                             id: true,
                                             invoiceNo: true,
@@ -106,27 +153,14 @@ export class BankingService {
                                 },
                             },
                         },
-                        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+                        orderBy: { allocatedAt: 'asc' },
                     },
                 },
             }),
             this.prisma.bankTransaction.count({ where }),
         ])
 
-        const data = items.map((item) => {
-            const allocatedAmount = item.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
-            const remainingAmount = Number(item.amount) - allocatedAmount
-            const canDelete = item.matchStatus === BankTxnMatchStatus.UNMATCHED && item.isConfirmed !== true && item.allocations.length === 0
-
-            return {
-                ...item,
-                amount: Number(item.amount),
-                allocatedAmount,
-                remainingAmount,
-                purposeName: item.purpose?.name ?? null,
-                canDelete,
-            }
-        })
+        const data = items.map((item) => this.transactionResponse(item))
 
         return {
             data,
@@ -143,7 +177,7 @@ export class BankingService {
         const item = await this.prisma.bankTransaction.findUnique({
             where: { id },
             include: {
-                allocations: {
+                payableAllocations: {
                     select: { id: true },
                     take: 1,
                 },
@@ -154,7 +188,7 @@ export class BankingService {
             throw new NotFoundException('Không tìm thấy giao dịch ngân hàng')
         }
 
-        if (item.matchStatus !== BankTxnMatchStatus.UNMATCHED || item.isConfirmed || item.allocations.length > 0) {
+        if (item.matchStatus !== BankTxnMatchStatus.UNMATCHED || item.isConfirmed || item.payableAllocations.length > 0) {
             throw new BadRequestException('Chỉ được xóa giao dịch chưa khớp và chưa xác nhận')
         }
 
@@ -172,7 +206,7 @@ export class BankingService {
                 id: true,
                 matchStatus: true,
                 isConfirmed: true,
-                allocations: {
+                payableAllocations: {
                     select: { id: true },
                     take: 1,
                 },
@@ -183,7 +217,12 @@ export class BankingService {
             throw new NotFoundException('Một hoặc nhiều giao dịch không tồn tại')
         }
 
-        const invalid = items.filter((x) => x.matchStatus !== BankTxnMatchStatus.UNMATCHED || x.isConfirmed || x.allocations.length > 0)
+        const invalid = items.filter(
+            (x) =>
+                x.matchStatus !== BankTxnMatchStatus.UNMATCHED ||
+                x.isConfirmed ||
+                x.payableAllocations.length > 0,
+        )
 
         if (invalid.length > 0) {
             throw new BadRequestException('Danh sách có giao dịch đã khớp hoặc đã xác nhận, không thể xóa')
@@ -213,18 +252,18 @@ export class BankingService {
                         name: true,
                     },
                 },
-                allocations: {
+                payableAllocations: {
                     include: {
-                        settlement: {
+                        openItem: {
                             include: {
-                                invoices: true,
+                                invoice: true,
                                 supplier: {
                                     select: { id: true, code: true, name: true },
                                 },
                             },
                         },
                     },
-                    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+                    orderBy: { allocatedAt: 'asc' },
                 },
             },
         })
@@ -233,25 +272,14 @@ export class BankingService {
             throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
         }
 
-        const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
-        const remainingAmount = Number(txn.amount) - allocatedAmount
-        const canDelete = txn.matchStatus === BankTxnMatchStatus.UNMATCHED && txn.isConfirmed !== true && txn.allocations.length === 0
-
-        return {
-            ...txn,
-            amount: Number(txn.amount),
-            allocatedAmount,
-            remainingAmount,
-            purposeName: txn.purpose?.name ?? null,
-            canDelete,
-        }
+        return this.transactionResponse(txn)
     }
 
     async getMatchSuggestions(id: string) {
         const txn = await this.prisma.bankTransaction.findUnique({
             where: { id },
             include: {
-                allocations: true,
+                payableAllocations: true,
                 purpose: {
                     select: {
                         id: true,
@@ -266,7 +294,9 @@ export class BankingService {
             throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
         }
 
-        const allocatedAmount = txn.allocations.reduce((sum, a) => sum + Number(a.allocatedAmount), 0)
+        const allocatedAmount = txn.payableAllocations
+            .filter((allocation) => allocation.status === PayableAllocationStatus.ACTIVE)
+            .reduce((sum, allocation) => sum + Number(allocation.amountInBankCurrency), 0)
         const remainingAmount = Number(txn.amount) - allocatedAmount
 
         if (txn.documentCode) {
@@ -291,16 +321,12 @@ export class BankingService {
             })
 
             if (purchaseOrder) {
-                const settlements = await this.prisma.supplierSettlement.findMany({
+                const settlements = await this.prisma.payableOpenItem.findMany({
                     where: {
                         status: {
-                            in: [SettlementStatus.OPEN, SettlementStatus.PARTIAL],
+                            in: [PayableOpenItemStatus.OPEN, PayableOpenItemStatus.PARTIALLY_SETTLED],
                         },
-                        invoices: {
-                            some: {
-                                purchaseOrderId: purchaseOrder.id,
-                            },
-                        },
+                        invoice: { purchaseOrderId: purchaseOrder.id },
                     },
                     include: {
                         supplier: {
@@ -311,7 +337,7 @@ export class BankingService {
                                 taxCode: true,
                             },
                         },
-                        invoices: {
+                        invoice: {
                             select: {
                                 id: true,
                                 invoiceNo: true,
@@ -327,7 +353,7 @@ export class BankingService {
                 if (settlements.length > 0) {
                     const suggestions = settlements
                         .map((s) => {
-                            const settlementRemaining = Number(s.amountTotal) - Number(s.amountSettled)
+                            const settlementRemaining = Number(s.outstandingAmount)
                             if (settlementRemaining <= 0) return null
 
                             let score = 100
@@ -357,12 +383,11 @@ export class BankingService {
                                 purchaseOrderNo: purchaseOrder.orderNo,
                                 paymentPlanId: matchedPaymentPlan?.id ?? null,
                                 supplier: s.supplier,
-                                invoices: s.invoices.map((inv) => ({
-                                    ...inv,
-                                    totalAmount: inv.totalAmount ? Number(inv.totalAmount) : 0,
-                                })),
-                                amountTotal: Number(s.amountTotal),
-                                amountSettled: Number(s.amountSettled),
+                                invoices: s.invoice
+                                    ? [{ ...s.invoice, totalAmount: Number(s.invoice.totalAmount) }]
+                                    : [],
+                                amountTotal: Number(s.originalAmount),
+                                amountSettled: Number(s.originalAmount.minus(s.outstandingAmount)),
                                 remainingAmount: settlementRemaining,
                                 dueDate: s.dueDate,
                                 score,
@@ -400,12 +425,12 @@ export class BankingService {
         }
 
         // fallback logic cũ
-        const settlements = await this.prisma.supplierSettlement.findMany({
+        const settlements = await this.prisma.payableOpenItem.findMany({
             where: {
                 status: {
-                    in: [SettlementStatus.OPEN, SettlementStatus.PARTIAL],
+                    in: [PayableOpenItemStatus.OPEN, PayableOpenItemStatus.PARTIALLY_SETTLED],
                 },
-                ...(txn.direction === BankTxnDirection.OUT ? {} : { type: 'ADVANCE' }),
+                ...(txn.direction === BankTxnDirection.OUT ? {} : { settlementType: 'ADVANCE' }),
             },
             include: {
                 supplier: {
@@ -416,7 +441,7 @@ export class BankingService {
                         taxCode: true,
                     },
                 },
-                invoices: {
+                invoice: {
                     select: {
                         id: true,
                         invoiceNo: true,
@@ -436,7 +461,7 @@ export class BankingService {
 
         const suggestions = settlements
             .map((s) => {
-                const remainingSettlement = Number(s.amountTotal) - Number(s.amountSettled)
+                const remainingSettlement = Number(s.outstandingAmount)
 
                 if (remainingSettlement <= 0) return null
 
@@ -449,22 +474,25 @@ export class BankingService {
                     txnCounterpartyAcc: txn.counterpartyAcc,
                     settlementRemainingAmount: remainingSettlement,
                     supplierName: s.supplier?.name,
-                    invoices: s.invoices.map((inv) => ({
-                        invoiceNo: inv.invoiceNo,
-                        invoiceSymbol: inv.invoiceSymbol,
-                        invoiceDate: inv.invoiceDate,
-                    })),
+                    invoices: s.invoice
+                        ? [
+                              {
+                                  invoiceNo: s.invoice.invoiceNo,
+                                  invoiceSymbol: s.invoice.invoiceSymbol,
+                                  invoiceDate: s.invoice.invoiceDate,
+                              },
+                          ]
+                        : [],
                 })
 
                 return {
                     settlementId: s.id,
                     supplier: s.supplier,
-                    invoices: s.invoices.map((inv) => ({
-                        ...inv,
-                        totalAmount: inv.totalAmount ? Number(inv.totalAmount) : 0,
-                    })),
-                    amountTotal: Number(s.amountTotal),
-                    amountSettled: Number(s.amountSettled),
+                    invoices: s.invoice
+                        ? [{ ...s.invoice, totalAmount: Number(s.invoice.totalAmount) }]
+                        : [],
+                    amountTotal: Number(s.originalAmount),
+                    amountSettled: Number(s.originalAmount.minus(s.outstandingAmount)),
                     remainingAmount: remainingSettlement,
                     dueDate: s.dueDate,
                     score,
@@ -502,21 +530,8 @@ export class BankingService {
     }
 
     async confirmTransaction(id: string, body: ConfirmBankTransactionDto) {
-        const txn = await this.prisma.bankTransaction.findUnique({
-            where: { id },
-            include: { allocations: true },
-        })
-
-        if (!txn) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
-        if (txn.isConfirmed) throw new BadRequestException('BANK_TRANSACTION_ALREADY_CONFIRMED')
-        if (txn.direction !== BankTxnDirection.OUT) throw new BadRequestException('ONLY_OUT_TRANSACTION_SUPPORTED')
-
         const totalAllocated = body.allocations.reduce((sum, item) => sum + Number(item.allocatedAmount), 0)
-
         if (totalAllocated <= 0) throw new BadRequestException('TOTAL_ALLOCATED_MUST_BE_GT_ZERO')
-
-        if (totalAllocated - Number(txn.amount) > 0.0001) throw new BadRequestException('ALLOCATED_EXCEEDS_TRANSACTION_AMOUNT')
-
         const seen = new Set<string>()
         for (const item of body.allocations) {
             if (seen.has(item.settlementId)) {
@@ -524,74 +539,92 @@ export class BankingService {
             }
             seen.add(item.settlementId)
         }
+        await this.prisma.$transaction(async (tx) => {
+            const lockKeys = [`bank:${id}`, ...[...seen].map((openItemId) => `ap:${openItemId}`)].sort()
+            for (const key of lockKeys) {
+                await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
+            }
+            const transaction = await tx.bankTransaction.findUnique({
+                where: { id },
+                include: {
+                    bankAccount: true,
+                    payableAllocations: { where: { status: PayableAllocationStatus.ACTIVE } },
+                },
+            })
+            if (!transaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+            if (transaction.isConfirmed) throw new BadRequestException('BANK_TRANSACTION_ALREADY_CONFIRMED')
+            if (transaction.direction !== BankTxnDirection.OUT) {
+                throw new BadRequestException('ONLY_OUT_TRANSACTION_SUPPORTED')
+            }
+            const alreadyAllocated = transaction.payableAllocations.reduce(
+                (sum, allocation) => sum.plus(allocation.amountInBankCurrency),
+                new Prisma.Decimal(0),
+            )
+            if (alreadyAllocated.plus(totalAllocated).greaterThan(transaction.amount)) {
+                throw new BadRequestException('ALLOCATED_EXCEEDS_TRANSACTION_AMOUNT')
+            }
 
-        return this.prisma.$transaction(async (trx) => {
-            for (const item of body.allocations) {
-                const settlement = await trx.supplierSettlement.findUnique({
-                    where: { id: item.settlementId },
-                })
-
-                if (!settlement) throw new BadRequestException('SETTLEMENT_NOT_FOUND')
-
-                const remaining = Number(settlement.amountTotal) - Number(settlement.amountSettled)
-
-                if (item.allocatedAmount - remaining > 0.0001) {
-                    throw new BadRequestException(`ALLOCATED_EXCEEDS_SETTLEMENT_REMAINING:${settlement.id}`)
+            for (const input of body.allocations) {
+                const openItem = await tx.payableOpenItem.findUnique({ where: { id: input.settlementId } })
+                if (!openItem) throw new BadRequestException('SETTLEMENT_NOT_FOUND')
+                if (
+                    openItem.status !== PayableOpenItemStatus.OPEN &&
+                    openItem.status !== PayableOpenItemStatus.PARTIALLY_SETTLED
+                ) {
+                    throw new BadRequestException(`INVALID_SETTLEMENT_STATUS:${openItem.id}`)
                 }
-
-                if (settlement.status !== SettlementStatus.OPEN && settlement.status !== SettlementStatus.PARTIAL) {
-                    throw new BadRequestException(`INVALID_SETTLEMENT_STATUS:${settlement.id}`)
+                if (openItem.currency !== transaction.bankAccount.currency) {
+                    throw new BadRequestException(`PAYMENT_CURRENCY_MISMATCH:${openItem.id}`)
                 }
-
-                const updated = await trx.supplierSettlement.update({
-                    where: { id: item.settlementId },
+                const amount = new Prisma.Decimal(input.allocatedAmount)
+                if (amount.greaterThan(openItem.outstandingAmount)) {
+                    throw new BadRequestException(`ALLOCATED_EXCEEDS_SETTLEMENT_REMAINING:${openItem.id}`)
+                }
+                const allocation = await tx.payableAllocation.create({
                     data: {
-                        amountSettled: {
-                            increment: new Prisma.Decimal(item.allocatedAmount),
-                        },
+                        bankTransactionId: transaction.id,
+                        openItemId: openItem.id,
+                        amountInBankCurrency: amount,
+                        amountInItemCurrency: amount,
+                        fxRate: 1,
+                        idempotencyKey: `bank-confirm:${transaction.id}:${openItem.id}`,
+                        allocatedAt: new Date(),
                     },
                 })
-
-                const nextSettled = Number(updated.amountSettled)
-                const total = Number(updated.amountTotal)
-
-                let nextStatus: SettlementStatus = SettlementStatus.OPEN
-
-                if (nextSettled + 0.0001 >= total) {
-                    nextStatus = SettlementStatus.SETTLED
-                } else if (nextSettled > 0) {
-                    nextStatus = SettlementStatus.PARTIAL
-                }
-
-                await trx.supplierSettlement.update({
-                    where: { id: item.settlementId },
-                    data: { status: nextStatus },
-                })
-
-                await trx.paymentAllocation.create({
+                await tx.payableLedgerEntry.create({
                     data: {
-                        bankTransactionId: txn.id,
-                        settlementId: item.settlementId,
-                        allocatedAmount: new Prisma.Decimal(item.allocatedAmount),
-                        isAuto: item.isAuto ?? false,
-                        score: item.score ?? null,
-                        sortOrder: item.sortOrder ?? 0,
-                        note: item.note ?? body.note ?? null,
+                        openItemId: openItem.id,
+                        type: PayableEntryType.PAYMENT,
+                        amountDelta: amount.negated(),
+                        allocationId: allocation.id,
+                        idempotencyKey: `bank-confirm:${transaction.id}:${openItem.id}:ledger`,
+                        effectiveAt: allocation.allocatedAt,
+                    },
+                })
+                const outstandingAmount = new Prisma.Decimal(openItem.outstandingAmount).minus(amount)
+                await tx.payableOpenItem.update({
+                    where: { id: openItem.id },
+                    data: {
+                        outstandingAmount,
+                        status: outstandingAmount.isZero()
+                            ? PayableOpenItemStatus.SETTLED
+                            : PayableOpenItemStatus.PARTIALLY_SETTLED,
+                        version: { increment: 1 },
                     },
                 })
             }
-
-            await trx.bankTransaction.update({
-                where: { id: txn.id },
+            await tx.bankTransaction.update({
+                where: { id: transaction.id },
                 data: {
-                    matchStatus: totalAllocated + 0.0001 >= Number(txn.amount) ? BankTxnMatchStatus.MANUAL_MATCHED : BankTxnMatchStatus.PARTIAL_MATCHED,
+                    matchStatus: alreadyAllocated.plus(totalAllocated).greaterThanOrEqualTo(transaction.amount)
+                        ? BankTxnMatchStatus.MANUAL_MATCHED
+                        : BankTxnMatchStatus.PARTIAL_MATCHED,
                     isConfirmed: true,
                     confirmedAt: new Date(),
                 },
             })
-
-            return this.getTransactionDetail(id)
         })
+        return this.getTransactionDetail(id)
     }
 
     async listTemplates(bankCode?: string) {

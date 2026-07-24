@@ -34,7 +34,7 @@ export class AuditInterceptor implements NestInterceptor {
         const action = actionFrom(method)
         if (!action) return next.handle()
 
-        // Lấy moduleCode từ decorator
+        // Láº¥y moduleCode tá»« decorator
         const moduleCode = this.reflector.get<string>(MODULE_KEY, ctx.getHandler()) ?? this.reflector.get<string>(MODULE_KEY, ctx.getClass())
         if (!moduleCode) return next.handle()
 
@@ -96,7 +96,7 @@ export class AuditInterceptor implements NestInterceptor {
         } else if (moduleCode === 'employee') {
             return this.prisma.employee.findUnique({ where: { id } })
         } else if (moduleCode === 'customer') {
-            return this.prisma.customer.findUnique({ where: { id } })
+            return this.prisma.party.findUnique({ where: { id } })
         } else if (moduleCode === 'contract') {
             return this.prisma.contract.findUnique({ where: { id } })
         } else if (moduleCode === 'contracttype') {

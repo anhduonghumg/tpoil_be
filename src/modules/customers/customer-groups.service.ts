@@ -60,7 +60,7 @@ export class CustomerGroupsService {
 
     async detail(id: string): Promise<CustomerGroup> {
         const row = await this.prisma.customerGroup.findUnique({ where: { id } })
-        if (!row) throw new NotFoundException('Không tìm thấy nhóm khách hàng')
+        if (!row) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y nhÃ³m khÃ¡ch hÃ ng')
         return row
     }
 
@@ -76,19 +76,19 @@ export class CustomerGroupsService {
                 },
             })
         } catch (e: unknown) {
-            throw new BadRequestException('Mã Group đã tồn tại')
+            throw new BadRequestException('MÃ£ Group Ä‘Ã£ tá»“n táº¡i')
         }
     }
 
     async update(id: string, dto: UpdateCustomerGroupDto): Promise<CustomerGroup> {
         const existing = await this.prisma.customerGroup.findUnique({ where: { id } })
-        if (!existing) throw new NotFoundException('Không tìm thấy nhóm khách hàng')
+        if (!existing) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y nhÃ³m khÃ¡ch hÃ ng')
 
         const code = dto.code ? dto.code.trim().toUpperCase() : undefined
 
         if (code && code !== existing.code) {
             const dup = await this.prisma.customerGroup.findUnique({ where: { code } })
-            if (dup) throw new BadRequestException('Mã Group đã tồn tại')
+            if (dup) throw new BadRequestException('MÃ£ Group Ä‘Ã£ tá»“n táº¡i')
         }
 
         return this.prisma.customerGroup.update({
@@ -103,10 +103,10 @@ export class CustomerGroupsService {
 
     async remove(id: string): Promise<CustomerGroup> {
         const existing = await this.prisma.customerGroup.findUnique({ where: { id } })
-        if (!existing) throw new NotFoundException('Không tìm thấy nhóm khách hàng')
+        if (!existing) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y nhÃ³m khÃ¡ch hÃ ng')
 
-        const used = await this.prisma.customer.count({ where: { groupId: id, deletedAt: null } })
-        if (used > 0) throw new BadRequestException('Nhóm đang được sử dụng, không thể xoá')
+        const used = await this.prisma.party.count({ where: { groupId: id, deletedAt: null } })
+        if (used > 0) throw new BadRequestException('NhÃ³m Ä‘ang Ä‘Æ°á»£c sá»­ dá»¥ng, khÃ´ng thá»ƒ xoÃ¡')
 
         return this.prisma.customerGroup.delete({ where: { id } })
     }

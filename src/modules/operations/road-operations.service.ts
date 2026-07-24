@@ -15,7 +15,9 @@ export class RoadOperationsService {
     constructor(private readonly prisma: PrismaService) {}
 
     private page(q: PageQueryDto) {
-        return { skip: ((q.page ?? 1) - 1) * (q.pageSize ?? 30), take: q.pageSize ?? 30 }
+        const page = Math.max(Number(q.page ?? 1) || 1, 1)
+        const pageSize = Math.min(Math.max(Number(q.pageSize ?? 30) || 30, 1), 200)
+        return { skip: (page - 1) * pageSize, take: pageSize }
     }
 
     async listVehicles(q: PageQueryDto & { supplierCustomerId?: string; isActive?: string }) {
@@ -189,11 +191,19 @@ export class RoadOperationsService {
             }),
             this.prisma.vehicleDispatchOrder.count({ where }),
         ])
-        return { items, total, page: q.page, pageSize: q.pageSize }
+        return {
+            items: items.map((item) => ({
+                ...item,
+                warehouseTransferId: item.inventoryMovementId,
+            })),
+            total,
+            page: q.page,
+            pageSize: q.pageSize,
+        }
     }
 
-    dispatch(id: string) {
-        return this.prisma.vehicleDispatchOrder.findUniqueOrThrow({
+    async dispatch(id: string) {
+        const row = await this.prisma.vehicleDispatchOrder.findUniqueOrThrow({
             where: { id },
             include: {
                 vehicle: { include: { documents: true } },
@@ -201,9 +211,14 @@ export class RoadOperationsService {
                 product: true,
                 fromSupplierLocation: true,
                 toSupplierLocation: true,
-                warehouseTransfer: true,
+                inventoryMovement: true,
             },
         })
+        return {
+            ...row,
+            warehouseTransferId: row.inventoryMovementId,
+            warehouseTransfer: row.inventoryMovement,
+        }
     }
 
     async saveDispatch(dto: UpsertVehicleDispatchDto, id?: string) {
@@ -220,7 +235,7 @@ export class RoadOperationsService {
             dispatchNo: dto.dispatchNo.trim(),
             sourceType: dto.sourceType,
             sourceId: dto.sourceId ?? null,
-            warehouseTransferId: dto.warehouseTransferId ?? null,
+            inventoryMovementId: dto.warehouseTransferId ?? null,
             vehicleId: dto.vehicleId,
             driverId: dto.driverId,
             fromLocationText: dto.fromLocationText.trim(),

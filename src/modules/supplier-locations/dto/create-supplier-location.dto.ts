@@ -1,6 +1,9 @@
-import { IsArray, IsBoolean, IsNotEmpty, IsOptional, IsString, ArrayMinSize } from 'class-validator'
+import { IsArray, IsBoolean, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator'
 
 export class CreateSupplierLocationDto {
+    @IsUUID()
+    areaId!: string
+
     @IsString()
     @IsNotEmpty()
     code!: string
@@ -9,20 +12,13 @@ export class CreateSupplierLocationDto {
     @IsNotEmpty()
     name!: string
 
+    @IsOptional()
     @IsString()
     nameInvoice?: string
 
     @IsOptional()
     @IsString()
     address?: string
-
-    @IsOptional()
-    @IsString()
-    tankCode?: string
-
-    @IsOptional()
-    @IsString()
-    tankName?: string
 
     @IsOptional()
     @IsBoolean()
@@ -40,7 +36,7 @@ export class CreateSupplierLocationDto {
     @IsString()
     note?: string
 
+    @IsOptional()
     @IsArray()
-    @ArrayMinSize(1)
-    supplierCustomerIds!: string[]
+    supplierCustomerIds?: string[]
 }

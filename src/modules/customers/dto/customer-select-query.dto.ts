@@ -6,6 +6,11 @@ export enum CustomerSelectRole {
     CUSTOMER = 'CUSTOMER',
     SUPPLIER = 'SUPPLIER',
     INTERNAL = 'INTERNAL',
+    SHIP_OWNER = 'SHIP_OWNER',
+    SEA_CARRIER = 'SEA_CARRIER',
+    INSURER = 'INSURER',
+    SURVEYOR = 'SURVEYOR',
+    SHIPPING_AGENT = 'SHIPPING_AGENT',
 }
 
 export class CustomerSelectQueryDto {

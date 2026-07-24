@@ -1,7 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 
 import {
-    CostLayerStatus,
     FxStage,
     PricingRunStatus,
     PricingSheetRowType,
@@ -18,6 +17,7 @@ import {
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 
 import { CalculateTermPricingDto } from './dto/calculate-term-pricing.dto'
+import { createHash } from 'node:crypto'
 import pdf = require('pdf-parse')
 import Tesseract = require('tesseract.js')
 
@@ -402,11 +402,12 @@ export class PurchaseTermPricingService {
 
             include: {
                 supplier: true,
+                termProfile: true,
 
                 lines: {
                     include: {
                         product: true,
-                        supplierLocation: true,
+                        receivingWarehouse: true,
                     },
 
                     orderBy: {
@@ -421,6 +422,10 @@ export class PurchaseTermPricingService {
 
                     orderBy: {
                         receiptDate: 'asc',
+                    },
+
+                    include: {
+                        lines: { include: { lot: true } },
                     },
                 },
 
@@ -457,6 +462,9 @@ export class PurchaseTermPricingService {
      */
 
     private async getOrCreateRun(tx: Prisma.TransactionClient, order: any, dto: CalculateTermPricingDto) {
+        const inputHash = createHash('sha256')
+            .update(JSON.stringify({ orderId: order.id, dto }))
+            .digest('hex')
         const existed = await tx.purchasePricingRun.findFirst({
             where: {
                 purchaseOrderId: order.id,
@@ -467,13 +475,21 @@ export class PurchaseTermPricingService {
             },
         })
 
-        if (existed) {
+        if (existed && existed.status !== PricingRunStatus.POSTED) {
             return existed
         }
 
-        const qtyActualTotal = order.receipts.reduce((sum: number, x: any) => sum + Number(x.qty || 0), 0)
+        const qtyActualTotal = order.receipts.reduce(
+            (sum: number, receipt: any) =>
+                sum + receipt.lines.reduce((lineSum: number, line: any) => lineSum + Number(line.actualQty || 0), 0),
+            0,
+        )
 
-        const qtyV15Total = order.receipts.reduce((sum: number, x: any) => sum + Number(x.standardQtyV15 || 0), 0)
+        const qtyV15Total = order.receipts.reduce(
+            (sum: number, receipt: any) =>
+                sum + receipt.lines.reduce((lineSum: number, line: any) => lineSum + Number(line.v15Qty || 0), 0),
+            0,
+        )
 
         return tx.purchasePricingRun.create({
             data: {
@@ -492,6 +508,9 @@ export class PurchaseTermPricingService {
                 qtyV15Total,
 
                 status: PricingRunStatus.DRAFT,
+                version: (existed?.version ?? 0) + 1,
+                supersedesRunId: existed?.status === PricingRunStatus.POSTED ? existed.id : null,
+                inputHash,
             },
         })
     }
@@ -519,6 +538,10 @@ export class PurchaseTermPricingService {
 
         if (stageType === PricingStageType.FINAL && !hasBillNormalize) {
             throw new BadRequestException('BILL_NORMALIZE_REQUIRED')
+        }
+
+        if (stageType === PricingStageType.FINAL && hasFinal) {
+            throw new BadRequestException('POSTED_PRICING_IMMUTABLE')
         }
 
         if (stageType === PricingStageType.BOSS_SHEET && !hasFinal) {
@@ -567,7 +590,7 @@ export class PurchaseTermPricingService {
         }
 
         const mops = Number(dto.mopsAvgUsdPerBbl ?? 0)
-        const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+        const premium = Number(dto.premiumUsdPerBbl ?? order.termProfile?.premiumUsdPerBbl ?? 0)
         const specialTax = Number(dto.specialConsumptionTaxUsdPerBbl ?? 0)
 
         return tx.purchasePricingStage.create({
@@ -633,9 +656,19 @@ export class PurchaseTermPricingService {
                 throw new BadRequestException('PURCHASE_ORDER_LINE_NOT_FOUND')
             }
 
-            const qtyActual = input.qtyActual ?? Number(line.withdrawnQty || line.orderedQty || 0)
-
-            const qtyV15 = input.qtyV15 ?? Number(line.withdrawnQty || line.orderedQty || 0)
+            const receivedLines = order.receipts.flatMap((receipt: any) =>
+                receipt.lines.filter((receiptLine: any) => receiptLine.purchaseOrderLineId === line.id),
+            )
+            const receivedActual = receivedLines.reduce(
+                (sum: number, receiptLine: any) => sum + Number(receiptLine.actualQty ?? 0),
+                0,
+            )
+            const receivedV15 = receivedLines.reduce(
+                (sum: number, receiptLine: any) => sum + Number(receiptLine.v15Qty ?? 0),
+                0,
+            )
+            const qtyActual = input.qtyActual ?? (receivedActual > 0 ? receivedActual : Number(line.orderedQty || 0))
+            const qtyV15 = input.qtyV15 ?? (receivedV15 > 0 ? receivedV15 : Number(line.orderedQty || 0))
 
             await tx.purchasePricingStageLine.create({
                 data: {
@@ -645,7 +678,7 @@ export class PurchaseTermPricingService {
 
                     productId: line.productId,
 
-                    supplierLocationId: line.supplierLocationId,
+                    supplierLocationId: line.receivingWarehouseId,
 
                     qtyActual: new Prisma.Decimal(qtyActual),
 
@@ -935,38 +968,81 @@ export class PurchaseTermPricingService {
             throw new NotFoundException('PRICING_STAGE_NOT_FOUND')
         }
 
-        for (const line of stage.lines) {
-            const qty = Number(line.qtyV15 || line.qtyActual || 0)
-
-            if (qty <= 0) {
-                continue
+        let createdCount = 0
+        for (const receipt of order.receipts) {
+            for (const receiptLine of receipt.lines ?? []) {
+                if (!receiptLine.lot) continue
+                const pricingLine = stage.lines.find(
+                    (line) =>
+                        line.productId === receiptLine.productId &&
+                        (!line.purchaseOrderLineId || line.purchaseOrderLineId === receiptLine.purchaseOrderLineId),
+                )
+                if (!pricingLine) continue
+                const qty = new Prisma.Decimal(receiptLine.actualQty)
+                if (!qty.isPositive()) continue
+                const unitCost = new Prisma.Decimal(pricingLine.unitVndPerLiter ?? 0)
+                const totalCost = qty.mul(unitCost)
+                const existing = await tx.inventoryCostLayer.findUnique({
+                    where: {
+                        inventoryLotId_ownerPartyId: {
+                            inventoryLotId: receiptLine.lot.id,
+                            ownerPartyId: receiptLine.ownerPartyId,
+                        },
+                    },
+                })
+                if (existing) {
+                    const currentUnit = existing.remainingActualQty.isZero()
+                        ? new Prisma.Decimal(0)
+                        : existing.remainingValue.div(existing.remainingActualQty)
+                    const valueDelta = existing.remainingActualQty.mul(unitCost.minus(currentUnit))
+                    await tx.costLayerEntry.create({
+                        data: {
+                            costLayerId: existing.id,
+                            type: 'REVALUATION',
+                            valueDelta,
+                            pricingStageLineId: pricingLine.id,
+                            idempotencyKey: `pricing:${runId}:lot:${receiptLine.lot.id}:revalue`,
+                            effectiveAt: new Date(),
+                        },
+                    })
+                    await tx.inventoryCostLayer.update({
+                        where: { id: existing.id },
+                        data: {
+                            remainingValue: existing.remainingValue.plus(valueDelta),
+                            isProvisional: false,
+                            version: { increment: 1 },
+                        },
+                    })
+                } else {
+                    const layer = await tx.inventoryCostLayer.create({
+                        data: {
+                            inventoryLotId: receiptLine.lot.id,
+                            ownerPartyId: receiptLine.ownerPartyId,
+                            originalActualQty: qty,
+                            remainingActualQty: qty,
+                            remainingValue: totalCost,
+                            currency: 'VND',
+                            isProvisional: false,
+                            openedAt: new Date(),
+                        },
+                    })
+                    await tx.costLayerEntry.create({
+                        data: {
+                            costLayerId: layer.id,
+                            type: 'FINALIZE',
+                            actualQtyDelta: qty,
+                            valueDelta: totalCost,
+                            pricingStageLineId: pricingLine.id,
+                            idempotencyKey: `pricing:${runId}:lot:${receiptLine.lot.id}:open`,
+                            effectiveAt: layer.openedAt,
+                        },
+                    })
+                }
+                createdCount += 1
             }
-
-            await tx.inventoryCostLayer.create({
-                data: {
-                    supplierCustomerId: order.supplierCustomerId,
-
-                    supplierLocationId: line.supplierLocationId ?? '',
-
-                    productId: line.productId,
-
-                    sourceType: 'TERM_PRICING_FINAL',
-
-                    sourceId: runId,
-
-                    originalQty: new Prisma.Decimal(qty),
-
-                    remainingQty: new Prisma.Decimal(qty),
-
-                    unitCostPerLiter: line.unitVndPerLiter || new Prisma.Decimal(0),
-
-                    totalCost: line.amountVnd || new Prisma.Decimal(0),
-
-                    costDate: new Date(),
-
-                    status: CostLayerStatus.OPEN,
-                },
-            })
+        }
+        if (!createdCount) {
+            throw new BadRequestException('FINAL_PRICING_REQUIRES_POSTED_INVENTORY_LOTS')
         }
     }
 
@@ -996,15 +1072,6 @@ export class PurchaseTermPricingService {
         return this.prisma.$transaction(async (tx) => {
             const run = await this.getOrCreateRun(tx, order, dto)
 
-            if (stageType === PricingStageType.FINAL) {
-                await tx.inventoryCostLayer.deleteMany({
-                    where: {
-                        sourceType: 'TERM_PRICING_FINAL',
-                        sourceId: run.id,
-                    },
-                })
-            }
-
             const stage = await this.createStageBase(tx, run.id, order, dto, stageType)
 
             await this.buildStageLines(tx, order, stage.id, dto)
@@ -1016,7 +1083,7 @@ export class PurchaseTermPricingService {
             if (priceDays.length && (dto.mopsAvgUsdPerBbl === undefined || dto.mopsAvgUsdPerBbl === null)) {
                 const avg = priceDays.reduce((sum, x) => sum + Number(x.priceUsdPerBbl || 0), 0) / priceDays.length
 
-                const premium = Number(dto.premiumUsdPerBbl ?? order.termPremiumUsdPerBbl ?? 0)
+                const premium = Number(dto.premiumUsdPerBbl ?? order.termProfile?.premiumUsdPerBbl ?? 0)
                 const specialTax = Number(dto.specialConsumptionTaxUsdPerBbl ?? 0)
 
                 await tx.purchasePricingStage.update({
@@ -1050,6 +1117,7 @@ export class PurchaseTermPricingService {
                     },
                     data: {
                         status: PricingRunStatus.POSTED,
+                        postedAt: new Date(),
                     },
                 })
             } else if (stageType === PricingStageType.ESTIMATE) {

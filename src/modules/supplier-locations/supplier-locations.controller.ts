@@ -4,6 +4,7 @@ import { ListSupplierLocationsDto } from './dto/list-supplier-locations.dto'
 import { CreateSupplierLocationDto } from './dto/create-supplier-location.dto'
 import { UpdateSupplierLocationDto } from './dto/update-supplier-location.dto'
 import { SupplierLocationsSelectQueryDto } from './dto/supplier-locations-select.dto'
+import { CreateWarehouseAreaDto, UpdateWarehouseAreaDto } from './dto/warehouse-area.dto'
 
 @Controller('supplier-locations')
 export class SupplierLocationsController {
@@ -17,6 +18,21 @@ export class SupplierLocationsController {
     @Get('select')
     select(@Query() q: SupplierLocationsSelectQueryDto) {
         return this.service.select(q)
+    }
+
+    @Get('areas')
+    areas(@Query('isActive') isActive?: string) {
+        return this.service.listAreas(isActive === undefined ? undefined : isActive === 'true')
+    }
+
+    @Post('areas')
+    createArea(@Body() dto: CreateWarehouseAreaDto) {
+        return this.service.createArea(dto)
+    }
+
+    @Patch('areas/:id')
+    updateArea(@Param('id') id: string, @Body() dto: UpdateWarehouseAreaDto) {
+        return this.service.updateArea(id, dto)
     }
 
     @Get(':id')

@@ -143,11 +143,11 @@ export class PurchaseTermOrderDocumentsService {
             },
             include: {
                 supplier: true,
-                supplierLocation: true,
                 contract: true,
                 lines: {
                     include: {
                         product: true,
+                        receivingWarehouse: true,
                     },
                     orderBy: {
                         createdAt: 'asc',
@@ -383,8 +383,9 @@ export class PurchaseTermOrderDocumentsService {
 
     private buildDeliveryLocation(order: any, deliveryMode?: GenerateTermOrderDocumentDto['deliveryMode']) {
         if (deliveryMode === 'FACTORY') return 'Nhà máy'
-        if (deliveryMode === 'WAREHOUSE') return order.deliveryLocation ?? order.supplierLocation?.name ?? 'Kho'
-        return order.deliveryLocation ?? order.supplierLocation?.name ?? null
+        const warehouseName = order.lines?.[0]?.receivingWarehouse?.name
+        if (deliveryMode === 'WAREHOUSE') return order.deliveryLocation ?? warehouseName ?? 'Kho'
+        return order.deliveryLocation ?? warehouseName ?? null
     }
 
     private buildOriginPriceBasisNote(originSource?: GenerateTermOrderDocumentDto['originSource'], fallback?: string | null) {

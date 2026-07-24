@@ -3,6 +3,7 @@ import {
     ContractStatus,
     PaymentMode,
     PaymentTermType,
+    PartyRoleType,
     PricingStageType,
     Prisma,
     PurchaseBizType,
@@ -11,6 +12,7 @@ import {
     TermPaymentRequestStatus,
     TermPurchaseFlowType,
     TermTransportMode,
+    WarehousePartyRole,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateTermPurchaseOrderDto } from './dto/create-term-purchase-order.dto'
@@ -51,15 +53,14 @@ export class PurchaseTermOrdersService {
 
     private readonly orderInclude = {
         supplier: true,
-
-        supplierLocation: true,
+        termProfile: true,
 
         contract: true,
 
         lines: {
             include: {
                 product: true,
-                supplierLocation: true,
+                receivingWarehouse: true,
             },
             orderBy: {
                 createdAt: 'asc',
@@ -68,8 +69,11 @@ export class PurchaseTermOrdersService {
 
         receipts: {
             include: {
-                product: true,
-                supplierLocation: true,
+                warehouse: true,
+                lines: {
+                    orderBy: { lineNo: 'asc' },
+                    include: { product: true },
+                },
             },
             orderBy: {
                 createdAt: 'desc',
@@ -111,7 +115,7 @@ export class PurchaseTermOrdersService {
             },
         },
 
-        termShipments: {
+        shipments: {
             orderBy: {
                 createdAt: 'desc',
             },
@@ -349,15 +353,16 @@ export class PurchaseTermOrdersService {
             throw new BadRequestException('ORDER_DATE_REQUIRED')
         }
 
-        const supplier = await this.prisma.customer.findUnique({
+        const supplier = await this.prisma.party.findUnique({
             where: { id: dto.supplierCustomerId },
+            include: { roles: { where: { role: PartyRoleType.SUPPLIER, validTo: null }, select: { id: true } } },
         })
 
         if (!supplier) {
             throw new BadRequestException('SUPPLIER_NOT_FOUND')
         }
 
-        if (!supplier.isSupplier) {
+        if (!supplier.roles.length) {
             throw new BadRequestException('PARTY_IS_NOT_SUPPLIER')
         }
 
@@ -370,6 +375,7 @@ export class PurchaseTermOrdersService {
         }
 
         await this.validateLines(dto.lines, dto.supplierCustomerId, dto.supplierLocationId)
+        const legalEntityId = await this.resolveLegalEntityId(dto.lines, dto.supplierLocationId)
 
         const created = await this.prisma.$transaction(async (tx) => {
             const contract = await this.findValidPurchaseContract(tx, dto.supplierCustomerId, orderDate)
@@ -383,42 +389,44 @@ export class PurchaseTermOrdersService {
 
             const totalQty = dto.lines.reduce((sum, x) => sum + Number(x.orderedQty || 0), 0)
 
-            const totalAmount = dto.lines.reduce((sum, x) => sum + Number(x.orderedQty || 0) * Number(x.unitPrice || 0) - Number(x.discountAmount || 0), 0)
-
             const order = await tx.purchaseOrder.create({
                 data: {
                     orderNo,
+                    legalEntityId,
                     bizType: PurchaseBizType.TERM,
                     orderType: PurchaseOrderType.SINGLE,
                     status: PurchaseOrderStatus.DRAFT,
-                    termFlowType: dto.termFlowType ?? TermPurchaseFlowType.ESTIMATE_FIRST,
-
                     paymentMode: PaymentMode.PREPAID,
                     paymentTermType: PaymentTermType.SAME_DAY,
 
                     supplierCustomerId: dto.supplierCustomerId,
-                    supplierLocationId: dto.supplierLocationId ?? null,
 
                     orderDate,
                     expectedDate: this.toDateOnly(dto.expectedDate),
 
                     contractId: contract.id,
                     contractNo: contract.code,
-                    transportMode: dto.transportMode ?? null,
-                    charterVessel: dto.transportMode === TermTransportMode.SEA ? !!dto.charterVessel : false,
                     deliveryLocation: dto.deliveryLocation?.trim() || supplier.defaultDeliveryLocation || null,
 
                     paymentNote: dto.paymentNote?.trim() || null,
                     note: dto.note?.trim() || null,
-                    termPremiumUsdPerBbl: dto.billInfo?.premium !== undefined && dto.billInfo.premium !== null ? new Prisma.Decimal(dto.billInfo.premium) : null,
-
-                    totalQty,
-                    totalAmount,
+                    termProfile: {
+                        create: {
+                            flowType: dto.termFlowType ?? TermPurchaseFlowType.ESTIMATE_FIRST,
+                            transportMode: dto.transportMode ?? TermTransportMode.SEA,
+                            charterRequired: dto.transportMode === TermTransportMode.SEA && !!dto.charterVessel,
+                            premiumUsdPerBbl:
+                                dto.billInfo?.premium !== undefined && dto.billInfo.premium !== null
+                                    ? new Prisma.Decimal(dto.billInfo.premium)
+                                    : null,
+                        },
+                    },
 
                     lines: {
-                        create: dto.lines.map((x) => ({
+                        create: dto.lines.map((x, index) => ({
+                            lineNo: index + 1,
                             productId: x.productId,
-                            supplierLocationId: x.supplierLocationId ?? dto.supplierLocationId ?? null,
+                            receivingWarehouseId: x.supplierLocationId ?? dto.supplierLocationId ?? null,
                             orderedQty: x.orderedQty,
                             unitPrice: x.unitPrice ?? null,
                             taxRate: x.taxRate ?? null,
@@ -436,7 +444,7 @@ export class PurchaseTermOrdersService {
                         sourceType: 'FROM_TERM',
                         purchaseOrderId: order.id,
                         cargoName: order.lines.map((line) => line.product.name).join(', '),
-                        plannedQty: order.totalQty ?? new Prisma.Decimal(totalQty),
+                        plannedQty: new Prisma.Decimal(totalQty),
                         dischargePort: order.deliveryLocation,
                         laycanTo: order.expectedDate,
                         status: 'DRAFT',
@@ -558,6 +566,8 @@ export class PurchaseTermOrdersService {
             },
             include: {
                 receipts: true,
+                lines: true,
+                termProfile: true,
             },
         })
 
@@ -569,63 +579,87 @@ export class PurchaseTermOrdersService {
             throw new BadRequestException('TERM_PURCHASE_ORDER_NOT_EDITABLE')
         }
 
-        const hasConfirmedReceipt = current.receipts.some((x) => x.status === 'CONFIRMED')
-
-        if (hasConfirmedReceipt) {
-            throw new BadRequestException('TERM_PURCHASE_ORDER_HAS_CONFIRMED_RECEIPT_NOT_EDITABLE')
+        if (current.receipts.length > 0) {
+            throw new BadRequestException('TERM_PURCHASE_ORDER_HAS_RECEIPT_NOT_EDITABLE')
         }
 
         if (dto.supplierLocationId && dto.supplierCustomerId) {
             await this.ensureSupplierLocation(dto.supplierLocationId, dto.supplierCustomerId)
         }
 
-        if (dto.lines) {
-            await this.validateLines(dto.lines, dto.supplierCustomerId ?? current.supplierCustomerId, dto.supplierLocationId ?? current.supplierLocationId ?? undefined)
-        }
+        const currentDefaultWarehouseId =
+            current.lines.length > 0 &&
+            current.lines.every((line) => line.receivingWarehouseId === current.lines[0].receivingWarehouseId)
+                ? current.lines[0].receivingWarehouseId
+                : undefined
+        const nextLines =
+            dto.lines ??
+            current.lines.map((line) => ({
+                productId: line.productId,
+                supplierLocationId: dto.supplierLocationId ?? line.receivingWarehouseId,
+                orderedQty: Number(line.orderedQty),
+            }))
+        const defaultWarehouseId = dto.supplierLocationId ?? currentDefaultWarehouseId
+        await this.validateLines(nextLines, dto.supplierCustomerId ?? current.supplierCustomerId, defaultWarehouseId)
+        const legalEntityId = await this.resolveLegalEntityId(nextLines, defaultWarehouseId)
 
         const updated = await this.prisma.$transaction(async (tx) => {
             if (dto.lines) {
                 await tx.purchaseOrderLine.deleteMany({
                     where: { purchaseOrderId: id },
                 })
+            } else if (dto.supplierLocationId) {
+                await tx.purchaseOrderLine.updateMany({
+                    where: { purchaseOrderId: id },
+                    data: { receivingWarehouseId: dto.supplierLocationId },
+                })
             }
 
-            const totalQty = dto.lines ? dto.lines.reduce((sum, x) => sum + Number(x.orderedQty || 0), 0) : undefined
-
-            const totalAmount = dto.lines ? dto.lines.reduce((sum, x) => sum + Number(x.orderedQty || 0) * Number(x.unitPrice || 0) - Number(x.discountAmount || 0), 0) : undefined
+            await tx.termPurchaseProfile.upsert({
+                where: { purchaseOrderId: id },
+                create: {
+                    purchaseOrderId: id,
+                    flowType: dto.termFlowType ?? TermPurchaseFlowType.ESTIMATE_FIRST,
+                    transportMode: dto.transportMode ?? TermTransportMode.SEA,
+                    charterRequired:
+                        (dto.transportMode ?? TermTransportMode.SEA) === TermTransportMode.SEA && !!dto.charterVessel,
+                },
+                update: {
+                    flowType: dto.termFlowType ?? undefined,
+                    transportMode: dto.transportMode ?? undefined,
+                    charterRequired:
+                        dto.charterVessel !== undefined || dto.transportMode !== undefined
+                            ? (dto.transportMode ?? current.termProfile?.transportMode ?? TermTransportMode.SEA) ===
+                                  TermTransportMode.SEA &&
+                              (dto.charterVessel ?? current.termProfile?.charterRequired ?? false)
+                            : undefined,
+                },
+            })
 
             const order = await tx.purchaseOrder.update({
                 where: { id },
                 data: {
+                    legalEntityId,
                     supplierCustomerId: dto.supplierCustomerId ?? undefined,
-                    supplierLocationId: dto.supplierLocationId ?? undefined,
 
                     orderType: PurchaseOrderType.SINGLE,
-                    termFlowType: dto.termFlowType ?? undefined,
 
                     orderDate: dto.orderDate !== undefined ? this.toDateOnly(dto.orderDate) : undefined,
 
                     expectedDate: dto.expectedDate !== undefined ? this.toDateOnly(dto.expectedDate) : undefined,
 
                     contractNo: dto.contractNo ?? undefined,
-                    transportMode: dto.transportMode ?? undefined,
-                    charterVessel:
-                        dto.charterVessel !== undefined || dto.transportMode !== undefined
-                            ? (dto.transportMode ?? current.transportMode) === TermTransportMode.SEA && !!dto.charterVessel
-                            : undefined,
                     deliveryLocation: dto.deliveryLocation ?? undefined,
 
                     paymentNote: dto.paymentNote ?? undefined,
                     note: dto.note ?? undefined,
 
-                    totalQty,
-                    totalAmount,
-
                     lines: dto.lines
                         ? {
-                              create: dto.lines.map((x) => ({
+                              create: dto.lines.map((x, index) => ({
+                                  lineNo: index + 1,
                                   productId: x.productId,
-                                  supplierLocationId: x.supplierLocationId ?? dto.supplierLocationId ?? null,
+                                  receivingWarehouseId: x.supplierLocationId ?? defaultWarehouseId ?? null,
                                   orderedQty: x.orderedQty,
                                   unitPrice: x.unitPrice ?? null,
                                   taxRate: x.taxRate ?? null,
@@ -821,7 +855,7 @@ export class PurchaseTermOrdersService {
                 stageId: stage.id,
                 purchaseOrderLineId: line.id,
                 productId: line.productId,
-                supplierLocationId: line.supplierLocationId,
+                supplierLocationId: line.receivingWarehouseId,
                 qtyActual: line.orderedQty,
                 premiumUsdPerBbl: premium,
             })),
@@ -897,7 +931,7 @@ export class PurchaseTermOrdersService {
                 stageId: estimateStageId,
                 purchaseOrderLineId: line.id,
                 productId: line.productId,
-                supplierLocationId: line.supplierLocationId,
+                supplierLocationId: line.receivingWarehouseId,
                 qtyActual: line.orderedQty,
                 premiumUsdPerBbl: nextPremium,
             })),
@@ -908,7 +942,7 @@ export class PurchaseTermOrdersService {
     private async validateLines(
         lines: Array<{
             productId: string
-            supplierLocationId?: string
+            supplierLocationId?: string | null
             orderedQty: number
         }>,
         supplierCustomerId: string,
@@ -943,17 +977,38 @@ export class PurchaseTermOrdersService {
 
             const locId = line.supplierLocationId ?? defaultLocationId
 
-            if (locId) {
-                await this.ensureSupplierLocation(locId, supplierCustomerId)
-            }
+            if (!locId) throw new BadRequestException('RECEIVING_WAREHOUSE_REQUIRED')
+            await this.ensureSupplierLocation(locId, supplierCustomerId)
         }
     }
 
+    private async resolveLegalEntityId(
+        lines: Array<{ supplierLocationId?: string | null }>,
+        defaultLocationId?: string | null,
+    ) {
+        const warehouseIds = [
+            ...new Set(lines.map((line) => line.supplierLocationId ?? defaultLocationId).filter(Boolean) as string[]),
+        ]
+        if (!warehouseIds.length) throw new BadRequestException('RECEIVING_WAREHOUSE_REQUIRED')
+        const warehouses = await this.prisma.warehouse.findMany({
+            where: { id: { in: warehouseIds } },
+            select: { id: true, legalEntityId: true },
+        })
+        if (warehouses.length !== warehouseIds.length) throw new BadRequestException('SUPPLIER_LOCATION_INVALID')
+        const legalEntityIds = [...new Set(warehouses.map((warehouse) => warehouse.legalEntityId))]
+        if (legalEntityIds.length !== 1) {
+            throw new BadRequestException('PURCHASE_ORDER_WAREHOUSES_MUST_BELONG_TO_ONE_LEGAL_ENTITY')
+        }
+        return legalEntityIds[0]
+    }
+
     private async ensureSupplierLocation(supplierLocationId: string, supplierCustomerId: string) {
-        const location = await this.prisma.supplierLocation.findFirst({
+        const location = await this.prisma.warehouse.findFirst({
             where: {
                 id: supplierLocationId,
-                supplierCustomerId,
+                parties: {
+                    some: { partyId: supplierCustomerId, role: WarehousePartyRole.OPERATOR, validTo: null },
+                },
             },
             select: {
                 id: true,

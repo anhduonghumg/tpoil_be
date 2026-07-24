@@ -1,4 +1,4 @@
-import { TermShipmentStatus, TermTransportMode } from '@prisma/client'
+import { PurchaseShipmentStatus, TermTransportMode } from '@prisma/client'
 import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator'
 import { PartialType } from '@nestjs/mapped-types'
 
@@ -44,8 +44,8 @@ export class CreateTermShipmentDto {
     note?: string
 
     @IsOptional()
-    @IsEnum(TermShipmentStatus)
-    status?: TermShipmentStatus
+    @IsEnum(PurchaseShipmentStatus)
+    status?: PurchaseShipmentStatus
 }
 
 export class UpdateTermShipmentDto extends PartialType(CreateTermShipmentDto) {}

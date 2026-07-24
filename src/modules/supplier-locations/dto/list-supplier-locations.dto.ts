@@ -4,6 +4,10 @@ import { Transform } from 'class-transformer'
 export class ListSupplierLocationsDto {
     @IsOptional()
     @IsUUID()
+    areaId?: string
+
+    @IsOptional()
+    @IsUUID()
     supplierCustomerId?: string
 
     @IsOptional()

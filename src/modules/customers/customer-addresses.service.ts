@@ -9,11 +9,11 @@ export class CustomerAddressesService {
     constructor(private readonly prisma: PrismaService) {}
 
     async list(customerId: string): Promise<CustomerAddress[]> {
-        const customer = await this.prisma.customer.findFirst({
+        const customer = await this.prisma.party.findFirst({
             where: { id: customerId, deletedAt: null },
             select: { id: true },
         })
-        if (!customer) throw new NotFoundException('Không tìm thấy khách hàng')
+        if (!customer) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y khÃ¡ch hÃ ng')
 
         return this.prisma.customerAddress.findMany({
             where: { customerId },
@@ -26,14 +26,14 @@ export class CustomerAddressesService {
         const addressLine = dto.addressLine.trim()
         const note = dto.note?.trim()
 
-        if (!addressLine) throw new BadRequestException('Địa chỉ không được để trống')
+        if (!addressLine) throw new BadRequestException('Äá»‹a chá»‰ khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng')
 
         return this.prisma.$transaction(async (tx) => {
-            const customer = await tx.customer.findFirst({
+            const customer = await tx.party.findFirst({
                 where: { id: customerId, deletedAt: null },
                 select: { id: true },
             })
-            if (!customer) throw new NotFoundException('Không tìm thấy khách hàng')
+            if (!customer) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y khÃ¡ch hÃ ng')
 
             const current = await tx.customerAddress.findFirst({
                 where: { customerId, validTo: null },
@@ -43,7 +43,7 @@ export class CustomerAddressesService {
 
             if (current) {
                 if (newFrom <= current.validFrom) {
-                    throw new BadRequestException('Từ ngày phải lớn hơn từ ngày của địa chỉ hiện tại')
+                    throw new BadRequestException('Tá»« ngÃ y pháº£i lá»›n hÆ¡n tá»« ngÃ y cá»§a Ä‘á»‹a chá»‰ hiá»‡n táº¡i')
                 }
 
                 const prevTo = this.addDays(newFrom, -1)
@@ -90,7 +90,7 @@ export class CustomerAddressesService {
             where: { id: addressId },
             select: { id: true, customerId: true, validFrom: true },
         })
-        if (!existing) throw new NotFoundException('Không tìm thấy địa chỉ')
+        if (!existing) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y Ä‘á»‹a chá»‰')
 
         const nextValidFrom = dto.validFrom ? this.toDateOnly(dto.validFrom) : existing.validFrom
 
@@ -104,7 +104,7 @@ export class CustomerAddressesService {
                     },
                     select: { id: true },
                 })
-                if (dup) throw new BadRequestException('Đã có địa chỉ bắt đầu từ ngày này')
+                if (dup) throw new BadRequestException('ÄÃ£ cÃ³ Ä‘á»‹a chá»‰ báº¯t Ä‘áº§u tá»« ngÃ y nÃ y')
             }
 
             const updated = await tx.customerAddress.update({
@@ -127,7 +127,7 @@ export class CustomerAddressesService {
             where: { id: addressId },
             select: { id: true, customerId: true },
         })
-        if (!existing) throw new NotFoundException('Không tìm thấy địa chỉ')
+        if (!existing) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y Ä‘á»‹a chá»‰')
 
         return this.prisma.$transaction(async (tx) => {
             const deleted = await tx.customerAddress.delete({ where: { id: addressId } })
@@ -157,9 +157,9 @@ export class CustomerAddressesService {
             return new Date(Date.UTC(y, m, d))
         }
 
-        // input dạng "YYYY-MM-DD"
+        // input dáº¡ng "YYYY-MM-DD"
         const [y, m, d] = input.split('-').map((x) => parseInt(x, 10))
-        if (!y || !m || !d) throw new BadRequestException('Ngày không hợp lệ')
+        if (!y || !m || !d) throw new BadRequestException('NgÃ y khÃ´ng há»£p lá»‡')
 
         return new Date(Date.UTC(y, m - 1, d))
     }

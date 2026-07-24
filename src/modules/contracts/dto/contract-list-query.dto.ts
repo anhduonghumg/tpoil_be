@@ -12,6 +12,10 @@ export class ContractListQueryDto {
     customerId?: string
 
     @IsOptional()
+    @IsUUID()
+    contractTypeId?: string
+
+    @IsOptional()
     @IsEnum(ContractStatus)
     status?: ContractStatus
 

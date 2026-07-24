@@ -52,7 +52,7 @@ export class PurchaseTermLogisticsCostsService {
     private async ensureShipment(purchaseOrderId: string, shipmentId?: string | null, tx: Prisma.TransactionClient | PrismaService = this.prisma) {
         if (!shipmentId) return
 
-        const shipment = await tx.termShipment.findFirst({
+        const shipment = await tx.purchaseShipment.findFirst({
             where: {
                 id: shipmentId,
                 purchaseOrderId,

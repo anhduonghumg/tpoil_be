@@ -2,13 +2,18 @@
 import { Module } from '@nestjs/common'
 import { GoodsReceiptsController } from './goods-receipts.controller'
 import { GoodsReceiptsService } from './goods-receipts.service'
-import { InventoryService } from '../../inventory/inventory.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-import { WarehouseAvailabilityService } from 'src/modules/operations/warehouse-availability.service'
+import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
+import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
 
 @Module({
     controllers: [GoodsReceiptsController],
-    providers: [GoodsReceiptsService, InventoryService, PrismaService, WarehouseAvailabilityService],
+    providers: [
+        GoodsReceiptsService,
+        InventoryCoreService,
+        GoodsReceiptPostingService,
+        PrismaService,
+    ],
     exports: [GoodsReceiptsService],
 })
 export class GoodsReceiptsModule {}

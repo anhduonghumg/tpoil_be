@@ -248,6 +248,35 @@ enum PurchaseOrderStatus {
   CANCELLED
 }
 
+enum CommercialLotStockState {
+  EXPORTABLE
+  TEMPORARY_EXPORT
+  NON_EXPORTABLE
+}
+
+enum CommercialLotWithdrawalStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  PARTIALLY_RESERVED
+  RESERVED
+  PARTIALLY_DELIVERED
+  COMPLETED
+  CANCELLED
+}
+
+enum SalesDeliveryStatus {
+  DRAFT
+  READY
+  POSTED
+  VOIDED
+}
+
 enum TermOrderDocumentSourceType {
   ESTIMATE_PRICING
   DIRECT
@@ -328,27 +357,6 @@ enum GoodsReceiptStatus {
   VOID
 }
 
-enum SupplierInvoiceStatus {
-  DRAFT
-  POSTED
-  VOID
-}
-
-enum ReconcileSessionStatus {
-  DRAFT
-  QUEUED
-  PROCESSING
-  READY
-  CLOSED
-  FAILED
-}
-
-enum InventoryAdjustmentStatus {
-  DRAFT
-  POSTED
-  VOID
-}
-
 enum BankTxnDirection {
   IN
   OUT
@@ -373,22 +381,6 @@ enum SettlementType {
   PAYABLE
 }
 
-enum SettlementStatus {
-  OPEN
-  PARTIAL
-  SETTLED
-  VOID
-}
-
-enum InventoryLedgerSourceType {
-  GOODS_RECEIPT
-  SUPPLIER_INVOICE
-  INVENTORY_ADJUSTMENT
-  RECONCILE_SESSION
-  WAREHOUSE_TRANSFER
-  MANUAL
-}
-
 enum CounterpartyType {
   SUPPLIER
   CUSTOMER
@@ -407,7 +399,7 @@ enum TermTransportMode {
   ROAD
 }
 
-enum TermShipmentStatus {
+enum PurchaseShipmentStatus {
   DRAFT
   CONFIRMED
   VOID
@@ -450,6 +442,17 @@ enum OperationalPartyRole {
   ROAD_CARRIER
 }
 
+enum VesselDocumentType {
+  VESSEL_REGISTRATION
+  VESSEL_INSPECTION
+  FIRE_SAFETY_CERTIFICATE
+  TANK_CALIBRATION_BAREM
+  H_AND_M_INSURANCE
+  P_AND_I_INSURANCE
+  PIPELINE_SYSTEM_DOCUMENT
+  OTHER
+}
+
 enum ShipCharterOrderSourceType {
   DIRECT
   FROM_TERM
@@ -459,9 +462,29 @@ enum ShipCharterOrderStatus {
   DRAFT
   WAITING_CONFIRMATION
   CONFIRMED
+  APPENDIX_CREATED
   IN_PROGRESS
   COMPLETED
   CANCELLED
+}
+
+enum ShipCharterContractStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum ShipFreightRateSourceType {
+  CONTRACT
+  APPENDIX
+  MANUAL
+}
+
+enum ShipFreightRateStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
 }
 
 enum OperationRegistrationStatus {
@@ -482,54 +505,6 @@ enum StorageRentalContractStatus {
   ACTIVE
   EXPIRED
   TERMINATED
-}
-
-enum WarehouseOwnerType {
-  INTERNAL
-  CUSTOMER
-  SUPPLIER
-}
-
-enum AvailabilityLedgerSourceType {
-  GOODS_RECEIPT
-  EXPECTED_INVENTORY
-  RESERVATION
-  WAREHOUSE_TRANSFER
-  MANUAL
-}
-
-enum ExpectedInventorySourceType {
-  PURCHASE_ORDER
-  SHIP_CHARTER_ORDER
-  WAREHOUSE_TRANSFER
-  MANUAL
-}
-
-enum ExpectedInventoryStatus {
-  OPEN
-  PARTIALLY_RECEIVED
-  RECEIVED
-  CANCELLED
-}
-
-enum WarehouseReservationSourceType {
-  SALES_ORDER
-  MANUAL
-}
-
-enum WarehouseReservationStatus {
-  ACTIVE
-  RELEASED
-  CONSUMED
-  CANCELLED
-}
-
-enum WarehouseTransferStatus {
-  DRAFT
-  CONFIRMED
-  IN_TRANSIT
-  COMPLETED
-  CANCELLED
 }
 
 enum VehicleDocumentType {
@@ -571,6 +546,196 @@ enum OperationalCostSourceType {
   SHIPPING_AGENT
   STORAGE_RENTAL
   STORAGE_LOSS
+}
+
+// =======================================
+// ERP domain enums
+// =======================================
+
+enum PartyKind {
+  ORGANIZATION
+  INDIVIDUAL
+}
+
+enum PartyRoleType {
+  CUSTOMER
+  SUPPLIER
+  INTERNAL_COMPANY
+  INVENTORY_OWNER
+  WAREHOUSE_OPERATOR
+  WAREHOUSE_LESSOR
+  SHIP_OWNER
+  SEA_CARRIER
+  ROAD_CARRIER
+  SURVEYOR
+  SHIPPING_AGENT
+  INSURER
+  STORAGE_LESSOR
+}
+
+enum MasterStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum QuantityUom {
+  LITER
+  KILOGRAM
+  UNIT
+}
+
+enum WarehousePartyRole {
+  OPERATOR
+  LESSOR
+}
+
+enum ExpectedSupplyStatus {
+  OPEN
+  PARTIALLY_FULFILLED
+  FULFILLED
+  CANCELLED
+}
+
+enum InventoryPostingKind {
+  RECEIPT
+  MOVEMENT_DISPATCH
+  MOVEMENT_ARRIVAL
+  OWNERSHIP_TRANSFER
+  ADJUSTMENT
+  SALES_ISSUE
+  REVERSAL
+}
+
+enum InventoryPostingStatus {
+  POSTED
+  REVERSED
+}
+
+enum ReservationStatus {
+  DRAFT
+  ACTIVE
+  PARTIALLY_RELEASED
+  CONSUMED
+  RELEASED
+  CANCELLED
+  EXPIRED
+}
+
+enum ReservationEventType {
+  ACTIVATE
+  RELEASE
+  CONSUME
+  CANCEL
+  EXPIRE
+}
+
+enum RestrictionStatus {
+  ACTIVE
+  PARTIALLY_RELEASED
+  RELEASED
+  CANCELLED
+}
+
+enum RestrictionEventType {
+  ACTIVATE
+  RELEASE
+  CANCEL
+}
+
+enum InventoryMovementType {
+  WAREHOUSE_TRANSFER
+  TEMPORARY_ISSUE_INSPECTION
+  TEMPORARY_ISSUE_PROCESSING
+  CUSTOMER_DELIVERY
+  RETURN
+}
+
+enum InventoryMovementStatus {
+  DRAFT
+  READY
+  IN_TRANSIT
+  PARTIALLY_ARRIVED
+  COMPLETED
+  CANCELLED
+}
+
+enum InventoryDocumentStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+enum ReconciliationStatus {
+  DRAFT
+  IMPORTING
+  READY_TO_MAP
+  COMPARING
+  REVIEWING
+  CLOSED
+  FAILED
+  CANCELLED
+}
+
+enum ReconciliationScope {
+  PRODUCT_TOTAL
+  OWNER_DETAIL
+}
+
+enum ReconciliationRowStatus {
+  RAW
+  MAPPED
+  INVALID
+  IGNORED
+}
+
+enum ReconciliationVarianceStatus {
+  OPEN
+  EXPLAINED
+  RESOLVED
+  ACCEPTED
+}
+
+enum CostDocumentStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+enum CostLayerEntryType {
+  OPEN_PROVISIONAL
+  FINALIZE
+  LANDED_COST
+  SALES_ISSUE
+  RETURN
+  REVALUATION
+  REVERSAL
+}
+
+enum SupplierInvoiceStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+enum PayableOpenItemStatus {
+  OPEN
+  PARTIALLY_SETTLED
+  SETTLED
+  VOIDED
+}
+
+enum PayableEntryType {
+  OPEN
+  PAYMENT
+  CREDIT_NOTE
+  FX_DIFFERENCE
+  REVERSAL
+}
+
+enum PayableAllocationStatus {
+  ACTIVE
+  REVERSED
 }
 
 model DocumentSequence {
@@ -694,7 +859,7 @@ model User {
 }
 
 // =======================================
-// Employee – Hồ sơ nhân sự
+// Employee - Hồ sơ nhân sự
 // =======================================
 model Employee {
   id   String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
@@ -742,10 +907,10 @@ model Employee {
   memberships  EmployeeDepartment[]
   managerRoles DepartmentManager[]
 
-  customersSalesOwner      Customer[] @relation("customer_sales_owner_emp")
-  customersAccountingOwner Customer[] @relation("customer_accounting_owner_emp")
-  customersLegalOwner      Customer[] @relation("customer_legal_owner_emp")
-  customersDocumentOwner   Customer[] @relation("customer_document_owner_emp")
+  customersSalesOwner      Party[] @relation("customer_sales_owner_emp")
+  customersAccountingOwner Party[] @relation("customer_accounting_owner_emp")
+  customersLegalOwner      Party[] @relation("customer_legal_owner_emp")
+  customersDocumentOwner   Party[] @relation("customer_document_owner_emp")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -926,7 +1091,7 @@ model UserRoleBinding {
 }
 
 // =======================================
-// Customer / Contract
+// Party / Contract
 // =======================================
 model CustomerGroup {
   id   String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
@@ -935,7 +1100,7 @@ model CustomerGroup {
   name String?
   note String?
 
-  customers Customer[]
+  customers Party[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -944,122 +1109,10 @@ model CustomerGroup {
   @@index([name])
 }
 
-model Customer {
-  id          String     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  code        String     @unique
-  name        String
-  taxCode     String?
-  taxVerified Boolean    @default(false)
-  taxSource   TaxSource?
-  taxSyncedAt DateTime?
-
-  roles     CustomerRole[]
-  type      CustomerType
-  partyType PartyType      @default(CUSTOMER)
-
-  groupId String?        @db.Uuid
-  group   CustomerGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  billingAddress  String?
-  shippingAddress String?
-  contactEmail    String?
-  contactPhone    String?
-
-  creditLimit     Decimal?
-  tempLimit       Decimal?
-  tempFrom        DateTime?
-  tempTo          DateTime?
-  paymentTermDays Int?
-  status          CustomerStatus @default(Active)
-  note            String?
-
-  isCustomer Boolean @default(true)
-  isSupplier Boolean @default(false)
-  isInternal Boolean @default(false)
-
-  salesOwnerEmpId      String? @db.Uuid
-  accountingOwnerEmpId String? @db.Uuid
-  legalOwnerEmpId      String? @db.Uuid
-  documentOwnerEmpId   String? @db.Uuid
-
-  defaultPurchaseContractNo String?
-  defaultDeliveryLocation   String?
-
-  salesOwnerEmp      Employee? @relation("customer_sales_owner_emp", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  accountingOwnerEmp Employee? @relation("customer_accounting_owner_emp", fields: [accountingOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  legalOwnerEmp      Employee? @relation("customer_legal_owner_emp", fields: [legalOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  documentOwnerEmp   Employee? @relation("customer_document_owner_emp", fields: [documentOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  contacts        ContactPerson[]
-  contracts       Contract[]
-  riskFlags       RiskFlag[]
-  creditHistories CreditLimitHistory[]
-  addresses       CustomerAddress[]
-
-  vehicles                      Vehicle[]
-  drivers                       Driver[]
-  supplierLocations             SupplierLocation[]
-  purchaseOrders                PurchaseOrder[]
-  goodsReceipts                 GoodsReceipt[]
-  supplierInvoices              SupplierInvoice[]
-  settlements                   SupplierSettlement[]
-  reconcileSessions             ReconcileSession[]
-  adjustments                   InventoryAdjustment[]
-  pricingTemplates              SupplierPricingTemplate[]
-  pricingRuns                   PurchasePricingRun[]
-  costLayers                    InventoryCostLayer[]
-  termLogisticsCosts            TermLogisticsCost[]            @relation("term_logistics_cost_vendor")
-  operationalRoles              CustomerOperationalRole[]
-  ownedVessels                  Vessel[]                       @relation("vessel_owner")
-  shipCharterContracts          ShipCharterContract[]          @relation("ship_charter_contract_owner")
-  shipCharterOrders             ShipCharterOrder[]             @relation("ship_charter_order_owner")
-  charterInsurances             ShipCharterInsurance[]         @relation("charter_insurance_company")
-  charterInspections            ShipCharterInspection[]        @relation("charter_inspection_company")
-  shippingAgentRegistrations    ShippingAgentRegistration[]    @relation("shipping_agent_company")
-  shipFreightRates              ShipFreightRate[]              @relation("ship_freight_rate_owner")
-  storageRentalContracts        StorageRentalContract[]        @relation("storage_rental_lessor")
-  warehouseAvailabilityBalances WarehouseAvailabilityBalance[] @relation("availability_owner")
-  warehouseAvailabilityLedgers  WarehouseAvailabilityLedger[]  @relation("availability_ledger_owner")
-  expectedInventories           ExpectedInventory[]            @relation("expected_inventory_owner")
-
-  createdAt            DateTime               @default(now())
-  updatedAt            DateTime               @updatedAt
-  deletedAt            DateTime?
-  WarehouseReservation WarehouseReservation[]
-  WarehouseTransfer    WarehouseTransfer[]
-
-  @@index([name])
-  @@index([taxCode])
-  @@index([groupId])
-  @@index([partyType])
-  @@index([salesOwnerEmpId])
-  @@index([accountingOwnerEmpId])
-  @@index([legalOwnerEmpId])
-  @@index([documentOwnerEmpId])
-  @@index([isCustomer])
-  @@index([isSupplier])
-  @@index([isInternal])
-}
-
-model CustomerOperationalRole {
-  id         String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  customerId String               @db.Uuid
-  role       OperationalPartyRole
-  isActive   Boolean              @default(true)
-  note       String?
-  createdAt  DateTime             @default(now())
-  updatedAt  DateTime             @updatedAt
-
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@unique([customerId, role])
-  @@index([role, isActive])
-}
-
 model CustomerAddress {
-  id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  customerId String   @db.Uuid
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerId String @db.Uuid
+  customer   Party  @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   addressLine String
   validFrom   DateTime  @db.Date
@@ -1075,9 +1128,9 @@ model CustomerAddress {
 }
 
 model ContactPerson {
-  id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  customerId String   @db.Uuid
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerId String @db.Uuid
+  customer   Party  @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   fullName  String
   position  String?
@@ -1091,8 +1144,8 @@ model Contract {
   code String @unique
   name String
 
-  customerId String?   @db.Uuid
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  customerId String? @db.Uuid
+  customer   Party?  @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   contractTypeId String       @db.Uuid
   contractType   ContractType @relation(fields: [contractTypeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -1114,10 +1167,11 @@ model Contract {
   renewalOf   Contract?  @relation("ContractRenewal", fields: [renewalOfId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   renewals    Contract[] @relation("ContractRenewal")
 
-  items          ContractItem[]
-  appendices     ContractAppendix[]
-  attachments    ContractAttachment[]
-  purchaseOrders PurchaseOrder[]
+  items                ContractItem[]
+  appendices           ContractAppendix[]
+  attachments          ContractAttachment[]
+  warehouseRentalLinks WarehouseRentalContractLink[]
+  purchaseOrders       PurchaseOrder[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1154,6 +1208,19 @@ model ContractAttachment {
   category    AttachmentCategory
 }
 
+// Liên kết nghiệp vụ giữa hợp đồng chung và các kho được thuê.
+// Một hợp đồng có thể áp dụng cho nhiều kho; lịch sử gia hạn vẫn nằm ở Contract.renewalOfId.
+model WarehouseRentalContractLink {
+  contractId  String @db.Uuid
+  warehouseId String @db.Uuid
+
+  contract  Contract  @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([contractId, warehouseId])
+  @@index([warehouseId])
+}
+
 model ContractItem {
   id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   contractId String   @db.Uuid
@@ -1181,9 +1248,9 @@ model ContractAppendix {
 }
 
 model CreditLimitHistory {
-  id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  customerId String   @db.Uuid
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerId String @db.Uuid
+  customer   Party  @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   oldLimit  Decimal?
   newLimit  Decimal?
@@ -1196,9 +1263,9 @@ model CreditLimitHistory {
 }
 
 model RiskFlag {
-  id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  customerId String   @db.Uuid
-  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerId String @db.Uuid
+  customer   Party  @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   level     RiskLevel
   source    RiskSource
@@ -1209,13 +1276,13 @@ model RiskFlag {
 }
 
 // =======================================
-// Mua hàng - Kho - Thanh toán (NCC = Customer)
+// Danh mục vận tải và hàng hóa
 // =======================================
 
 model Vehicle {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  supplierCustomerId String @db.Uuid
+  supplier           Party  @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   licensePlate String
   type         String?
@@ -1226,7 +1293,7 @@ model Vehicle {
   receipts           GoodsReceipt[]
   documents          VehicleDocument[]
   dispatchOrders     VehicleDispatchOrder[]
-  warehouseTransfers WarehouseTransfer[]
+  inventoryMovements InventoryMovement[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1236,9 +1303,9 @@ model Vehicle {
 }
 
 model Driver {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  supplierCustomerId String @db.Uuid
+  supplier           Party  @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   fullName String
   phone    String?
@@ -1251,176 +1318,96 @@ model Driver {
   goodsReceipts      GoodsReceipt[]
   documents          DriverDocument[]
   dispatchOrders     VehicleDispatchOrder[]
-  warehouseTransfers WarehouseTransfer[]
+  inventoryMovements InventoryMovement[]
 
   @@index([fullName])
   @@index([phone])
 }
 
 model Product {
-  id       String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  code     String?
+  id       String       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code     String       @unique
   name     String
   nameMisa String?
-  uom      QtyUom  @default(LITER)
+  uom      QtyUom       @default(LITER)
+  status   MasterStatus @default(ACTIVE)
+  version  Int          @default(1)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  inventoryBalances             InventoryBalance[]
-  receipts                      GoodsReceipt[]
-  invoiceLines                  SupplierInvoiceLine[]
-  reconcileLines                ReconcileLine[]
-  reconcileVariances            ReconcileVariance[]
-  adjustmentLines               InventoryAdjustmentLine[]
-  snapshotLines                 InventorySnapshotLine[]
-  ledger                        InventoryLedger[]
+  createdAt                     DateTime                       @default(now())
+  updatedAt                     DateTime                       @updatedAt
   purchaseOrderLines            PurchaseOrderLine[]
+  salesOrderLines               SalesOrderLine[]
   priceQuotes                   CommodityPriceQuote[]
   environmentalTaxRates         EnvironmentalTaxRate[]
   pricingTemplates              SupplierPricingTemplate[]
-  costLayers                    InventoryCostLayer[]
   priceBulletinItems            PriceBulletinItem[]
   purchasePricingStageLines     PurchasePricingStageLine[]
   termLogisticsCostLines        TermLogisticsCostLine[]
-  warehouseAvailabilityBalances WarehouseAvailabilityBalance[]
-  warehouseAvailabilityLedgers  WarehouseAvailabilityLedger[]
-  expectedInventories           ExpectedInventory[]
-  warehouseReservations         WarehouseReservation[]
-  warehouseTransferLines        WarehouseTransferLine[]
   vehicleDispatchOrders         VehicleDispatchOrder[]
+  shipCharterAppendices         ShipCharterAppendix[]
+  shipCharterOrders             ShipCharterOrder[]
+  shipFreightRates              ShipFreightRate[]
+  receiptLines                  GoodsReceiptLine[]
+  inventoryLots                 InventoryLot[]
+  inventoryLedgerEntries        InventoryLedgerEntry[]
+  stockBalances                 StockBalance[]
+  inventoryAvailabilityBalances InventoryAvailabilityBalance[]
+  inventoryReservationLines     InventoryReservationLine[]
+  inventoryPendingReleases      InventoryPendingRelease[]
+  inventoryBlocks               InventoryBlock[]
+  inventoryMovementLines        InventoryMovementLine[]
+  ownershipTransferLines        OwnershipTransferLine[]
+  stockAdjustmentLines          StockAdjustmentLine[]
+  expectedSupplies              ExpectedSupply[]
+  reconciliationNormalizedLines ReconciliationNormalizedLine[]
+  reconciliationSnapshotLines   ReconciliationSnapshotLine[]
+  reconciliationVariances       ReconciliationVariance[]
+  landedCostAllocations         LandedCostAllocation[]
+  supplierInvoiceLines          SupplierInvoiceLine[]
+  aliases                       ProductAlias[]
+  commercialLotPositions        CommercialLotPosition[]
 
   @@index([name])
 }
 
-// ======================================================
-// 1) SUPPLIER LOCATION (kho thuê NCC)
-// ======================================================
-model SupplierLocation {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+model ProductAlias {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  productId      String    @db.Uuid
+  partyId        String?   @db.Uuid
+  externalCode   String?
+  externalName   String
+  normalizedName String
+  validFrom      DateTime  @db.Date
+  validTo        DateTime? @db.Date
 
-  code        String
-  name        String
-  nameInvoice String?
-  address     String?
-  isActive    Boolean @default(true)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  party   Party?  @relation(fields: [partyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  tankCode String?
-  tankName String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  inventoryBalances             InventoryBalance[]
-  ledger                        InventoryLedger[]
-  receipts                      GoodsReceipt[]
-  invoiceLines                  SupplierInvoiceLine[]
-  reconcileSessions             ReconcileSession[]
-  adjustmentLines               InventoryAdjustmentLine[]
-  snapshotLines                 InventorySnapshotLine[]
-  costLayers                    InventoryCostLayer[]
-  inventoryAdjustments          InventoryAdjustment[]
-  purchaseOrders                PurchaseOrder[]
-  purchaseOrderLines            PurchaseOrderLine[]
-  purchasePricingStageLines     PurchasePricingStageLine[]
-  storageRentalContractLinks    StorageRentalContractLocation[]
-  warehouseAvailabilityBalances WarehouseAvailabilityBalance[]
-  warehouseAvailabilityLedgers  WarehouseAvailabilityLedger[]
-  expectedInventories           ExpectedInventory[]
-  warehouseReservations         WarehouseReservation[]
-  outgoingWarehouseTransfers    WarehouseTransfer[]             @relation("warehouse_transfer_from")
-  incomingWarehouseTransfers    WarehouseTransfer[]             @relation("warehouse_transfer_to")
-  dispatchOrdersFrom            VehicleDispatchOrder[]          @relation("dispatch_from_warehouse")
-  dispatchOrdersTo              VehicleDispatchOrder[]          @relation("dispatch_to_warehouse")
-
-  warehouseType          String?
-  isOperationalWarehouse Boolean @default(true)
-  note                   String?
-
-  @@unique([supplierCustomerId, code])
-  @@index([supplierCustomerId])
-  @@index([isActive])
+  @@unique([partyId, normalizedName, validFrom])
+  @@index([productId, validFrom, validTo])
+  @@index([partyId, externalCode])
 }
 
 // ======================================================
-// 2) INVENTORY BALANCE (3 số tồn)
-// ======================================================
-model InventoryBalance {
-  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierLocationId String @db.Uuid
-  productId          String @db.Uuid
-
-  physicalQty   Decimal @default(0) @db.Decimal(18, 3)
-  pendingDocQty Decimal @default(0) @db.Decimal(18, 3)
-  postedQty     Decimal @default(0) @db.Decimal(18, 3)
-
-  supplierLocation SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product          Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([supplierLocationId, productId])
-  @@index([supplierLocationId])
-  @@index([productId])
-}
-
-// ======================================================
-// 2b) INVENTORY LEDGER (thẻ kho) - append-only
-// ======================================================
-model InventoryLedger {
-  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierLocationId String @db.Uuid
-  productId          String @db.Uuid
-
-  deltaPhysicalQty   Decimal @default(0) @db.Decimal(18, 3)
-  deltaPendingDocQty Decimal @default(0) @db.Decimal(18, 3)
-  deltaPostedQty     Decimal @default(0) @db.Decimal(18, 3)
-
-  afterPhysicalQty   Decimal @db.Decimal(18, 3)
-  afterPendingDocQty Decimal @db.Decimal(18, 3)
-  afterPostedQty     Decimal @db.Decimal(18, 3)
-
-  sourceType InventoryLedgerSourceType
-  sourceId   String                    @db.Uuid
-  note       String?
-
-  occurredAt DateTime
-  createdAt  DateTime @default(now())
-
-  supplierLocation SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product          Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@index([supplierLocationId, productId, occurredAt])
-  @@index([sourceType, sourceId])
-}
-
-// ======================================================
-// 3) PURCHASE ORDER (SINGLE/LOT)
+// PURCHASE
 // ======================================================
 model PurchaseOrder {
-  id      String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  orderNo String
+  id            String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  legalEntityId String @db.Uuid
+  orderNo       String
 
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  supplierLocationId String?           @db.Uuid
-  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  supplierCustomerId String      @db.Uuid
+  supplier           Party       @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity        LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   priceRegionId String?      @db.Uuid
   priceRegion   PriceRegion? @relation(fields: [priceRegionId], references: [id], onDelete: SetNull)
 
-  bizType              PurchaseBizType      @default(COMMERCIAL)
-  orderType            PurchaseOrderType
-  status               PurchaseOrderStatus  @default(DRAFT)
-  paymentMode          PaymentMode
-  termPremiumUsdPerBbl Decimal?             @db.Decimal(18, 6)
-  transportMode        TermTransportMode?
-  charterVessel        Boolean              @default(false)
-  termFlowType         TermPurchaseFlowType @default(ESTIMATE_FIRST)
+  bizType     PurchaseBizType     @default(COMMERCIAL)
+  orderType   PurchaseOrderType
+  status      PurchaseOrderStatus @default(DRAFT)
+  paymentMode PaymentMode
+  currency    String              @default("VND") @db.Char(3)
 
   paymentTermType     PaymentTermType @default(SAME_DAY)
   paymentTermDays     Int?
@@ -1432,24 +1419,26 @@ model PurchaseOrder {
   paymentNote String?
   note        String?
 
-  totalQty    Decimal? @db.Decimal(18, 3)
-  totalAmount Decimal? @db.Decimal(18, 2)
-
   contractNo       String?
   contractId       String?   @db.Uuid
   contract         Contract? @relation(fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   deliveryLocation String?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  version      Int       @default(1)
+  createdById  String?   @db.Uuid
+  approvedById String?   @db.Uuid
+  approvedAt   DateTime? @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
 
-  lines    PurchaseOrderLine[]
-  receipts GoodsReceipt[]
+  lines       PurchaseOrderLine[]
+  receipts    GoodsReceipt[]
+  termProfile TermPurchaseProfile?
 
-  supplierInvoices          SupplierInvoice[]                  @relation("supplierInvoices")
+  supplierInvoices          SupplierInvoice[]
   paymentPlans              PurchaseOrderPaymentPlan[]
   pricingRuns               PurchasePricingRun[]
-  termShipments             TermShipment[]
+  shipments                 PurchaseShipment[]
   termLogisticsCosts        TermLogisticsCost[]
   termOrderDocuments        PurchaseTermOrderDocument[]
   termPaymentRequests       PurchaseTermPaymentRequest[]
@@ -1457,8 +1446,11 @@ model PurchaseOrder {
   termSettlementAdjustments PurchaseTermSettlementAdjustment[]
   termPaymentBatchItems     TermPaymentBatchItem[]
   shipCharterOrders         ShipCharterOrder[]
+  shipCharterAppendices     ShipCharterAppendix[]
+  landedCostDocuments       LandedCostDocument[]
+  commercialLotWithdrawals  CommercialLotWithdrawal[]
 
-  @@unique([orderNo])
+  @@unique([legalEntityId, orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
   @@index([priceRegionId])
@@ -1466,13 +1458,27 @@ model PurchaseOrder {
   @@index([contractId])
 }
 
+model TermPurchaseProfile {
+  purchaseOrderId  String               @id @db.Uuid
+  premiumUsdPerBbl Decimal?             @db.Decimal(24, 8)
+  transportMode    TermTransportMode
+  charterRequired  Boolean              @default(false)
+  flowType         TermPurchaseFlowType @default(ESTIMATE_FIRST)
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+}
+
 model PurchaseOrderLine {
   id              String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   purchaseOrderId String @db.Uuid
+  lineNo          Int
   productId       String @db.Uuid
 
-  supplierLocationId String?           @db.Uuid
-  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  receivingWarehouseId String?    @db.Uuid
+  receivingWarehouse   Warehouse? @relation(fields: [receivingWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  plannedReceivingAreaId String?        @db.Uuid
+  plannedReceivingArea   WarehouseArea? @relation("PurchaseOrderLinePlannedArea", fields: [plannedReceivingAreaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   orderedQty Decimal  @db.Decimal(18, 3)
   unitPrice  Decimal? @db.Decimal(18, 2)
@@ -1480,21 +1486,110 @@ model PurchaseOrderLine {
 
   discountAmount Decimal @default(0) @db.Decimal(18, 2)
 
-  withdrawnQty Decimal @default(0) @db.Decimal(18, 3)
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  goodsReceipts             GoodsReceipt[]
   purchasePricingStageLines PurchasePricingStageLine[]
   termLogisticsCostLines    TermLogisticsCostLine[]
+  expectedSupplies          ExpectedSupply[]
+  shipmentLines             PurchaseShipmentLine[]
+  receiptLines              GoodsReceiptLine[]
+  supplierInvoiceLines      SupplierInvoiceLine[]
+  commercialLotPosition     CommercialLotPosition?
 
+  @@unique([purchaseOrderId, lineNo])
   @@index([purchaseOrderId])
   @@index([productId])
-  @@index([supplierLocationId, productId])
+  @@index([receivingWarehouseId, productId])
+  @@index([plannedReceivingAreaId, productId])
+}
+
+/// Commercial ownership and accounting position created when a LOT supplier invoice is posted.
+/// Physical stock is posted only when a withdrawal is confirmed at a destination warehouse.
+model CommercialLotPosition {
+  id                  String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderLineId String                  @unique @db.Uuid
+  supplierCustomerId  String                  @db.Uuid
+  plannedWarehouseId  String                  @db.Uuid
+  productId           String                  @db.Uuid
+  invoicedQty         Decimal                 @default(0) @db.Decimal(24, 6)
+  withdrawnQty        Decimal                 @default(0) @db.Decimal(24, 6)
+  accountingValue     Decimal                 @default(0) @db.Decimal(24, 4)
+  stockState          CommercialLotStockState @default(EXPORTABLE)
+  version             Int                     @default(1)
+  createdAt           DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime                @updatedAt @db.Timestamptz(6)
+
+  purchaseOrderLine  PurchaseOrderLine                @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplier           Party                            @relation("CommercialLotPositionSupplier", fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  plannedWarehouse   Warehouse                        @relation("CommercialLotPlannedWarehouse", fields: [plannedWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product            Product                          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  invoiceAllocations CommercialLotInvoiceAllocation[]
+  withdrawalLines    CommercialLotWithdrawalLine[]
+
+  @@index([supplierCustomerId, productId])
+  @@index([plannedWarehouseId, productId])
+  @@index([stockState])
+}
+
+model CommercialLotInvoiceAllocation {
+  id                      String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  commercialLotPositionId String   @db.Uuid
+  supplierInvoiceLineId   String   @unique @db.Uuid
+  qty                     Decimal  @db.Decimal(24, 6)
+  accountingValue         Decimal  @db.Decimal(24, 4)
+  createdAt               DateTime @default(now()) @db.Timestamptz(6)
+
+  commercialLotPosition CommercialLotPosition @relation(fields: [commercialLotPositionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplierInvoiceLine   SupplierInvoiceLine   @relation(fields: [supplierInvoiceLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([commercialLotPositionId])
+}
+
+model CommercialLotWithdrawal {
+  id                     String                        @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  purchaseOrderId        String                        @db.Uuid
+  withdrawalNo           String
+  destinationWarehouseId String                        @db.Uuid
+  withdrawalDate         DateTime                      @db.Timestamptz(6)
+  status                 CommercialLotWithdrawalStatus @default(DRAFT)
+  note                   String?
+  createdById            String?                       @db.Uuid
+  confirmedById          String?                       @db.Uuid
+  confirmedAt            DateTime?                     @db.Timestamptz(6)
+  version                Int                           @default(1)
+  createdAt              DateTime                      @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                      @updatedAt @db.Timestamptz(6)
+
+  purchaseOrder        PurchaseOrder                 @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  destinationWarehouse Warehouse                     @relation("CommercialLotDestinationWarehouse", fields: [destinationWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines                CommercialLotWithdrawalLine[]
+
+  @@unique([purchaseOrderId, withdrawalNo])
+  @@index([purchaseOrderId, status, withdrawalDate])
+  @@index([destinationWarehouseId, withdrawalDate])
+}
+
+model CommercialLotWithdrawalLine {
+  id                      String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  withdrawalId            String   @db.Uuid
+  lineNo                  Int
+  commercialLotPositionId String   @db.Uuid
+  actualQty               Decimal  @db.Decimal(24, 6)
+  v15Qty                  Decimal? @db.Decimal(24, 6)
+  temperatureC            Decimal? @db.Decimal(8, 3)
+  density                 Decimal? @db.Decimal(14, 8)
+  goodsReceiptId          String?  @unique @db.Uuid
+
+  withdrawal            CommercialLotWithdrawal @relation(fields: [withdrawalId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  commercialLotPosition CommercialLotPosition   @relation(fields: [commercialLotPositionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  goodsReceipt          GoodsReceipt?           @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([withdrawalId, lineNo])
+  @@index([commercialLotPositionId])
 }
 
 model PurchaseTermOrderDocument {
@@ -1746,8 +1841,9 @@ model PurchaseTermSettlementAdjustment {
   @@index([adjustmentType])
 }
 
-model TermShipment {
-  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+model PurchaseShipment {
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  shipmentNo String
 
   purchaseOrderId String        @db.Uuid
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -1767,21 +1863,123 @@ model TermShipment {
   surveyorName String?
   note         String?
 
-  status TermShipmentStatus @default(DRAFT)
+  status PurchaseShipmentStatus @default(DRAFT)
 
-  logisticsCosts    TermLogisticsCost[]
-  vesselId          String?             @db.Uuid
-  vessel            Vessel?             @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  shipCharterOrders ShipCharterOrder[]
+  logisticsCosts      TermLogisticsCost[]
+  vesselId            String?                @db.Uuid
+  vessel              Vessel?                @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  shipCharterOrders   ShipCharterOrder[]
+  landedCostDocuments LandedCostDocument[]
+  lines               PurchaseShipmentLine[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
+  @@unique([purchaseOrderId, shipmentNo])
   @@index([purchaseOrderId])
   @@index([transportMode])
   @@index([status])
   @@index([eta])
   @@index([vesselId])
+}
+
+model PurchaseShipmentLine {
+  id                  String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  shipmentId          String   @db.Uuid
+  purchaseOrderLineId String   @db.Uuid
+  plannedActualQty    Decimal  @db.Decimal(24, 6)
+  plannedV15Qty       Decimal? @db.Decimal(24, 6)
+
+  shipment          PurchaseShipment  @relation(fields: [shipmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrderLine PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  expectedSupplies  ExpectedSupply[]
+
+  @@unique([shipmentId, purchaseOrderLineId])
+  @@index([purchaseOrderLineId])
+}
+
+model SalesOrder {
+  id              String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  legalEntityId   String           @db.Uuid
+  orderNo         String
+  customerPartyId String           @db.Uuid
+  status          SalesOrderStatus @default(DRAFT)
+  orderDate       DateTime         @db.Date
+  currency        String           @db.Char(3)
+  note            String?
+  version         Int              @default(1)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(6)
+
+  legalEntity  LegalEntity            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer     Party                  @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines        SalesOrderLine[]
+  reservations InventoryReservation[]
+  deliveries   SalesDelivery[]
+
+  @@unique([legalEntityId, orderNo])
+  @@index([customerPartyId, status, orderDate])
+}
+
+model SalesOrderLine {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesOrderId     String   @db.Uuid
+  lineNo           Int
+  productId        String   @db.Uuid
+  orderedActualQty Decimal  @db.Decimal(24, 6)
+  orderedV15Qty    Decimal? @db.Decimal(24, 6)
+  unitPrice        Decimal  @db.Decimal(24, 8)
+  taxRate          Decimal? @db.Decimal(9, 6)
+  note             String?
+
+  salesOrder    SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product       Product             @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  deliveryLines SalesDeliveryLine[]
+
+  @@unique([salesOrderId, lineNo])
+  @@index([productId])
+}
+
+model SalesDelivery {
+  id           String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  deliveryNo   String              @unique
+  salesOrderId String              @db.Uuid
+  warehouseId  String              @db.Uuid
+  status       SalesDeliveryStatus @default(DRAFT)
+  plannedAt    DateTime?           @db.Timestamptz(6)
+  deliveredAt  DateTime?           @db.Timestamptz(6)
+  note         String?
+  version      Int                 @default(1)
+  createdAt    DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime            @updatedAt @db.Timestamptz(6)
+
+  salesOrder SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse  Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines      SalesDeliveryLine[]
+  posting    InventoryPosting?   @relation("SalesDeliveryPosting")
+
+  @@index([salesOrderId, status])
+  @@index([warehouseId, status, plannedAt])
+}
+
+model SalesDeliveryLine {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesDeliveryId  String   @db.Uuid
+  lineNo           Int
+  salesOrderLineId String   @db.Uuid
+  ownerPartyId     String   @db.Uuid
+  actualQty        Decimal  @db.Decimal(24, 6)
+  v15Qty           Decimal? @db.Decimal(24, 6)
+
+  delivery    SalesDelivery    @relation(fields: [salesDeliveryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  orderLine   SalesOrderLine   @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner       Party            @relation("SalesDeliveryLineOwner", fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  costEntries CostLayerEntry[]
+
+  @@unique([salesDeliveryId, lineNo])
+  @@index([salesOrderLineId])
+  @@index([ownerPartyId])
 }
 
 model TermLogisticsCost {
@@ -1790,11 +1988,11 @@ model TermLogisticsCost {
   purchaseOrderId String        @db.Uuid
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  shipmentId String?       @db.Uuid
-  shipment   TermShipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  shipmentId String?           @db.Uuid
+  shipment   PurchaseShipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  vendorCustomerId String?   @db.Uuid
-  vendor           Customer? @relation("term_logistics_cost_vendor", fields: [vendorCustomerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  vendorCustomerId String? @db.Uuid
+  vendor           Party?  @relation("term_logistics_cost_vendor", fields: [vendorCustomerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   documentNo   String?
   documentDate DateTime? @db.Date
@@ -1887,32 +2085,20 @@ model PurchaseOrderPaymentPlan {
 }
 
 // ======================================================
-// 4) GOODS RECEIPT (nhận hàng / rút lô) + V15
-// Mode A: CONFIRMED -> tăng PendingDocQty
+// GOODS RECEIPT
 // ======================================================
 model GoodsReceipt {
   id        String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   receiptNo String
 
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplierCustomerId String @db.Uuid
+  supplier           Party  @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  supplierLocationId String           @db.Uuid
-  supplierLocation   SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouseId String    @db.Uuid
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receiptDate DateTime @db.Timestamptz(6)
 
-  receiptDate DateTime
-  qty         Decimal  @db.Decimal(18, 3)
-
-  tempC                   Decimal? @db.Decimal(6, 2)
-  density                 Decimal? @db.Decimal(10, 6)
-  standardQtyV15          Decimal? @db.Decimal(18, 3)
-  billQty                 Decimal? @db.Decimal(18, 3)
-  tankQty                 Decimal? @db.Decimal(18, 3)
-  temporaryWithdrawQty    Decimal? @db.Decimal(18, 3)
-  billToTankLossQty       Decimal? @db.Decimal(18, 3)
   receiptDocumentTemplate String?
   sourceFileName          String?
   sourceFileUrl           String?
@@ -1931,23 +2117,23 @@ model GoodsReceipt {
 
   status GoodsReceiptStatus @default(DRAFT)
 
-  purchaseOrderId     String?            @db.Uuid
-  purchaseOrderLineId String?            @db.Uuid
-  purchaseOrder       PurchaseOrder?     @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  purchaseOrderId String?        @db.Uuid
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  invoiceLines                 SupplierInvoiceLine[]
-  pricingRuns                  PurchasePricingRunReceipt[]
-  termLogisticsCostLines       TermLogisticsCostLine[]
-  expectedInventoryAllocations ExpectedInventoryReceiptAllocation[]
+  pricingRuns                 PurchasePricingRunReceipt[]
+  termLogisticsCostLines      TermLogisticsCostLine[]
+  lines                       GoodsReceiptLine[]
+  posting                     InventoryPosting?            @relation("GoodsReceiptPosting")
+  commercialLotWithdrawalLine CommercialLotWithdrawalLine?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   @@unique([supplierCustomerId, receiptNo])
   @@index([supplierCustomerId, receiptDate])
-  @@index([supplierLocationId, productId])
-  @@index([status])
+  @@index([warehouseId, receiptDate])
+  @@index([status, receiptDate])
 }
 
 // =======================================
@@ -1959,6 +2145,7 @@ model Vessel {
   name              String
   ownerCustomerId   String   @db.Uuid
   imoNo             String?
+  mmsiNo            String?
   nationality       String?
   deadweightTonnage Decimal? @db.Decimal(18, 3)
   capacity          Decimal? @db.Decimal(18, 3)
@@ -1972,34 +2159,79 @@ model Vessel {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  owner             Customer              @relation("vessel_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner             Party                 @relation("vessel_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   charterAppendices ShipCharterAppendix[]
   charterOrders     ShipCharterOrder[]
   freightRates      ShipFreightRate[]
-  termShipments     TermShipment[]
+  shipments         PurchaseShipment[]
+  documents         VesselDocument[]
 
   @@unique([ownerCustomerId, name])
   @@unique([imoNo])
   @@index([ownerCustomerId, isActive])
 }
 
-model ShipCharterContract {
-  id              String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  contractNo      String    @unique
-  ownerCustomerId String    @db.Uuid
-  signedDate      DateTime  @db.Date
-  effectiveFrom   DateTime  @db.Date
-  effectiveTo     DateTime? @db.Date
-  fileUrl         String?
-  note            String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+model VesselDocument {
+  id           String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  vesselId     String             @db.Uuid
+  documentType VesselDocumentType
+  documentNo   String?
+  issuedDate   DateTime?          @db.Date
+  expiredDate  DateTime?          @db.Date
+  fileUrl      String?
+  note         String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
-  owner      Customer              @relation("ship_charter_contract_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  appendices ShipCharterAppendix[]
+  vessel Vessel @relation(fields: [vesselId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([vesselId])
+  @@index([vesselId, documentType])
+  @@index([expiredDate])
+}
+
+model ShipCharterContract {
+  id                  String                    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  contractNo          String                    @unique
+  ownerCustomerId     String                    @db.Uuid
+  signedDate          DateTime?                 @db.Date
+  effectiveFrom       DateTime?                 @db.Date
+  effectiveTo         DateTime?                 @db.Date
+  qtyBasis            String                    @default("V15")
+  freightVatIncluded  Boolean                   @default(false)
+  defaultLaytimeHours Decimal?                  @db.Decimal(10, 2)
+  demurrageRatePerDay Decimal?                  @db.Decimal(18, 2)
+  paymentTermDays     Int?
+  paymentTermText     String?
+  status              ShipCharterContractStatus @default(DRAFT)
+  fileUrl             String?
+  note                String?
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  owner        Party                         @relation("ship_charter_contract_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  appendices   ShipCharterAppendix[]
+  orders       ShipCharterOrder[]
+  freightRates ShipFreightRate[]
+  lossRates    ShipCharterContractLossRate[]
 
   @@index([ownerCustomerId])
   @@index([effectiveFrom, effectiveTo])
+}
+
+model ShipCharterContractLossRate {
+  id              String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  contractId      String   @db.Uuid
+  productGroup    String
+  lossRatePercent Decimal  @db.Decimal(7, 4)
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  contract ShipCharterContract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([contractId, productGroup])
+  @@index([contractId])
 }
 
 model ShipCharterAppendix {
@@ -2008,26 +2240,42 @@ model ShipCharterAppendix {
   appendixNo             String
   appendixDate           DateTime  @db.Date
   vesselId               String?   @db.Uuid
+  purchaseOrderId        String?   @db.Uuid
+  productId              String?   @db.Uuid
+  receivingWarehouseId   String?   @db.Uuid
   cargoName              String?
   plannedQty             Decimal?  @db.Decimal(18, 3)
+  plannedQtyUnit         String    @default("LITER")
   qtyTolerancePercent    Decimal?  @db.Decimal(7, 4)
   loadingPort            String?
   dischargePort          String?
   laycanFrom             DateTime? @db.Date
   laycanTo               DateTime? @db.Date
   freightRateVndPerLiter Decimal?  @db.Decimal(18, 6)
+  qtyBasis               String    @default("V15")
+  vatIncluded            Boolean   @default(false)
+  vatRate                Decimal?  @db.Decimal(7, 4)
   lossRatePercent        Decimal?  @db.Decimal(7, 4)
+  deliveryMethod         String?
+  paymentTermText        String?
   fileUrl                String?
   note                   String?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  contract      ShipCharterContract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  vessel        Vessel?             @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  charterOrders ShipCharterOrder[]
+  contract           ShipCharterContract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  vessel             Vessel?             @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  purchaseOrder      PurchaseOrder?      @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  product            Product?            @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  receivingWarehouse Warehouse?          @relation(fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  charterOrders      ShipCharterOrder[]
+  freightRates       ShipFreightRate[]
 
   @@unique([contractId, appendixNo])
   @@index([vesselId])
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@index([receivingWarehouseId])
   @@index([laycanFrom, laycanTo])
 }
 
@@ -2036,18 +2284,27 @@ model ShipCharterOrder {
   charterOrderNo         String                     @unique
   sourceType             ShipCharterOrderSourceType @default(DIRECT)
   purchaseOrderId        String?                    @db.Uuid
-  termShipmentId         String?                    @db.Uuid
+  shipmentId             String?                    @db.Uuid
   appendixId             String?                    @db.Uuid
+  contractId             String?                    @db.Uuid
   ownerCustomerId        String?                    @db.Uuid
   vesselId               String?                    @db.Uuid
+  receivingWarehouseId   String?                    @db.Uuid
+  productId              String?                    @db.Uuid
   laycanFrom             DateTime?                  @db.Date
   laycanTo               DateTime?                  @db.Date
   cargoName              String?
   plannedQty             Decimal                    @default(0) @db.Decimal(18, 3)
+  plannedQtyUnit         String                     @default("LITER")
+  qtyTolerancePercent    Decimal?                   @db.Decimal(7, 4)
   loadingPort            String?
   dischargePort          String?
   freightRateVndPerLiter Decimal?                   @db.Decimal(18, 6)
+  qtyBasis               String                     @default("V15")
+  vatIncluded            Boolean                    @default(false)
+  vatRate                Decimal?                   @db.Decimal(7, 4)
   lossRatePercent        Decimal?                   @db.Decimal(7, 4)
+  insuranceRequired      Boolean                    @default(false)
   status                 ShipCharterOrderStatus     @default(DRAFT)
   appendixFileUrl        String?
   note                   String?
@@ -2055,18 +2312,24 @@ model ShipCharterOrder {
   updatedAt              DateTime                   @updatedAt
 
   purchaseOrder      PurchaseOrder?              @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  termShipment       TermShipment?               @relation(fields: [termShipmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  shipment           PurchaseShipment?           @relation(fields: [shipmentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   appendix           ShipCharterAppendix?        @relation(fields: [appendixId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  owner              Customer?                   @relation("ship_charter_order_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  contract           ShipCharterContract?        @relation(fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  owner              Party?                      @relation("ship_charter_order_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   vessel             Vessel?                     @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  receivingWarehouse Warehouse?                  @relation(fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  product            Product?                    @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   insurances         ShipCharterInsurance[]
   inspections        ShipCharterInspection[]
   agentRegistrations ShippingAgentRegistration[]
 
   @@index([purchaseOrderId])
-  @@index([termShipmentId])
+  @@index([shipmentId])
+  @@index([contractId])
   @@index([ownerCustomerId])
   @@index([vesselId])
+  @@index([receivingWarehouseId])
+  @@index([productId])
   @@index([status, laycanFrom])
 }
 
@@ -2087,7 +2350,7 @@ model ShipCharterInsurance {
   updatedAt          DateTime                    @updatedAt
 
   charterOrder     ShipCharterOrder @relation(fields: [charterOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  insuranceCompany Customer         @relation("charter_insurance_company", fields: [insuranceCompanyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  insuranceCompany Party            @relation("charter_insurance_company", fields: [insuranceCompanyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([charterOrderId, status])
   @@index([insuranceCompanyId])
@@ -2109,7 +2372,7 @@ model ShipCharterInspection {
   updatedAt             DateTime                    @updatedAt
 
   charterOrder      ShipCharterOrder @relation(fields: [charterOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  inspectionCompany Customer         @relation("charter_inspection_company", fields: [inspectionCompanyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  inspectionCompany Party            @relation("charter_inspection_company", fields: [inspectionCompanyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([charterOrderId, status])
   @@index([inspectionCompanyId])
@@ -2128,32 +2391,52 @@ model ShippingAgentRegistration {
   updatedAt       DateTime                    @updatedAt
 
   charterOrder ShipCharterOrder @relation(fields: [charterOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  agent        Customer         @relation("shipping_agent_company", fields: [agentCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  agent        Party            @relation("shipping_agent_company", fields: [agentCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@index([charterOrderId, status])
   @@index([agentCustomerId])
 }
 
 model ShipFreightRate {
-  id                     String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  ownerCustomerId        String?   @db.Uuid
-  vesselId               String?   @db.Uuid
+  id                     String                    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  rateCode               String                    @unique
+  ownerCustomerId        String?                   @db.Uuid
+  vesselId               String?                   @db.Uuid
+  contractId             String?                   @db.Uuid
+  appendixId             String?                   @db.Uuid
+  sourceType             ShipFreightRateSourceType @default(MANUAL)
   loadingPort            String
   dischargePort          String
+  routeName              String?
   productGroup           String?
-  freightRateVndPerLiter Decimal   @db.Decimal(18, 6)
-  effectiveFrom          DateTime  @db.Date
-  effectiveTo            DateTime? @db.Date
+  productId              String?                   @db.Uuid
+  qtyBasis               String                    @default("V15")
+  freightRateVndPerLiter Decimal                   @db.Decimal(18, 6)
+  rateUnit               String                    @default("VND_PER_LITER")
+  currency               String                    @default("VND")
+  vatIncluded            Boolean                   @default(false)
+  vatRate                Decimal?                  @db.Decimal(7, 4)
+  allowedLossRatePercent Decimal?                  @db.Decimal(7, 4)
+  effectiveFrom          DateTime                  @db.Date
+  effectiveTo            DateTime?                 @db.Date
+  status                 ShipFreightRateStatus     @default(ACTIVE)
   note                   String?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
 
-  owner  Customer? @relation("ship_freight_rate_owner", fields: [ownerCustomerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  vessel Vessel?   @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  owner    Party?               @relation("ship_freight_rate_owner", fields: [ownerCustomerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  vessel   Vessel?              @relation(fields: [vesselId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  contract ShipCharterContract? @relation(fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  appendix ShipCharterAppendix? @relation(fields: [appendixId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  product  Product?             @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([loadingPort, dischargePort, effectiveFrom])
   @@index([ownerCustomerId])
   @@index([vesselId])
+  @@index([contractId])
+  @@index([appendixId])
+  @@index([productId])
+  @@index([status, effectiveFrom, effectiveTo])
 }
 
 // =======================================
@@ -2174,7 +2457,7 @@ model StorageRentalContract {
   createdAt        DateTime                    @default(now())
   updatedAt        DateTime                    @updatedAt
 
-  lessor    Customer                        @relation("storage_rental_lessor", fields: [lessorCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lessor    Party                           @relation("storage_rental_lessor", fields: [lessorCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   locations StorageRentalContractLocation[]
   lossRates StorageRentalLossRate[]
   feeTiers  StorageRentalFeeTier[]
@@ -2189,7 +2472,7 @@ model StorageRentalContractLocation {
   createdAt          DateTime @default(now())
 
   contract         StorageRentalContract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  supplierLocation SupplierLocation      @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplierLocation Warehouse             @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@id([contractId, supplierLocationId])
   @@index([supplierLocationId])
@@ -2222,175 +2505,6 @@ model StorageRentalFeeTier {
   contract StorageRentalContract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@index([contractId, sortOrder])
-}
-
-model WarehouseAvailabilityBalance {
-  id                 String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierLocationId String             @db.Uuid
-  productId          String             @db.Uuid
-  ownerType          WarehouseOwnerType
-  ownerKey           String
-  ownerCustomerId    String?            @db.Uuid
-  availableQty       Decimal            @default(0) @db.Decimal(18, 3)
-  reservedQty        Decimal            @default(0) @db.Decimal(18, 3)
-  inTransitQty       Decimal            @default(0) @db.Decimal(18, 3)
-  expectedQty        Decimal            @default(0) @db.Decimal(18, 3)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-
-  supplierLocation SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product          Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  ownerCustomer    Customer?        @relation("availability_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([supplierLocationId, productId, ownerKey])
-  @@index([ownerType, ownerCustomerId])
-  @@index([productId])
-}
-
-model WarehouseAvailabilityLedger {
-  id                 String                       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierLocationId String                       @db.Uuid
-  productId          String                       @db.Uuid
-  ownerType          WarehouseOwnerType
-  ownerKey           String
-  ownerCustomerId    String?                      @db.Uuid
-  deltaAvailableQty  Decimal                      @default(0) @db.Decimal(18, 3)
-  deltaReservedQty   Decimal                      @default(0) @db.Decimal(18, 3)
-  deltaInTransitQty  Decimal                      @default(0) @db.Decimal(18, 3)
-  deltaExpectedQty   Decimal                      @default(0) @db.Decimal(18, 3)
-  afterAvailableQty  Decimal                      @db.Decimal(18, 3)
-  afterReservedQty   Decimal                      @db.Decimal(18, 3)
-  afterInTransitQty  Decimal                      @db.Decimal(18, 3)
-  afterExpectedQty   Decimal                      @db.Decimal(18, 3)
-  sourceType         AvailabilityLedgerSourceType
-  sourceId           String                       @db.Uuid
-  sourceAction       String
-  occurredAt         DateTime
-  note               String?
-  createdAt          DateTime                     @default(now())
-
-  supplierLocation SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product          Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  ownerCustomer    Customer?        @relation("availability_ledger_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([sourceType, sourceId, sourceAction, supplierLocationId, productId, ownerKey])
-  @@index([supplierLocationId, productId, ownerKey, occurredAt])
-}
-
-model ExpectedInventory {
-  id                 String                      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  sourceType         ExpectedInventorySourceType
-  sourceId           String                      @db.Uuid
-  supplierLocationId String                      @db.Uuid
-  productId          String                      @db.Uuid
-  ownerType          WarehouseOwnerType
-  ownerKey           String
-  ownerCustomerId    String?                     @db.Uuid
-  expectedQty        Decimal                     @db.Decimal(18, 3)
-  receivedQty        Decimal                     @default(0) @db.Decimal(18, 3)
-  expectedDate       DateTime?                   @db.Date
-  status             ExpectedInventoryStatus     @default(OPEN)
-  note               String?
-  createdAt          DateTime                    @default(now())
-  updatedAt          DateTime                    @updatedAt
-
-  supplierLocation   SupplierLocation                     @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product            Product                              @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  ownerCustomer      Customer?                            @relation("expected_inventory_owner", fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  receiptAllocations ExpectedInventoryReceiptAllocation[]
-
-  @@unique([sourceType, sourceId, supplierLocationId, productId, ownerKey])
-  @@index([supplierLocationId, status, expectedDate])
-  @@index([productId])
-}
-
-model ExpectedInventoryReceiptAllocation {
-  expectedInventoryId String   @db.Uuid
-  goodsReceiptId      String   @db.Uuid
-  allocatedQty        Decimal  @db.Decimal(18, 3)
-  createdAt           DateTime @default(now())
-
-  expectedInventory ExpectedInventory @relation(fields: [expectedInventoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  goodsReceipt      GoodsReceipt      @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@id([expectedInventoryId, goodsReceiptId])
-  @@index([goodsReceiptId])
-}
-
-model WarehouseReservation {
-  id                 String                         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  reservationNo      String                         @unique
-  supplierLocationId String                         @db.Uuid
-  productId          String                         @db.Uuid
-  customerId         String?                        @db.Uuid
-  sourceType         WarehouseReservationSourceType @default(MANUAL)
-  sourceId           String?                        @db.Uuid
-  reservedQty        Decimal                        @db.Decimal(18, 3)
-  status             WarehouseReservationStatus     @default(ACTIVE)
-  reservedAt         DateTime                       @default(now())
-  expiredAt          DateTime?
-  note               String?
-  createdAt          DateTime                       @default(now())
-  updatedAt          DateTime                       @updatedAt
-
-  supplierLocation SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product          Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  customer         Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  @@index([supplierLocationId, productId, status])
-  @@index([customerId, status])
-  @@index([expiredAt])
-}
-
-model WarehouseTransfer {
-  id                     String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  transferNo             String                  @unique
-  fromSupplierLocationId String                  @db.Uuid
-  toSupplierLocationId   String                  @db.Uuid
-  transferDate           DateTime                @db.Date
-  expectedArrivalDate    DateTime?               @db.Date
-  actualArrivalDate      DateTime?               @db.Date
-  transportMode          TermTransportMode       @default(ROAD)
-  vehicleId              String?                 @db.Uuid
-  driverId               String?                 @db.Uuid
-  ownerType              WarehouseOwnerType      @default(INTERNAL)
-  ownerKey               String                  @default("INTERNAL")
-  ownerCustomerId        String?                 @db.Uuid
-  status                 WarehouseTransferStatus @default(DRAFT)
-  note                   String?
-  createdAt              DateTime                @default(now())
-  updatedAt              DateTime                @updatedAt
-
-  fromSupplierLocation SupplierLocation        @relation("warehouse_transfer_from", fields: [fromSupplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  toSupplierLocation   SupplierLocation        @relation("warehouse_transfer_to", fields: [toSupplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  vehicle              Vehicle?                @relation(fields: [vehicleId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  driver               Driver?                 @relation(fields: [driverId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  ownerCustomer        Customer?               @relation(fields: [ownerCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines                WarehouseTransferLine[]
-  dispatchOrder        VehicleDispatchOrder?
-
-  @@index([fromSupplierLocationId, status])
-  @@index([toSupplierLocationId, status])
-  @@index([vehicleId])
-}
-
-model WarehouseTransferLine {
-  id            String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  transferId    String   @db.Uuid
-  productId     String   @db.Uuid
-  qty           Decimal  @db.Decimal(18, 3)
-  qtyV15        Decimal? @db.Decimal(18, 3)
-  pendingDocQty Decimal  @default(0) @db.Decimal(18, 3)
-  postedQty     Decimal  @default(0) @db.Decimal(18, 3)
-  note          String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  transfer WarehouseTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product  Product           @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([transferId, productId])
-  @@index([productId])
 }
 
 // =======================================
@@ -2438,7 +2552,7 @@ model VehicleDispatchOrder {
   dispatchNo             String                    @unique
   sourceType             VehicleDispatchSourceType @default(DIRECT)
   sourceId               String?                   @db.Uuid
-  warehouseTransferId    String?                   @unique @db.Uuid
+  inventoryMovementId    String?                   @unique @db.Uuid
   vehicleId              String                    @db.Uuid
   driverId               String                    @db.Uuid
   fromLocationText       String
@@ -2458,11 +2572,11 @@ model VehicleDispatchOrder {
   createdAt              DateTime                  @default(now())
   updatedAt              DateTime                  @updatedAt
 
-  warehouseTransfer    WarehouseTransfer? @relation(fields: [warehouseTransferId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  inventoryMovement    InventoryMovement? @relation(fields: [inventoryMovementId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   vehicle              Vehicle            @relation(fields: [vehicleId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   driver               Driver             @relation(fields: [driverId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  fromSupplierLocation SupplierLocation?  @relation("dispatch_from_warehouse", fields: [fromSupplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  toSupplierLocation   SupplierLocation?  @relation("dispatch_to_warehouse", fields: [toSupplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  fromSupplierLocation Warehouse?         @relation("dispatch_from_warehouse", fields: [fromSupplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  toSupplierLocation   Warehouse?         @relation("dispatch_to_warehouse", fields: [toSupplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   product              Product?           @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([vehicleId, status, plannedStartAt])
@@ -2488,262 +2602,7 @@ model PurchasePricingRunReceipt {
 }
 
 // ======================================================
-// 5) SUPPLIER INVOICE
-// ======================================================
-model SupplierInvoice {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  invoiceNo       String
-  invoiceSymbol   String?
-  invoiceTemplate String?
-  invoiceDate     DateTime @db.Date
-
-  status   SupplierInvoiceStatus @default(DRAFT)
-  postedAt DateTime?
-
-  totalAmount Decimal? @db.Decimal(18, 2)
-  note        String?
-
-  payableSettlementId String?             @db.Uuid
-  payableSettlement   SupplierSettlement? @relation(fields: [payableSettlementId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  sourceFileId       String?
-  sourceFileUrl      String?
-  sourceFileName     String?
-  sourceFileChecksum String?
-
-  lines SupplierInvoiceLine[]
-
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  purchaseOrder   PurchaseOrder? @relation("supplierInvoices", fields: [purchaseOrderId], references: [id])
-  purchaseOrderId String?        @db.Uuid
-
-  @@unique([supplierCustomerId, invoiceSymbol, invoiceNo])
-  @@index([invoiceDate])
-  @@index([status])
-}
-
-model SupplierInvoiceLine {
-  id        String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  invoiceId String          @db.Uuid
-  invoice   SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  supplierLocationId String           @db.Uuid
-  supplierLocation   SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  qty            Decimal  @db.Decimal(18, 3)
-  discountAmount Decimal? @db.Decimal(18, 2)
-
-  tempC          Decimal? @db.Decimal(6, 2)
-  density        Decimal? @db.Decimal(10, 6)
-  standardQtyV15 Decimal? @db.Decimal(18, 3)
-
-  unitPrice Decimal? @db.Decimal(18, 2)
-  taxRate   Decimal? @db.Decimal(5, 2)
-
-  goodsReceiptId String?       @db.Uuid
-  goodsReceipt   GoodsReceipt? @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  createdAt DateTime @default(now())
-
-  @@index([invoiceId])
-  @@index([supplierLocationId, productId])
-  @@index([goodsReceiptId])
-}
-
-// ======================================================
-// 6) SETTLEMENT (ADVANCE/PAYABLE) - khép vòng mua hàng
-// ======================================================
-model SupplierSettlement {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  type   SettlementType
-  status SettlementStatus @default(OPEN)
-
-  amountTotal   Decimal @db.Decimal(18, 2)
-  amountSettled Decimal @default(0) @db.Decimal(18, 2)
-
-  dueDate DateTime?
-  note    String?
-
-  invoices    SupplierInvoice[]
-  allocations PaymentAllocation[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([supplierCustomerId, type, status])
-  @@index([dueDate])
-}
-
-// ======================================================
-// 7) ĐỐI CHIẾU KHO NCC - session + line + variance
-// Không auto adjust
-// ======================================================
-model ReconcileSession {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  supplierLocationId String           @db.Uuid
-  supplierLocation   SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  asOfDate DateTime               @db.Date
-  status   ReconcileSessionStatus @default(DRAFT)
-
-  sourceType   String?
-  fileUrl      String?
-  fileChecksum String?
-  templateKey  String?
-
-  totalLines    Int     @default(0)
-  varianceLines Int     @default(0)
-  errorMessage  String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  lines     ReconcileLine[]
-  variances ReconcileVariance[]
-
-  @@unique([supplierCustomerId, supplierLocationId, asOfDate])
-  @@index([supplierCustomerId, asOfDate])
-  @@index([status])
-}
-
-model ReconcileLine {
-  id        String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  sessionId String @db.Uuid
-  productId String @db.Uuid
-
-  supplierQty       Decimal @db.Decimal(18, 3)
-  systemPhysicalQty Decimal @db.Decimal(18, 3)
-
-  createdAt DateTime @default(now())
-
-  session ReconcileSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([sessionId, productId])
-  @@index([productId])
-}
-
-model ReconcileVariance {
-  id        String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  sessionId String @db.Uuid
-  productId String @db.Uuid
-
-  supplierQty       Decimal @db.Decimal(18, 3)
-  systemPhysicalQty Decimal @db.Decimal(18, 3)
-  varianceQty       Decimal @db.Decimal(18, 3)
-
-  explanation String?
-  resolvedAt  DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  session ReconcileSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  product Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([sessionId, productId])
-  @@index([varianceQty])
-}
-
-// ======================================================
-// 8) INVENTORY ADJUSTMENT
-// ======================================================
-model InventoryAdjustment {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  supplierLocationId String           @db.Uuid
-  supplierLocation   SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  status InventoryAdjustmentStatus @default(DRAFT)
-
-  adjustmentDate DateTime
-  reason         String?
-  note           String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  lines InventoryAdjustmentLine[]
-
-  @@index([supplierCustomerId, supplierLocationId])
-  @@index([status])
-  @@index([adjustmentDate])
-}
-
-model InventoryAdjustmentLine {
-  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  adjustmentId       String @db.Uuid
-  supplierLocationId String @db.Uuid
-  productId          String @db.Uuid
-
-  adjustPhysicalQty Decimal @db.Decimal(18, 3)
-  note              String?
-
-  createdAt DateTime @default(now())
-
-  adjustment       InventoryAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  supplierLocation SupplierLocation    @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product          Product             @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@index([productId])
-  @@index([supplierLocationId, productId])
-}
-
-// ======================================================
-// 9) SNAPSHOT INVENTORY
-// ======================================================
-model InventorySnapshot {
-  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  asOfAt       DateTime
-  source       String?
-  warningCount Int      @default(0)
-
-  createdAt DateTime @default(now())
-
-  lines InventorySnapshotLine[]
-
-  @@unique([asOfAt])
-}
-
-model InventorySnapshotLine {
-  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  snapshotId         String @db.Uuid
-  supplierLocationId String @db.Uuid
-  productId          String @db.Uuid
-
-  physicalQty   Decimal @db.Decimal(18, 3)
-  pendingDocQty Decimal @db.Decimal(18, 3)
-  postedQty     Decimal @db.Decimal(18, 3)
-
-  hasVariance Boolean @default(false)
-
-  createdAt DateTime @default(now())
-
-  snapshot         InventorySnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  supplierLocation SupplierLocation  @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product          Product           @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  @@unique([snapshotId, supplierLocationId, productId])
-  @@index([supplierLocationId, productId])
-}
-
-// ======================================================
-// 10) QUỸ / NGÂN HÀNG - SAO KÊ
+// BANKING
 // ======================================================
 
 model BankTransactionPurpose {
@@ -2874,7 +2733,7 @@ model BankTransaction {
   import      BankStatementImport?    @relation(fields: [importId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   purpose     BankTransactionPurpose? @relation(fields: [purposeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  allocations           PaymentAllocation[]
+  payableAllocations    PayableAllocation[]
   termBankInstructions  PurchaseTermBankInstruction[]
   termPaymentBatchItems TermPaymentBatchItem[]
 
@@ -2891,30 +2750,6 @@ model BankTransaction {
   @@index([documentCode])
   @@index([purposeId])
   @@index([counterpartyId])
-}
-
-model PaymentAllocation {
-  id                String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  bankTransactionId String @db.Uuid
-  settlementId      String @db.Uuid
-
-  allocatedAmount Decimal @db.Decimal(18, 2)
-
-  isAuto Boolean @default(false)
-  score  Int?
-  note   String?
-
-  sortOrder Int? @default(0)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  bankTransaction BankTransaction    @relation(fields: [bankTransactionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  settlement      SupplierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@unique([bankTransactionId, settlementId])
-  @@index([bankTransactionId])
-  @@index([settlementId])
 }
 
 // ======================================================
@@ -2995,9 +2830,9 @@ model EnvironmentalTaxRate {
 }
 
 model SupplierPricingTemplate {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  supplierCustomerId String @db.Uuid
+  supplier           Party  @relation(fields: [supplierCustomerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   productId String  @db.Uuid
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -3016,10 +2851,10 @@ model PurchasePricingRun {
   id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
 
   purchaseOrderId String        @db.Uuid
-  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplierCustomerId String @db.Uuid
+  supplier           Party  @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   billDate DateTime? @db.Date
 
@@ -3029,23 +2864,33 @@ model PurchasePricingRun {
   qtyActualTotal Decimal? @db.Decimal(18, 3)
   qtyV15Total    Decimal? @db.Decimal(18, 3)
 
-  status PricingRunStatus @default(DRAFT)
+  status          PricingRunStatus @default(DRAFT)
+  version         Int              @default(1)
+  supersedesRunId String?          @unique @db.Uuid
+  inputHash       String?
+  postedAt        DateTime?        @db.Timestamptz(6)
 
-  stages   PurchasePricingStage[]
-  receipts PurchasePricingRunReceipt[]
+  stages     PurchasePricingStage[]
+  receipts   PurchasePricingRunReceipt[]
+  supersedes PurchasePricingRun?         @relation("PricingRunCorrection", fields: [supersedesRunId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  correction PurchasePricingRun?         @relation("PricingRunCorrection")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([purchaseOrderId, version])
+  @@unique([purchaseOrderId, inputHash])
   @@index([purchaseOrderId])
   @@index([supplierCustomerId, billDate])
   @@index([status])
 }
 
 model PurchasePricingStage {
-  id        String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  runId     String           @db.Uuid
-  stageType PricingStageType
+  id             String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  runId          String           @db.Uuid
+  stageType      PricingStageType
+  inputSnapshot  Json             @default("{}")
+  resultSnapshot Json             @default("{}")
 
   mopsAvgUsdPerBbl Decimal? @db.Decimal(18, 6)
   premiumUsdPerBbl Decimal? @db.Decimal(18, 6)
@@ -3105,7 +2950,7 @@ model PurchasePricingStage {
   costs PurchasePricingStageCost[]
   lines PurchasePricingStageLine[]
 
-  run                       PurchasePricingRun                 @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  run                       PurchasePricingRun                 @relation(fields: [runId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   priceDays                 PurchasePricingPriceDay[]
   sheetRows                 PurchasePricingSheetRow[]
   termOrderDocuments        PurchaseTermOrderDocument[]
@@ -3127,8 +2972,8 @@ model PurchasePricingStageLine {
   productId String  @db.Uuid
   product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  supplierLocationId String?           @db.Uuid
-  supplierLocation   SupplierLocation? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  supplierLocationId String?    @db.Uuid
+  supplierLocation   Warehouse? @relation(fields: [supplierLocationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   qtyActual Decimal? @db.Decimal(18, 3)
   qtyV15    Decimal? @db.Decimal(18, 3)
@@ -3137,6 +2982,8 @@ model PurchasePricingStageLine {
   amountVnd       Decimal? @db.Decimal(18, 2)
 
   note String?
+
+  costEntries CostLayerEntry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3182,38 +3029,6 @@ model PurchasePricingPriceDay {
   createdAt DateTime @default(now())
 
   @@index([stageId, quoteDate])
-}
-
-model InventoryCostLayer {
-  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-
-  supplierCustomerId String   @db.Uuid
-  supplier           Customer @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  supplierLocationId String           @db.Uuid
-  supplierLocation   SupplierLocation @relation(fields: [supplierLocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-
-  sourceType String
-  sourceId   String @db.Uuid
-
-  originalQty  Decimal @db.Decimal(18, 3)
-  remainingQty Decimal @db.Decimal(18, 3)
-
-  unitCostPerLiter Decimal @db.Decimal(18, 6)
-  totalCost        Decimal @db.Decimal(18, 2)
-
-  costDate DateTime
-  status   CostLayerStatus @default(OPEN)
-
-  createdAt DateTime @default(now())
-
-  @@index([supplierCustomerId])
-  @@index([supplierLocationId])
-  @@index([productId, status, costDate])
-  @@index([sourceType, sourceId])
 }
 
 model PriceRegion {
@@ -3393,4 +3208,1191 @@ model LoginAttempt {
   ip        String?
   ua        String?
   createdAt DateTime @default(now())
+}
+
+// =======================================
+// ERP core models
+// =======================================
+
+model Party {
+  id            String         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code          String         @unique
+  name          String
+  taxCode       String?
+  taxVerified   Boolean        @default(false)
+  taxSource     TaxSource?
+  taxSyncedAt   DateTime?
+  kind          PartyKind      @default(ORGANIZATION)
+  type          CustomerType   @default(B2B)
+  customerRoles CustomerRole[]
+  status        CustomerStatus @default(Active)
+  masterStatus  MasterStatus   @default(ACTIVE)
+  groupId       String?        @db.Uuid
+
+  billingAddress  String?
+  shippingAddress String?
+  contactEmail    String?
+  contactPhone    String?
+  creditLimit     Decimal?  @db.Decimal(24, 4)
+  tempLimit       Decimal?  @db.Decimal(24, 4)
+  tempFrom        DateTime?
+  tempTo          DateTime?
+  paymentTermDays Int?
+  note            String?
+
+  salesOwnerEmpId      String? @db.Uuid
+  accountingOwnerEmpId String? @db.Uuid
+  legalOwnerEmpId      String? @db.Uuid
+  documentOwnerEmpId   String? @db.Uuid
+
+  defaultPurchaseContractNo String?
+  defaultDeliveryLocation   String?
+  version                   Int       @default(1)
+  createdAt                 DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt                 DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt                 DateTime? @db.Timestamptz(6)
+
+  group              CustomerGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  salesOwnerEmp      Employee?      @relation("customer_sales_owner_emp", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  accountingOwnerEmp Employee?      @relation("customer_accounting_owner_emp", fields: [accountingOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  legalOwnerEmp      Employee?      @relation("customer_legal_owner_emp", fields: [legalOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  documentOwnerEmp   Employee?      @relation("customer_document_owner_emp", fields: [documentOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  roles                         PartyRole[]
+  contacts                      ContactPerson[]
+  contracts                     Contract[]
+  riskFlags                     RiskFlag[]
+  creditHistories               CreditLimitHistory[]
+  addresses                     CustomerAddress[]
+  vehicles                      Vehicle[]
+  drivers                       Driver[]
+  purchaseOrders                PurchaseOrder[]
+  goodsReceipts                 GoodsReceipt[]
+  supplierInvoices              SupplierInvoice[]
+  pricingTemplates              SupplierPricingTemplate[]
+  pricingRuns                   PurchasePricingRun[]
+  termLogisticsCosts            TermLogisticsCost[]            @relation("term_logistics_cost_vendor")
+  ownedVessels                  Vessel[]                       @relation("vessel_owner")
+  shipCharterContracts          ShipCharterContract[]          @relation("ship_charter_contract_owner")
+  shipCharterOrders             ShipCharterOrder[]             @relation("ship_charter_order_owner")
+  charterInsurances             ShipCharterInsurance[]         @relation("charter_insurance_company")
+  charterInspections            ShipCharterInspection[]        @relation("charter_inspection_company")
+  shippingAgentRegistrations    ShippingAgentRegistration[]    @relation("shipping_agent_company")
+  shipFreightRates              ShipFreightRate[]              @relation("ship_freight_rate_owner")
+  storageRentalContracts        StorageRentalContract[]        @relation("storage_rental_lessor")
+  legalEntities                 LegalEntity[]
+  warehouseAssignments          WarehousePartyAssignment[]
+  receiptLinesOwned             GoodsReceiptLine[]
+  inventoryLotsOriginOwned      InventoryLot[]
+  inventoryLedgerEntriesOwned   InventoryLedgerEntry[]
+  stockBalancesOwned            StockBalance[]
+  reservations                  InventoryReservation[]         @relation("InventoryReservationCustomer")
+  reservationLinesOwned         InventoryReservationLine[]
+  pendingReleasesOwned          InventoryPendingRelease[]
+  inventoryBlocksOwned          InventoryBlock[]
+  availabilityBalancesOwned     InventoryAvailabilityBalance[]
+  movementLinesOwned            InventoryMovementLine[]
+  ownershipTransfersFrom        OwnershipTransfer[]            @relation("OwnershipTransferFromOwner")
+  ownershipTransfersTo          OwnershipTransfer[]            @relation("OwnershipTransferToOwner")
+  stockAdjustmentLinesOwned     StockAdjustmentLine[]
+  expectedSuppliesOwned         ExpectedSupply[]
+  reconciliationTemplates       ReconciliationTemplate[]
+  reconciliationSessions        WarehouseReconciliation[]
+  reconciliationNormalizedLines ReconciliationNormalizedLine[]
+  productAliases                ProductAlias[]
+  reconciliationSnapshotLines   ReconciliationSnapshotLine[]
+  reconciliationVariances       ReconciliationVariance[]
+  landedCostDocuments           LandedCostDocument[]
+  lotCostLayersOwned            InventoryCostLayer[]
+  payableOpenItems              PayableOpenItem[]
+  salesOrdersCustomer           SalesOrder[]                   @relation("SalesOrderCustomer")
+  salesDeliveryLinesOwned       SalesDeliveryLine[]            @relation("SalesDeliveryLineOwner")
+  commercialLotPositions        CommercialLotPosition[]        @relation("CommercialLotPositionSupplier")
+
+  @@index([name])
+  @@index([taxCode])
+  @@index([groupId])
+  @@index([salesOwnerEmpId])
+  @@index([accountingOwnerEmpId])
+  @@index([legalOwnerEmpId])
+  @@index([documentOwnerEmpId])
+  @@index([masterStatus])
+}
+
+model PartyRole {
+  id        String        @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  partyId   String        @db.Uuid
+  role      PartyRoleType
+  validFrom DateTime      @default(now()) @db.Date
+  validTo   DateTime?     @db.Date
+  note      String?
+  createdAt DateTime      @default(now()) @db.Timestamptz(6)
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([partyId, role, validFrom])
+  @@index([role, validFrom, validTo])
+}
+
+model LegalEntity {
+  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code         String   @unique
+  partyId      String   @unique @db.Uuid
+  baseCurrency String   @db.Char(3)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  party               Party                  @relation(fields: [partyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouses          Warehouse[]
+  purchaseOrders      PurchaseOrder[]
+  salesOrders         SalesOrder[]
+  reservations        InventoryReservation[]
+  movements           InventoryMovement[]
+  landedCostDocuments LandedCostDocument[]
+  supplierInvoices    SupplierInvoice[]
+  payableOpenItems    PayableOpenItem[]
+
+  @@index([partyId])
+}
+
+model WarehouseArea {
+  id        String       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code      String       @unique
+  name      String
+  note      String?
+  sortOrder Int          @default(0)
+  status    MasterStatus @default(ACTIVE)
+  createdAt DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(6)
+
+  warehouses         Warehouse[]
+  purchaseOrderLines PurchaseOrderLine[] @relation("PurchaseOrderLinePlannedArea")
+  expectedSupplies   ExpectedSupply[]
+
+  @@index([status, sortOrder, name])
+}
+
+model Warehouse {
+  id                     String       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  legalEntityId          String       @db.Uuid
+  areaId                 String?      @db.Uuid
+  code                   String
+  name                   String
+  nameInvoice            String?
+  address                String?
+  warehouseType          String?
+  isOperationalWarehouse Boolean      @default(true)
+  note                   String?
+  timezone               String       @default("Asia/Ho_Chi_Minh")
+  status                 MasterStatus @default(ACTIVE)
+  version                Int          @default(1)
+  createdAt              DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime     @updatedAt @db.Timestamptz(6)
+
+  legalEntity                  LegalEntity                     @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  area                         WarehouseArea?                  @relation(fields: [areaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parties                      WarehousePartyAssignment[]
+  goodsReceipts                GoodsReceipt[]
+  purchaseOrderLines           PurchaseOrderLine[]
+  pricingStageLines            PurchasePricingStageLine[]
+  storageRentalContractLinks   StorageRentalContractLocation[]
+  warehouseRentalContractLinks WarehouseRentalContractLink[]
+  dispatchOrdersFrom           VehicleDispatchOrder[]          @relation("dispatch_from_warehouse")
+  dispatchOrdersTo             VehicleDispatchOrder[]          @relation("dispatch_to_warehouse")
+  receivingCharterAppendices   ShipCharterAppendix[]
+  receivingCharterOrders       ShipCharterOrder[]
+  inventoryLedgerEntries       InventoryLedgerEntry[]
+  stockBalances                StockBalance[]
+  availabilityBalances         InventoryAvailabilityBalance[]
+  reservationLines             InventoryReservationLine[]
+  pendingReleases              InventoryPendingRelease[]
+  inventoryBlocks              InventoryBlock[]
+  movementsFrom                InventoryMovement[]             @relation("InventoryMovementFromWarehouse")
+  movementsTo                  InventoryMovement[]             @relation("InventoryMovementToWarehouse")
+  ownershipTransfers           OwnershipTransfer[]
+  stockAdjustments             StockAdjustment[]
+  expectedSupplies             ExpectedSupply[]
+  reconciliationSessions       WarehouseReconciliation[]
+  salesDeliveries              SalesDelivery[]
+  commercialLotPositions       CommercialLotPosition[]         @relation("CommercialLotPlannedWarehouse")
+  commercialLotWithdrawals     CommercialLotWithdrawal[]       @relation("CommercialLotDestinationWarehouse")
+
+  @@unique([legalEntityId, code])
+  @@index([status, name])
+  @@index([areaId, status, name])
+}
+
+model WarehousePartyAssignment {
+  id          String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  warehouseId String             @db.Uuid
+  partyId     String             @db.Uuid
+  role        WarehousePartyRole
+  validFrom   DateTime           @db.Date
+  validTo     DateTime?          @db.Date
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  party     Party     @relation(fields: [partyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([warehouseId, partyId, role, validFrom])
+  @@index([warehouseId, role, validFrom, validTo])
+}
+
+model GoodsReceiptLine {
+  id                   String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  goodsReceiptId       String   @db.Uuid
+  lineNo               Int
+  purchaseOrderLineId  String?  @db.Uuid
+  productId            String   @db.Uuid
+  ownerPartyId         String   @db.Uuid
+  actualQty            Decimal  @db.Decimal(24, 6)
+  v15Qty               Decimal? @db.Decimal(24, 6)
+  temperatureC         Decimal? @db.Decimal(8, 3)
+  density              Decimal? @db.Decimal(14, 8)
+  billQty              Decimal? @db.Decimal(24, 6)
+  tankQty              Decimal? @db.Decimal(24, 6)
+  temporaryWithdrawQty Decimal? @db.Decimal(24, 6)
+  billToTankLossQty    Decimal? @db.Decimal(24, 6)
+  sourceLineRef        String?
+
+  goodsReceipt         GoodsReceipt               @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrderLine    PurchaseOrderLine?         @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product              Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner                Party                      @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot                  InventoryLot?
+  expectedAllocations  ExpectedSupplyAllocation[]
+  pendingReleases      InventoryPendingRelease[]
+  supplierInvoiceLines SupplierInvoiceLine[]
+
+  @@unique([goodsReceiptId, lineNo])
+  @@index([purchaseOrderLineId])
+  @@index([productId, ownerPartyId])
+}
+
+model InventoryLot {
+  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  lotNo              String   @unique
+  receiptLineId      String?  @unique @db.Uuid
+  productId          String   @db.Uuid
+  originOwnerPartyId String   @db.Uuid
+  receivedActualQty  Decimal  @db.Decimal(24, 6)
+  receivedV15Qty     Decimal? @db.Decimal(24, 6)
+  receivedAt         DateTime @db.Timestamptz(6)
+  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+
+  receiptLine            GoodsReceiptLine?          @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product                Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  originOwner            Party                      @relation(fields: [originOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntries          InventoryLedgerEntry[]
+  stockBalances          StockBalance[]
+  reservationLines       InventoryReservationLine[]
+  pendingReleases        InventoryPendingRelease[]
+  inventoryBlocks        InventoryBlock[]
+  movementLines          InventoryMovementLine[]
+  ownershipTransferLines OwnershipTransferLine[]
+  stockAdjustmentLines   StockAdjustmentLine[]
+  landedCostAllocations  LandedCostAllocation[]
+  costLayers             InventoryCostLayer[]
+
+  @@index([productId, receivedAt])
+  @@index([originOwnerPartyId, productId])
+}
+
+model InventoryPosting {
+  id                  String                 @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  postingNo           String                 @unique
+  kind                InventoryPostingKind
+  status              InventoryPostingStatus @default(POSTED)
+  idempotencyKey      String                 @unique
+  effectiveAt         DateTime               @db.Timestamptz(6)
+  postedAt            DateTime               @default(now()) @db.Timestamptz(6)
+  postedById          String?                @db.Uuid
+  reversalOfId        String?                @unique @db.Uuid
+  goodsReceiptId      String?                @unique @db.Uuid
+  movementDispatchId  String?                @unique @db.Uuid
+  movementArrivalId   String?                @unique @db.Uuid
+  ownershipTransferId String?                @unique @db.Uuid
+  stockAdjustmentId   String?                @unique @db.Uuid
+  salesDeliveryId     String?                @unique @db.Uuid
+
+  reversalOf        InventoryPosting?      @relation("InventoryPostingReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy        InventoryPosting?      @relation("InventoryPostingReversal")
+  goodsReceipt      GoodsReceipt?          @relation("GoodsReceiptPosting", fields: [goodsReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movementDispatch  InventoryDispatch?     @relation("InventoryDispatchPosting", fields: [movementDispatchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movementArrival   InventoryArrival?      @relation("InventoryArrivalPosting", fields: [movementArrivalId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ownershipTransfer OwnershipTransfer?     @relation("OwnershipTransferPosting", fields: [ownershipTransferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  stockAdjustment   StockAdjustment?       @relation("StockAdjustmentPosting", fields: [stockAdjustmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesDelivery     SalesDelivery?         @relation("SalesDeliveryPosting", fields: [salesDeliveryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  entries           InventoryLedgerEntry[]
+
+  @@index([effectiveAt, id])
+  @@index([status, postedAt])
+}
+
+model InventoryLedgerEntry {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  postingId      String   @db.Uuid
+  lineNo         Int
+  warehouseId    String   @db.Uuid
+  productId      String   @db.Uuid
+  ownerPartyId   String   @db.Uuid
+  inventoryLotId String   @db.Uuid
+  actualQtyDelta Decimal  @db.Decimal(24, 6)
+  v15QtyDelta    Decimal? @db.Decimal(24, 6)
+  effectiveAt    DateTime @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  posting   InventoryPosting @relation(fields: [postingId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product          @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner     Party            @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot       InventoryLot     @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([postingId, lineNo])
+  @@index([warehouseId, productId, ownerPartyId, inventoryLotId, effectiveAt])
+  @@index([inventoryLotId, effectiveAt])
+}
+
+model StockBalance {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  warehouseId    String   @db.Uuid
+  productId      String   @db.Uuid
+  ownerPartyId   String   @db.Uuid
+  inventoryLotId String   @db.Uuid
+  actualQty      Decimal  @default(0) @db.Decimal(24, 6)
+  v15Qty         Decimal? @db.Decimal(24, 6)
+  version        Int      @default(0)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  warehouse Warehouse    @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product      @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner     Party        @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot       InventoryLot @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([warehouseId, productId, ownerPartyId, inventoryLotId])
+  @@index([warehouseId, productId, ownerPartyId])
+  @@index([ownerPartyId, productId])
+}
+
+model InventoryReservation {
+  id              String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reservationNo   String            @unique
+  legalEntityId   String            @db.Uuid
+  customerPartyId String?           @db.Uuid
+  salesOrderId    String?           @db.Uuid
+  manualReference String?
+  status          ReservationStatus @default(DRAFT)
+  reservedAt      DateTime          @default(now()) @db.Timestamptz(6)
+  expiresAt       DateTime?         @db.Timestamptz(6)
+  note            String?
+  version         Int               @default(1)
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(6)
+
+  legalEntity LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer    Party?                     @relation("InventoryReservationCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOrder  SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines       InventoryReservationLine[]
+
+  @@index([status, expiresAt])
+  @@index([customerPartyId, status])
+  @@index([salesOrderId, status])
+}
+
+model InventoryReservationLine {
+  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reservationId      String   @db.Uuid
+  lineNo             Int
+  warehouseId        String   @db.Uuid
+  productId          String   @db.Uuid
+  ownerPartyId       String   @db.Uuid
+  inventoryLotId     String?  @db.Uuid
+  requestedActualQty Decimal  @db.Decimal(24, 6)
+  requestedV15Qty    Decimal? @db.Decimal(24, 6)
+  activeActualQty    Decimal  @default(0) @db.Decimal(24, 6)
+  activeV15Qty       Decimal? @db.Decimal(24, 6)
+  releasedActualQty  Decimal  @default(0) @db.Decimal(24, 6)
+  releasedV15Qty     Decimal? @db.Decimal(24, 6)
+  consumedActualQty  Decimal  @default(0) @db.Decimal(24, 6)
+  consumedV15Qty     Decimal? @db.Decimal(24, 6)
+  version            Int      @default(0)
+
+  reservation InventoryReservation        @relation(fields: [reservationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse   Warehouse                   @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product     Product                     @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner       Party                       @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot         InventoryLot?               @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  events      InventoryReservationEvent[]
+
+  @@unique([reservationId, lineNo])
+  @@index([warehouseId, productId, ownerPartyId])
+  @@index([inventoryLotId])
+}
+
+model InventoryReservationEvent {
+  id                String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reservationLineId String               @db.Uuid
+  type              ReservationEventType
+  actualQty         Decimal              @db.Decimal(24, 6)
+  v15Qty            Decimal?             @db.Decimal(24, 6)
+  idempotencyKey    String               @unique
+  occurredAt        DateTime             @db.Timestamptz(6)
+  actorId           String?              @db.Uuid
+  reason            String?
+
+  reservationLine InventoryReservationLine @relation(fields: [reservationLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([reservationLineId, occurredAt])
+}
+
+model InventoryPendingRelease {
+  id                 String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  pendingNo          String            @unique
+  warehouseId        String            @db.Uuid
+  productId          String            @db.Uuid
+  ownerPartyId       String            @db.Uuid
+  inventoryLotId     String            @db.Uuid
+  goodsReceiptLineId String?           @db.Uuid
+  reasonCode         String
+  originalActualQty  Decimal           @db.Decimal(24, 6)
+  originalV15Qty     Decimal?          @db.Decimal(24, 6)
+  activeActualQty    Decimal           @db.Decimal(24, 6)
+  activeV15Qty       Decimal?          @db.Decimal(24, 6)
+  status             RestrictionStatus @default(ACTIVE)
+  version            Int               @default(1)
+  createdAt          DateTime          @default(now()) @db.Timestamptz(6)
+
+  warehouse   Warehouse                      @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product     Product                        @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner       Party                          @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot         InventoryLot                   @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receiptLine GoodsReceiptLine?              @relation(fields: [goodsReceiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  events      InventoryPendingReleaseEvent[]
+
+  @@index([warehouseId, productId, ownerPartyId, status])
+  @@index([inventoryLotId, status])
+  @@index([goodsReceiptLineId])
+}
+
+model InventoryPendingReleaseEvent {
+  id               String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  pendingReleaseId String               @db.Uuid
+  type             RestrictionEventType
+  actualQty        Decimal              @db.Decimal(24, 6)
+  v15Qty           Decimal?             @db.Decimal(24, 6)
+  idempotencyKey   String               @unique
+  occurredAt       DateTime             @db.Timestamptz(6)
+  actorId          String?              @db.Uuid
+  reason           String?
+
+  pendingRelease InventoryPendingRelease @relation(fields: [pendingReleaseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([pendingReleaseId, occurredAt])
+}
+
+model InventoryBlock {
+  id                       String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  blockNo                  String            @unique
+  warehouseId              String            @db.Uuid
+  productId                String            @db.Uuid
+  ownerPartyId             String            @db.Uuid
+  inventoryLotId           String?           @db.Uuid
+  reconciliationVarianceId String?           @db.Uuid
+  reasonCode               String
+  originalActualQty        Decimal           @db.Decimal(24, 6)
+  originalV15Qty           Decimal?          @db.Decimal(24, 6)
+  activeActualQty          Decimal           @db.Decimal(24, 6)
+  activeV15Qty             Decimal?          @db.Decimal(24, 6)
+  status                   RestrictionStatus @default(ACTIVE)
+  version                  Int               @default(1)
+  createdAt                DateTime          @default(now()) @db.Timestamptz(6)
+
+  warehouse Warehouse               @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product                 @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner     Party                   @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot       InventoryLot?           @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  variance  ReconciliationVariance? @relation(fields: [reconciliationVarianceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  events    InventoryBlockEvent[]
+
+  @@index([warehouseId, productId, ownerPartyId, status])
+  @@index([reconciliationVarianceId])
+}
+
+model InventoryBlockEvent {
+  id             String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  blockId        String               @db.Uuid
+  type           RestrictionEventType
+  actualQty      Decimal              @db.Decimal(24, 6)
+  v15Qty         Decimal?             @db.Decimal(24, 6)
+  idempotencyKey String               @unique
+  occurredAt     DateTime             @db.Timestamptz(6)
+  actorId        String?              @db.Uuid
+  reason         String?
+
+  block InventoryBlock @relation(fields: [blockId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([blockId, occurredAt])
+}
+
+/// Read projection maintained by inventory transactions. It is never an API write target.
+model InventoryAvailabilityBalance {
+  id                String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  warehouseId       String   @db.Uuid
+  productId         String   @db.Uuid
+  ownerPartyId      String   @db.Uuid
+  onHandActualQty   Decimal  @default(0) @db.Decimal(24, 6)
+  reservedActualQty Decimal  @default(0) @db.Decimal(24, 6)
+  pendingActualQty  Decimal  @default(0) @db.Decimal(24, 6)
+  blockedActualQty  Decimal  @default(0) @db.Decimal(24, 6)
+  onHandV15Qty      Decimal? @db.Decimal(24, 6)
+  reservedV15Qty    Decimal? @db.Decimal(24, 6)
+  pendingV15Qty     Decimal? @db.Decimal(24, 6)
+  blockedV15Qty     Decimal? @db.Decimal(24, 6)
+  version           Int      @default(0)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner     Party     @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([warehouseId, productId, ownerPartyId])
+  @@index([ownerPartyId, productId])
+}
+
+model InventoryMovement {
+  id                String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  movementNo        String                  @unique
+  legalEntityId     String                  @db.Uuid
+  type              InventoryMovementType
+  fromWarehouseId   String?                 @db.Uuid
+  toWarehouseId     String?                 @db.Uuid
+  vehicleId         String?                 @db.Uuid
+  driverId          String?                 @db.Uuid
+  transportMode     TermTransportMode       @default(ROAD)
+  status            InventoryMovementStatus @default(DRAFT)
+  plannedAt         DateTime?               @db.Timestamptz(6)
+  expectedArrivalAt DateTime?               @db.Timestamptz(6)
+  actualArrivalAt   DateTime?               @db.Timestamptz(6)
+  note              String?
+  version           Int                     @default(1)
+  createdAt         DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime                @updatedAt @db.Timestamptz(6)
+
+  legalEntity               LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fromWarehouse             Warehouse?                 @relation("InventoryMovementFromWarehouse", fields: [fromWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  toWarehouse               Warehouse?                 @relation("InventoryMovementToWarehouse", fields: [toWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  vehicle                   Vehicle?                   @relation(fields: [vehicleId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  driver                    Driver?                    @relation(fields: [driverId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines                     InventoryMovementLine[]
+  dispatches                InventoryDispatch[]
+  arrivals                  InventoryArrival[]
+  vehicleDispatchOrders     VehicleDispatchOrder[]
+  reconciliationResolutions ReconciliationResolution[]
+
+  @@index([fromWarehouseId, status])
+  @@index([toWarehouseId, status])
+}
+
+model InventoryMovementLine {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  movementId       String   @db.Uuid
+  lineNo           Int
+  productId        String   @db.Uuid
+  ownerPartyId     String   @db.Uuid
+  inventoryLotId   String   @db.Uuid
+  plannedActualQty Decimal  @db.Decimal(24, 6)
+  plannedV15Qty    Decimal? @db.Decimal(24, 6)
+  note             String?
+
+  movement         InventoryMovement       @relation(fields: [movementId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product          Product                 @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner            Party                   @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot              InventoryLot            @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  dispatchLines    InventoryDispatchLine[]
+  expectedSupplies ExpectedSupply[]
+
+  @@unique([movementId, lineNo])
+  @@index([productId, ownerPartyId, inventoryLotId])
+}
+
+model InventoryDispatch {
+  id           String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  dispatchNo   String                  @unique
+  movementId   String                  @db.Uuid
+  status       InventoryDocumentStatus @default(DRAFT)
+  dispatchedAt DateTime?               @db.Timestamptz(6)
+  version      Int                     @default(1)
+
+  movement InventoryMovement       @relation(fields: [movementId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines    InventoryDispatchLine[]
+  posting  InventoryPosting?       @relation("InventoryDispatchPosting")
+
+  @@index([movementId, status])
+}
+
+model InventoryDispatchLine {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  dispatchId     String   @db.Uuid
+  movementLineId String   @db.Uuid
+  actualQty      Decimal  @db.Decimal(24, 6)
+  v15Qty         Decimal? @db.Decimal(24, 6)
+
+  dispatch     InventoryDispatch      @relation(fields: [dispatchId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movementLine InventoryMovementLine  @relation(fields: [movementLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  arrivalLines InventoryArrivalLine[]
+
+  @@unique([dispatchId, movementLineId])
+  @@index([movementLineId])
+}
+
+model InventoryArrival {
+  id         String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  arrivalNo  String                  @unique
+  movementId String                  @db.Uuid
+  status     InventoryDocumentStatus @default(DRAFT)
+  arrivedAt  DateTime?               @db.Timestamptz(6)
+  version    Int                     @default(1)
+
+  movement InventoryMovement      @relation(fields: [movementId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines    InventoryArrivalLine[]
+  posting  InventoryPosting?      @relation("InventoryArrivalPosting")
+
+  @@index([movementId, status])
+}
+
+model InventoryArrivalLine {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  arrivalId      String   @db.Uuid
+  dispatchLineId String   @db.Uuid
+  actualQty      Decimal  @db.Decimal(24, 6)
+  v15Qty         Decimal? @db.Decimal(24, 6)
+
+  arrival      InventoryArrival      @relation(fields: [arrivalId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  dispatchLine InventoryDispatchLine @relation(fields: [dispatchLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([arrivalId, dispatchLineId])
+  @@index([dispatchLineId])
+}
+
+model OwnershipTransfer {
+  id               String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  transferNo       String                  @unique
+  warehouseId      String                  @db.Uuid
+  fromOwnerPartyId String                  @db.Uuid
+  toOwnerPartyId   String                  @db.Uuid
+  status           InventoryDocumentStatus @default(DRAFT)
+  effectiveAt      DateTime                @db.Timestamptz(6)
+  version          Int                     @default(1)
+
+  warehouse Warehouse               @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fromOwner Party                   @relation("OwnershipTransferFromOwner", fields: [fromOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  toOwner   Party                   @relation("OwnershipTransferToOwner", fields: [toOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines     OwnershipTransferLine[]
+  posting   InventoryPosting?       @relation("OwnershipTransferPosting")
+
+  @@index([warehouseId, effectiveAt])
+}
+
+model OwnershipTransferLine {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  transferId     String   @db.Uuid
+  lineNo         Int
+  productId      String   @db.Uuid
+  inventoryLotId String   @db.Uuid
+  actualQty      Decimal  @db.Decimal(24, 6)
+  v15Qty         Decimal? @db.Decimal(24, 6)
+
+  transfer OwnershipTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product  Product           @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot      InventoryLot      @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([transferId, lineNo])
+  @@index([productId, inventoryLotId])
+}
+
+model StockAdjustment {
+  id           String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  adjustmentNo String                  @unique
+  warehouseId  String                  @db.Uuid
+  status       InventoryDocumentStatus @default(DRAFT)
+  reasonCode   String
+  effectiveAt  DateTime                @db.Timestamptz(6)
+  version      Int                     @default(1)
+
+  warehouse                 Warehouse                  @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines                     StockAdjustmentLine[]
+  posting                   InventoryPosting?          @relation("StockAdjustmentPosting")
+  reconciliationResolutions ReconciliationResolution[]
+
+  @@index([warehouseId, status, effectiveAt])
+}
+
+model StockAdjustmentLine {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  adjustmentId   String   @db.Uuid
+  lineNo         Int
+  productId      String   @db.Uuid
+  ownerPartyId   String   @db.Uuid
+  inventoryLotId String?  @db.Uuid
+  actualQtyDelta Decimal  @db.Decimal(24, 6)
+  v15QtyDelta    Decimal? @db.Decimal(24, 6)
+  explanation    String
+
+  adjustment StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner      Party           @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot        InventoryLot?   @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([adjustmentId, lineNo])
+  @@index([productId, ownerPartyId, inventoryLotId])
+}
+
+model ExpectedSupply {
+  id                  String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  expectedNo          String               @unique
+  warehouseAreaId     String?              @db.Uuid
+  warehouseId         String?              @db.Uuid
+  productId           String               @db.Uuid
+  ownerPartyId        String               @db.Uuid
+  purchaseOrderLineId String?              @db.Uuid
+  shipmentLineId      String?              @db.Uuid
+  movementLineId      String?              @db.Uuid
+  manualReference     String?
+  expectedActualQty   Decimal              @db.Decimal(24, 6)
+  expectedV15Qty      Decimal?             @db.Decimal(24, 6)
+  fulfilledActualQty  Decimal              @default(0) @db.Decimal(24, 6)
+  fulfilledV15Qty     Decimal?             @db.Decimal(24, 6)
+  expectedAt          DateTime?            @db.Timestamptz(6)
+  status              ExpectedSupplyStatus @default(OPEN)
+  version             Int                  @default(1)
+
+  warehouseArea     WarehouseArea?             @relation(fields: [warehouseAreaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse         Warehouse?                 @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product           Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner             Party                      @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrderLine PurchaseOrderLine?         @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  shipmentLine      PurchaseShipmentLine?      @relation(fields: [shipmentLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movementLine      InventoryMovementLine?     @relation(fields: [movementLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  allocations       ExpectedSupplyAllocation[]
+
+  @@index([warehouseId, productId, ownerPartyId, status, expectedAt])
+  @@index([warehouseAreaId, productId, ownerPartyId, status, expectedAt])
+  @@index([purchaseOrderLineId, status])
+  @@index([shipmentLineId, status])
+  @@index([movementLineId, status])
+}
+
+model ExpectedSupplyAllocation {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  expectedSupplyId String   @db.Uuid
+  receiptLineId    String   @db.Uuid
+  actualQty        Decimal  @db.Decimal(24, 6)
+  v15Qty           Decimal? @db.Decimal(24, 6)
+  idempotencyKey   String   @unique
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+
+  expectedSupply ExpectedSupply   @relation(fields: [expectedSupplyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receiptLine    GoodsReceiptLine @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([expectedSupplyId, receiptLineId])
+  @@index([receiptLineId])
+}
+
+model ReconciliationTemplate {
+  id              String       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code            String
+  version         Int
+  supplierPartyId String?      @db.Uuid
+  columnMapping   Json
+  normalizeRules  Json
+  status          MasterStatus @default(ACTIVE)
+  createdAt       DateTime     @default(now()) @db.Timestamptz(6)
+
+  supplier Party?               @relation(fields: [supplierPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  files    ReconciliationFile[]
+
+  @@unique([code, version])
+  @@index([supplierPartyId, status])
+}
+
+model WarehouseReconciliation {
+  id                    String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  sessionNo             String               @unique
+  warehouseId           String               @db.Uuid
+  reconciliationPartyId String               @db.Uuid
+  asOfAt                DateTime             @db.Timestamptz(6)
+  scope                 ReconciliationScope
+  status                ReconciliationStatus @default(DRAFT)
+  version               Int                  @default(1)
+  closedAt              DateTime?            @db.Timestamptz(6)
+  closedById            String?              @db.Uuid
+  createdAt             DateTime             @default(now()) @db.Timestamptz(6)
+
+  warehouse Warehouse                    @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  party     Party                        @relation(fields: [reconciliationPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  files     ReconciliationFile[]
+  snapshots ReconciliationSnapshotLine[]
+  variances ReconciliationVariance[]
+
+  @@index([warehouseId, asOfAt])
+  @@index([reconciliationPartyId, status])
+}
+
+model ReconciliationFile {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  sessionId      String   @db.Uuid
+  version        Int
+  templateId     String?  @db.Uuid
+  replacedFileId String?  @db.Uuid
+  fileName       String
+  fileUrl        String
+  mimeType       String?
+  sizeBytes      BigInt?
+  checksumSha256 String
+  isActive       Boolean  @default(true)
+  uploadedAt     DateTime @default(now()) @db.Timestamptz(6)
+  uploadedById   String?  @db.Uuid
+
+  session      WarehouseReconciliation @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  template     ReconciliationTemplate? @relation(fields: [templateId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  replacedFile ReconciliationFile?     @relation("ReconciliationFileReplacement", fields: [replacedFileId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  replacements ReconciliationFile[]    @relation("ReconciliationFileReplacement")
+  rawRows      ReconciliationRawRow[]
+
+  @@unique([sessionId, version])
+  @@unique([sessionId, checksumSha256])
+  @@index([checksumSha256])
+  @@index([replacedFileId])
+}
+
+model ReconciliationRawRow {
+  id         String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  fileId     String                  @db.Uuid
+  sheetName  String?
+  rowNo      Int
+  rawData    Json
+  parseError String?
+  status     ReconciliationRowStatus @default(RAW)
+
+  file       ReconciliationFile            @relation(fields: [fileId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  normalized ReconciliationNormalizedLine?
+
+  @@unique([fileId, sheetName, rowNo])
+  @@index([fileId, status])
+}
+
+model ReconciliationNormalizedLine {
+  id                  String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  rawRowId            String   @unique @db.Uuid
+  productId           String   @db.Uuid
+  ownerPartyId        String?  @db.Uuid
+  externalProductCode String?
+  externalOwnerCode   String?
+  actualQty           Decimal  @db.Decimal(24, 6)
+  v15Qty              Decimal? @db.Decimal(24, 6)
+  mappingNote         String?
+
+  rawRow  ReconciliationRawRow @relation(fields: [rawRowId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product Product              @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner   Party?               @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([productId, ownerPartyId])
+}
+
+model ReconciliationSnapshotLine {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  sessionId      String   @db.Uuid
+  productId      String   @db.Uuid
+  ownerPartyId   String?  @db.Uuid
+  actualQty      Decimal  @db.Decimal(24, 6)
+  v15Qty         Decimal? @db.Decimal(24, 6)
+  ledgerCutoffAt DateTime @db.Timestamptz(6)
+  ledgerCutoffId String?  @db.Uuid
+
+  session WarehouseReconciliation @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product Product                 @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner   Party?                  @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([sessionId, productId, ownerPartyId])
+  @@index([productId, ownerPartyId])
+}
+
+model ReconciliationVariance {
+  id                String                       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  sessionId         String                       @db.Uuid
+  productId         String                       @db.Uuid
+  ownerPartyId      String?                      @db.Uuid
+  supplierActualQty Decimal                      @db.Decimal(24, 6)
+  erpActualQty      Decimal                      @db.Decimal(24, 6)
+  varianceActualQty Decimal                      @db.Decimal(24, 6)
+  supplierV15Qty    Decimal?                     @db.Decimal(24, 6)
+  erpV15Qty         Decimal?                     @db.Decimal(24, 6)
+  varianceV15Qty    Decimal?                     @db.Decimal(24, 6)
+  status            ReconciliationVarianceStatus @default(OPEN)
+  explanation       String?
+  version           Int                          @default(1)
+
+  session     WarehouseReconciliation    @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product     Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner       Party?                     @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  resolutions ReconciliationResolution[]
+  blocks      InventoryBlock[]
+
+  @@unique([sessionId, productId, ownerPartyId])
+  @@index([status, varianceActualQty])
+}
+
+model ReconciliationResolution {
+  id                String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  varianceId        String   @db.Uuid
+  stockAdjustmentId String?  @db.Uuid
+  movementId        String?  @db.Uuid
+  resolutionType    String
+  note              String
+  resolvedAt        DateTime @default(now()) @db.Timestamptz(6)
+  resolvedById      String?  @db.Uuid
+
+  variance        ReconciliationVariance @relation(fields: [varianceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  stockAdjustment StockAdjustment?       @relation(fields: [stockAdjustmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  movement        InventoryMovement?     @relation(fields: [movementId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([varianceId, resolvedAt])
+  @@index([stockAdjustmentId])
+  @@index([movementId])
+}
+
+model LandedCostDocument {
+  id              String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  documentNo      String             @unique
+  legalEntityId   String             @db.Uuid
+  vendorPartyId   String?            @db.Uuid
+  purchaseOrderId String?            @db.Uuid
+  shipmentId      String?            @db.Uuid
+  currency        String             @db.Char(3)
+  documentDate    DateTime           @db.Date
+  status          CostDocumentStatus @default(DRAFT)
+  version         Int                @default(1)
+  postedAt        DateTime?          @db.Timestamptz(6)
+  postedById      String?            @db.Uuid
+
+  legalEntity   LegalEntity       @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  vendor        Party?            @relation(fields: [vendorPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrder PurchaseOrder?    @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  shipment      PurchaseShipment? @relation(fields: [shipmentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines         LandedCostLine[]
+
+  @@index([purchaseOrderId, status])
+  @@index([shipmentId, status])
+  @@index([vendorPartyId, documentDate])
+}
+
+model LandedCostLine {
+  id              String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  documentId      String  @db.Uuid
+  lineNo          Int
+  costType        String
+  amountBeforeTax Decimal @db.Decimal(24, 4)
+  taxRate         Decimal @default(0) @db.Decimal(12, 10)
+  taxAmount       Decimal @default(0) @db.Decimal(24, 4)
+  capitalizable   Boolean @default(true)
+
+  document     LandedCostDocument     @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  allocations  LandedCostAllocation[]
+  invoiceLines SupplierInvoiceLine[]
+
+  @@unique([documentId, lineNo])
+}
+
+model LandedCostAllocation {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  landedCostLineId String   @db.Uuid
+  inventoryLotId   String   @db.Uuid
+  actualQtyBasis   Decimal? @db.Decimal(24, 6)
+  allocatedAmount  Decimal  @db.Decimal(24, 4)
+  idempotencyKey   String   @unique
+
+  landedCostLine LandedCostLine   @relation(fields: [landedCostLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot            InventoryLot     @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  costEntries    CostLayerEntry[]
+  Product        Product?         @relation(fields: [productId], references: [id])
+  productId      String?          @db.Uuid
+
+  @@unique([landedCostLineId, inventoryLotId])
+  @@index([inventoryLotId])
+}
+
+/// Projection of append-only cost entries for one owner and inventory lot.
+model InventoryCostLayer {
+  id                 String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  inventoryLotId     String          @db.Uuid
+  ownerPartyId       String          @db.Uuid
+  status             CostLayerStatus @default(OPEN)
+  originalActualQty  Decimal         @db.Decimal(24, 6)
+  remainingActualQty Decimal         @db.Decimal(24, 6)
+  remainingValue     Decimal         @db.Decimal(24, 4)
+  currency           String          @db.Char(3)
+  isProvisional      Boolean         @default(true)
+  version            Int             @default(0)
+  openedAt           DateTime        @db.Timestamptz(6)
+
+  lot     InventoryLot     @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner   Party            @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  entries CostLayerEntry[]
+
+  @@unique([inventoryLotId, ownerPartyId])
+  @@index([ownerPartyId, status, openedAt])
+}
+
+model CostLayerEntry {
+  id                     String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  costLayerId            String             @db.Uuid
+  type                   CostLayerEntryType
+  actualQtyDelta         Decimal            @default(0) @db.Decimal(24, 6)
+  valueDelta             Decimal            @default(0) @db.Decimal(24, 4)
+  pricingStageLineId     String?            @db.Uuid
+  landedCostAllocationId String?            @db.Uuid
+  salesDeliveryLineId    String?            @db.Uuid
+  reversalOfId           String?            @unique @db.Uuid
+  idempotencyKey         String             @unique
+  effectiveAt            DateTime           @db.Timestamptz(6)
+  createdAt              DateTime           @default(now()) @db.Timestamptz(6)
+
+  costLayer            InventoryCostLayer        @relation(fields: [costLayerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  pricingStageLine     PurchasePricingStageLine? @relation(fields: [pricingStageLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  landedCostAllocation LandedCostAllocation?     @relation(fields: [landedCostAllocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesDeliveryLine    SalesDeliveryLine?        @relation(fields: [salesDeliveryLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversalOf           CostLayerEntry?           @relation("CostLayerEntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy           CostLayerEntry?           @relation("CostLayerEntryReversal")
+
+  @@index([costLayerId, effectiveAt])
+  @@index([pricingStageLineId])
+  @@index([landedCostAllocationId])
+  @@index([salesDeliveryLineId])
+}
+
+model SupplierInvoice {
+  id                 String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  legalEntityId      String                @db.Uuid
+  supplierCustomerId String                @db.Uuid
+  purchaseOrderId    String?               @db.Uuid
+  invoiceNo          String
+  invoiceSymbol      String                @default("")
+  invoiceTemplate    String?
+  invoiceDate        DateTime              @db.Date
+  currency           String                @default("VND") @db.Char(3)
+  status             SupplierInvoiceStatus @default(DRAFT)
+  totalAmount        Decimal               @default(0) @db.Decimal(24, 4)
+  note               String?
+  version            Int                   @default(1)
+  sourceFileId       String?
+  sourceFileUrl      String?
+  sourceFileName     String?
+  sourceFileChecksum String?
+  postedAt           DateTime?             @db.Timestamptz(6)
+  postedById         String?               @db.Uuid
+  createdAt          DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime              @updatedAt @db.Timestamptz(6)
+
+  legalEntity   LegalEntity           @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplier      Party                 @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrder PurchaseOrder?        @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines         SupplierInvoiceLine[]
+  openItem      PayableOpenItem?
+
+  @@unique([legalEntityId, supplierCustomerId, invoiceSymbol, invoiceNo])
+  @@unique([legalEntityId, sourceFileChecksum])
+  @@index([supplierCustomerId, status, invoiceDate])
+  @@index([purchaseOrderId])
+}
+
+model SupplierInvoiceLine {
+  id                  String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  invoiceId           String   @db.Uuid
+  lineNo              Int
+  productId           String?  @db.Uuid
+  purchaseOrderLineId String?  @db.Uuid
+  receiptLineId       String?  @db.Uuid
+  landedCostLineId    String?  @db.Uuid
+  actualQty           Decimal? @db.Decimal(24, 6)
+  unitPrice           Decimal  @db.Decimal(24, 8)
+  netAmount           Decimal  @db.Decimal(24, 4)
+  taxRate             Decimal  @default(0) @db.Decimal(12, 10)
+  taxAmount           Decimal  @default(0) @db.Decimal(24, 4)
+
+  invoice                 SupplierInvoice                 @relation(fields: [invoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product                 Product?                        @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrderLine       PurchaseOrderLine?              @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receiptLine             GoodsReceiptLine?               @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  landedCostLine          LandedCostLine?                 @relation(fields: [landedCostLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  commercialLotAllocation CommercialLotInvoiceAllocation?
+
+  @@unique([invoiceId, lineNo])
+  @@index([receiptLineId])
+  @@index([purchaseOrderLineId])
+  @@index([landedCostLineId])
+}
+
+/// Projection of the payable ledger for one invoice or another approved AP source.
+model PayableOpenItem {
+  id                String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  supplierInvoiceId String?               @unique @db.Uuid
+  legalEntityId     String                @db.Uuid
+  supplierPartyId   String                @db.Uuid
+  currency          String                @db.Char(3)
+  originalAmount    Decimal               @db.Decimal(24, 4)
+  outstandingAmount Decimal               @db.Decimal(24, 4)
+  dueDate           DateTime?             @db.Date
+  settlementType    SettlementType        @default(PAYABLE)
+  note              String?
+  status            PayableOpenItemStatus @default(OPEN)
+  version           Int                   @default(0)
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime              @updatedAt @db.Timestamptz(6)
+
+  invoice     SupplierInvoice?     @relation(fields: [supplierInvoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity LegalEntity          @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplier    Party                @relation(fields: [supplierPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  entries     PayableLedgerEntry[]
+  allocations PayableAllocation[]
+
+  @@index([supplierPartyId, status, dueDate])
+}
+
+model PayableLedgerEntry {
+  id             String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  openItemId     String           @db.Uuid
+  type           PayableEntryType
+  amountDelta    Decimal          @db.Decimal(24, 4)
+  allocationId   String?          @unique @db.Uuid
+  reversalOfId   String?          @unique @db.Uuid
+  idempotencyKey String           @unique
+  effectiveAt    DateTime         @db.Timestamptz(6)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6)
+
+  openItem   PayableOpenItem     @relation(fields: [openItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  allocation PayableAllocation?  @relation(fields: [allocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversalOf PayableLedgerEntry? @relation("PayableLedgerEntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy PayableLedgerEntry? @relation("PayableLedgerEntryReversal")
+
+  @@index([openItemId, effectiveAt])
+}
+
+model PayableAllocation {
+  id                   String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bankTransactionId    String                  @db.Uuid
+  openItemId           String                  @db.Uuid
+  amountInBankCurrency Decimal                 @db.Decimal(24, 4)
+  amountInItemCurrency Decimal                 @db.Decimal(24, 4)
+  fxRate               Decimal?                @db.Decimal(24, 10)
+  status               PayableAllocationStatus @default(ACTIVE)
+  reversalOfId         String?                 @unique @db.Uuid
+  idempotencyKey       String                  @unique
+  allocatedAt          DateTime                @db.Timestamptz(6)
+
+  bankTransaction BankTransaction     @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  openItem        PayableOpenItem     @relation(fields: [openItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntry     PayableLedgerEntry?
+  reversalOf      PayableAllocation?  @relation("PayableAllocationReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy      PayableAllocation?  @relation("PayableAllocationReversal")
+
+  @@index([bankTransactionId, status])
+  @@index([openItemId, status])
 }

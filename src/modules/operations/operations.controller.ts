@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common'
-import { WarehouseOwnerType, WarehouseReservationStatus } from '@prisma/client'
+import { ShipCharterOrderStatus } from '@prisma/client'
 import { RequirePermissions } from 'src/common/auth/permissions.decorator'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 import { PERMISSIONS } from 'src/common/auth/permissions.constant'
@@ -9,9 +9,16 @@ import {
     ChangeVehicleDispatchStatusDto,
     ChangeWarehouseTransferStatusDto,
     CreateExpectedInventoryDto,
+    CreateAppendixFromOrderDto,
+    CreateCharterOrderFromTermDto,
+    ConfirmCharterOrderDto,
     CreateOperationalRoleDto,
+    CreateShipOwnerDto,
+    CreateVesselDocumentDto,
     CreateWarehouseReservationDto,
     PageQueryDto,
+    ShipOwnerListQueryDto,
+    ShipFreightRateLookupDto,
     UpsertCharterInsuranceDto,
     UpsertCharterInspectionDto,
     UpsertDriverDocumentDto,
@@ -26,8 +33,15 @@ import {
     UpsertVehicleDocumentDto,
     UpsertVehicleDto,
     UpsertVesselDto,
+    UpdateShipOwnerDto,
+    UpdateVesselDocumentDto,
+    UpdateVesselDto,
+    VesselDocumentListQueryDto,
+    VesselListQueryDto,
     UpsertWarehouseTransferDto,
     PostStorageTermCostDto,
+    WarehouseOwnerType,
+    WarehouseReservationStatus,
 } from './dto/operations.dto'
 import { OperationsDashboardService } from './operations-dashboard.service'
 import { RoadOperationsService } from './road-operations.service'
@@ -50,6 +64,11 @@ export class OperationsController {
         return this.dashboard.get()
     }
 
+    @Get('ship-charters/dashboard')
+    getShipCharterDashboard() {
+        return this.charter.shipCharterDashboard()
+    }
+
     @Get('partners')
     partners(@Query('role') role?: string, @Query('keyword') keyword?: string) {
         return this.charter.listPartners(role, keyword)
@@ -61,9 +80,47 @@ export class OperationsController {
         return this.charter.savePartnerRole(dto)
     }
 
-    @Get('vessels')
-    vessels(@Query() q: PageQueryDto & { ownerCustomerId?: string; isActive?: string }) {
+    @Get('ship-owners/select')
+    shipOwnerSelect(@Query('keyword') keyword?: string) {
+        return this.charter.shipOwnerSelect(keyword)
+    }
+
+    @Get('ship-owners')
+    shipOwners(@Query() q: ShipOwnerListQueryDto) {
+        return this.charter.listShipOwners(q)
+    }
+
+    @Get('ship-owners/:customerId')
+    shipOwner(@Param('customerId') customerId: string) {
+        return this.charter.shipOwner(customerId)
+    }
+
+    @Get('ship-owners/:customerId/vessels')
+    shipOwnerVessels(@Param('customerId') customerId: string, @Query() q: VesselListQueryDto) {
+        q.ownerCustomerId = customerId
         return this.charter.listVessels(q)
+    }
+
+    @Post('ship-owners')
+    @RequirePermissions(PERMISSIONS.operations.managePartners)
+    createShipOwner(@Body() dto: CreateShipOwnerDto) {
+        return this.charter.createShipOwner(dto)
+    }
+
+    @Patch('ship-owners/:customerId')
+    @RequirePermissions(PERMISSIONS.operations.managePartners)
+    updateShipOwner(@Param('customerId') customerId: string, @Body() dto: UpdateShipOwnerDto) {
+        return this.charter.updateShipOwner(customerId, dto)
+    }
+
+    @Get('vessels')
+    vessels(@Query() q: VesselListQueryDto) {
+        return this.charter.listVessels(q)
+    }
+
+    @Get('vessels/select')
+    vesselSelect(@Query() q: VesselListQueryDto) {
+        return this.charter.vesselSelect(q)
     }
 
     @Get('vessels/:id')
@@ -74,13 +131,41 @@ export class OperationsController {
     @Post('vessels')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     createVessel(@Body() dto: UpsertVesselDto) {
-        return this.charter.saveVessel(dto)
+        return this.charter.createVessel(dto)
     }
 
     @Put('vessels/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateVessel(@Param('id') id: string, @Body() dto: UpsertVesselDto) {
-        return this.charter.saveVessel(dto, id)
+        return this.charter.updateVessel(id, dto)
+    }
+
+    @Patch('vessels/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchVessel(@Param('id') id: string, @Body() dto: UpdateVesselDto) {
+        return this.charter.updateVessel(id, dto)
+    }
+
+    @Get('vessels/:id/documents')
+    vesselDocuments(@Param('id') id: string, @Query() q: VesselDocumentListQueryDto) {
+        return this.charter.listVesselDocuments(id, q)
+    }
+
+    @Post('vessels/:id/documents')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    createVesselDocument(@Param('id') id: string, @Body() dto: CreateVesselDocumentDto) {
+        return this.charter.createVesselDocument(id, dto)
+    }
+
+    @Patch('vessel-documents/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    updateVesselDocument(@Param('id') id: string, @Body() dto: UpdateVesselDocumentDto) {
+        return this.charter.updateVesselDocument(id, dto)
+    }
+
+    @Get('vessels/:id/document-check')
+    vesselDocumentCheck(@Param('id') id: string) {
+        return this.charter.vesselDocumentCheck(id)
     }
 
     @Get('charter-contracts')
@@ -105,9 +190,20 @@ export class OperationsController {
         return this.charter.saveContract(dto, id)
     }
 
+    @Patch('charter-contracts/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchCharterContract(@Param('id') id: string, @Body() dto: UpsertShipCharterContractDto) {
+        return this.charter.saveContract(dto, id)
+    }
+
     @Get('charter-appendices')
     charterAppendices(@Query() q: PageQueryDto & { contractId?: string }) {
         return this.charter.listAppendices(q)
+    }
+
+    @Get('charter-appendices/:id')
+    charterAppendix(@Param('id') id: string) {
+        return this.charter.appendix(id)
     }
 
     @Post('charter-appendices')
@@ -122,9 +218,20 @@ export class OperationsController {
         return this.charter.saveAppendix(dto, id)
     }
 
+    @Patch('charter-appendices/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchCharterAppendix(@Param('id') id: string, @Body() dto: UpsertShipCharterAppendixDto) {
+        return this.charter.saveAppendix(dto, id)
+    }
+
     @Get('charter-orders')
     charterOrders(@Query() q: PageQueryDto & { purchaseOrderId?: string }) {
         return this.charter.listOrders(q)
+    }
+
+    @Get('charter-orders/term-pending')
+    pendingTermCharterOrders(@Query() q: PageQueryDto) {
+        return this.charter.listPendingTermOrders(q)
     }
 
     @Get('charter-orders/:id')
@@ -138,10 +245,49 @@ export class OperationsController {
         return this.charter.saveOrder(dto)
     }
 
+    @Post('charter-orders/from-term/:purchaseOrderId')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    createCharterOrderFromTerm(
+        @Param('purchaseOrderId') purchaseOrderId: string,
+        @Body() dto: CreateCharterOrderFromTermDto,
+    ) {
+        return this.charter.createOrderFromTerm(purchaseOrderId, dto)
+    }
+
     @Put('charter-orders/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateCharterOrder(@Param('id') id: string, @Body() dto: UpsertShipCharterOrderDto) {
         return this.charter.saveOrder(dto, id)
+    }
+
+    @Patch('charter-orders/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchCharterOrder(@Param('id') id: string, @Body() dto: UpsertShipCharterOrderDto) {
+        return this.charter.saveOrder(dto, id)
+    }
+
+    @Post('charter-orders/:id/confirm')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    confirmCharterOrder(@Param('id') id: string, @Body() dto: ConfirmCharterOrderDto) {
+        return this.charter.changeOrderStatus(id, ShipCharterOrderStatus.CONFIRMED, false)
+    }
+
+    @Post('charter-orders/:id/confirm-override')
+    @RequirePermissions(PERMISSIONS.operations.overrideVesselDocuments)
+    confirmCharterOrderWithOverride(@Param('id') id: string, @Body() dto: ConfirmCharterOrderDto) {
+        return this.charter.changeOrderStatus(id, ShipCharterOrderStatus.CONFIRMED, dto.overrideDocumentCheck === true)
+    }
+
+    @Post('charter-orders/:id/create-appendix')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    createAppendixFromOrder(@Param('id') id: string, @Body() dto: CreateAppendixFromOrderDto) {
+        return this.charter.createAppendixFromOrder(id, dto)
+    }
+
+    @Post('charter-orders/:id/cancel')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    cancelCharterOrder(@Param('id') id: string) {
+        return this.charter.changeOrderStatus(id, ShipCharterOrderStatus.CANCELLED)
     }
 
     @Patch('charter-orders/:id/status/:status')
@@ -156,10 +302,21 @@ export class OperationsController {
         return this.charter.saveInsurance(id, dto)
     }
 
+    @Get('charter-insurances')
+    charterInsurances(@Query() q: PageQueryDto) {
+        return this.charter.listInsurances(q)
+    }
+
     @Put('charter-orders/:orderId/insurances/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateInsurance(@Param('orderId') orderId: string, @Param('id') id: string, @Body() dto: UpsertCharterInsuranceDto) {
         return this.charter.saveInsurance(orderId, dto, id)
+    }
+
+    @Patch('charter-insurances/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchInsurance(@Param('id') id: string, @Body() dto: UpsertCharterInsuranceDto) {
+        return this.charter.saveInsuranceForExisting(id, dto)
     }
 
     @Post('charter-orders/:id/inspections')
@@ -168,10 +325,21 @@ export class OperationsController {
         return this.charter.saveInspection(id, dto)
     }
 
+    @Get('charter-inspections')
+    charterInspections(@Query() q: PageQueryDto) {
+        return this.charter.listInspections(q)
+    }
+
     @Put('charter-orders/:orderId/inspections/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateInspection(@Param('orderId') orderId: string, @Param('id') id: string, @Body() dto: UpsertCharterInspectionDto) {
         return this.charter.saveInspection(orderId, dto, id)
+    }
+
+    @Patch('charter-inspections/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchInspection(@Param('id') id: string, @Body() dto: UpsertCharterInspectionDto) {
+        return this.charter.saveInspectionForExisting(id, dto)
     }
 
     @Post('charter-orders/:id/agents')
@@ -180,10 +348,21 @@ export class OperationsController {
         return this.charter.saveAgent(id, dto)
     }
 
+    @Get('shipping-agent-registrations')
+    shippingAgentRegistrations(@Query() q: PageQueryDto) {
+        return this.charter.listAgentRegistrations(q)
+    }
+
     @Put('charter-orders/:orderId/agents/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateAgent(@Param('orderId') orderId: string, @Param('id') id: string, @Body() dto: UpsertShippingAgentDto) {
         return this.charter.saveAgent(orderId, dto, id)
+    }
+
+    @Patch('shipping-agent-registrations/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchAgent(@Param('id') id: string, @Body() dto: UpsertShippingAgentDto) {
+        return this.charter.saveAgentForExisting(id, dto)
     }
 
     @Post('charter-orders/:id/post-term-costs')
@@ -197,6 +376,11 @@ export class OperationsController {
         return this.charter.listFreightRates(q)
     }
 
+    @Get('freight-rates/lookup')
+    lookupFreightRate(@Query() q: ShipFreightRateLookupDto) {
+        return this.charter.lookupFreightRate(q)
+    }
+
     @Post('freight-rates')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     createFreightRate(@Body() dto: UpsertShipFreightRateDto) {
@@ -206,6 +390,12 @@ export class OperationsController {
     @Put('freight-rates/:id')
     @RequirePermissions(PERMISSIONS.operations.charterManage)
     updateFreightRate(@Param('id') id: string, @Body() dto: UpsertShipFreightRateDto) {
+        return this.charter.saveFreightRate(dto, id)
+    }
+
+    @Patch('freight-rates/:id')
+    @RequirePermissions(PERMISSIONS.operations.charterManage)
+    patchFreightRate(@Param('id') id: string, @Body() dto: UpsertShipFreightRateDto) {
         return this.charter.saveFreightRate(dto, id)
     }
 
@@ -245,6 +435,11 @@ export class OperationsController {
     @Get('warehouse/matrix')
     matrix(@Query() q: PageQueryDto & { supplierLocationId?: string; productId?: string }) {
         return this.warehouse.inventoryMatrix(q)
+    }
+
+    @Get('warehouse/commercial-lots')
+    commercialLotInventory(@Query() q: PageQueryDto & { supplierLocationId?: string; productId?: string }) {
+        return this.warehouse.listCommercialLotInventory(q)
     }
 
     @Get('expected-inventory')
