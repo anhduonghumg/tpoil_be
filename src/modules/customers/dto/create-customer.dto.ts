@@ -59,6 +59,11 @@ export class CreateCustomerDto {
     contactPhone?: string
 
     @IsOptional()
+    @IsString()
+    @MaxLength(100)
+    bankAccountNo?: string
+
+    @IsOptional()
     @Type(() => Number)
     @IsNumber()
     creditLimit?: number

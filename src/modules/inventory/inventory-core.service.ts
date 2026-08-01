@@ -57,7 +57,7 @@ export class InventoryCoreService {
 
     private async lockKeys(tx: Prisma.TransactionClient, keys: string[]) {
         for (const key of [...new Set(keys)].sort()) {
-            await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
         }
     }
 

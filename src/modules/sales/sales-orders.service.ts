@@ -1,0 +1,324 @@
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import {
+    Prisma,
+    PurchaseBizType,
+    PurchaseOrderType,
+    SalesOrderStatus,
+} from '@prisma/client'
+import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
+import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import {
+    CreateSalesOrderDto,
+    CreateSalesOrderFromPurchaseDto,
+    ListSalesOrdersQueryDto,
+} from './dto/sales-order.dto'
+
+const detailInclude = Prisma.validator<Prisma.SalesOrderInclude>()({
+    customer: { select: { id: true, code: true, name: true, taxCode: true } },
+    lines: {
+        orderBy: { lineNo: 'asc' },
+        include: {
+            product: { select: { id: true, code: true, name: true, uom: true } },
+            receivingWarehouse: { select: { id: true, code: true, name: true } },
+        },
+    },
+    purchaseOrders: {
+        orderBy: { orderDate: 'asc' },
+        select: {
+            id: true,
+            orderNo: true,
+            orderDate: true,
+            status: true,
+            supplier: { select: { id: true, code: true, name: true } },
+            lines: {
+                orderBy: { lineNo: 'asc' },
+                select: {
+                    id: true,
+                    productId: true,
+                    orderedQty: true,
+                    actualReceivedQty: true,
+                    product: { select: { id: true, code: true, name: true, uom: true } },
+                },
+            },
+        },
+    },
+})
+
+@Injectable()
+export class SalesOrdersService {
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly notificationOutbox: NotificationOutboxService,
+    ) {}
+
+    private period(date: Date) {
+        const year = String(date.getUTCFullYear()).slice(-2)
+        const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+        return `${year}${month}`
+    }
+
+    private async generateOrderNo(customerPartyId: string, orderDate: Date) {
+        const customer = await this.prisma.party.findUnique({
+            where: { id: customerPartyId },
+            select: { code: true },
+        })
+        if (!customer?.code?.trim()) throw new BadRequestException('CUSTOMER_CODE_REQUIRED')
+
+        const period = this.period(orderDate)
+        const sequence = await this.prisma.documentSequence.upsert({
+            where: { moduleCode_period: { moduleCode: 'SALES_ORDER', period } },
+            create: { moduleCode: 'SALES_ORDER', period, currentNo: 1 },
+            update: { currentNo: { increment: 1 } },
+        })
+        const customerCode = customer.code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+        return `BH${period}${String(sequence.currentNo).padStart(4, '0')}${customerCode}`
+    }
+
+    /** Quantity ordered by the customer versus quantity actually purchased. */
+    private comparison(order: any) {
+        const byProduct = new Map<string, { productId: string; product: any; orderedQty: number; purchasedQty: number }>()
+        for (const line of order.lines ?? []) {
+            const row = byProduct.get(line.productId) ?? {
+                productId: line.productId,
+                product: line.product,
+                orderedQty: 0,
+                purchasedQty: 0,
+            }
+            row.orderedQty += Number(line.orderedActualQty ?? 0)
+            byProduct.set(line.productId, row)
+        }
+        for (const purchase of order.purchaseOrders ?? []) {
+            for (const line of purchase.lines ?? []) {
+                const row = byProduct.get(line.productId) ?? {
+                    productId: line.productId,
+                    product: line.product,
+                    orderedQty: 0,
+                    purchasedQty: 0,
+                }
+                row.purchasedQty += Number(line.orderedQty ?? 0)
+                byProduct.set(line.productId, row)
+            }
+        }
+        return [...byProduct.values()].map((row) => ({
+            ...row,
+            varianceQty: row.purchasedQty - row.orderedQty,
+        }))
+    }
+
+    private mapOrder(order: any) {
+        return { ...order, comparison: this.comparison(order) }
+    }
+
+    async list(query: ListSalesOrdersQueryDto) {
+        const page = Math.max(query.page ?? 1, 1)
+        const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
+        const keyword = query.keyword?.trim()
+        const where: Prisma.SalesOrderWhereInput = {
+            customerPartyId: query.customerPartyId ?? undefined,
+            status: query.status ? (query.status as SalesOrderStatus) : undefined,
+            ...(keyword
+                ? {
+                      OR: [
+                          { orderNo: { contains: keyword, mode: 'insensitive' } },
+                          { customer: { name: { contains: keyword, mode: 'insensitive' } } },
+                      ],
+                  }
+                : {}),
+        }
+
+        const [rows, total] = await this.prisma.$transaction([
+            this.prisma.salesOrder.findMany({
+                where,
+                include: detailInclude,
+                orderBy: [{ orderDate: 'desc' }, { createdAt: 'desc' }],
+                skip: (page - 1) * limit,
+                take: limit,
+            }),
+            this.prisma.salesOrder.count({ where }),
+        ])
+        return { items: rows.map((row) => this.mapOrder(row)), total, page, limit }
+    }
+
+    async detail(id: string) {
+        const order = await this.prisma.salesOrder.findUnique({
+            where: { id },
+            include: detailInclude,
+        })
+        if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
+        return this.mapOrder(order)
+    }
+
+    /**
+     * Sales records what the customer ordered and hands it to purchasing, who then
+     * buys the goods from a supplier.
+     */
+    async create(dto: CreateSalesOrderDto, actorId?: string | null) {
+        const customer = await this.prisma.party.findUnique({
+            where: { id: dto.customerPartyId },
+            select: { id: true, name: true },
+        })
+        if (!customer) throw new BadRequestException('CUSTOMER_NOT_FOUND')
+
+        const legalEntity = await this.prisma.legalEntity.findFirst({
+            orderBy: { createdAt: 'asc' },
+            select: { id: true, baseCurrency: true },
+        })
+        if (!legalEntity) throw new BadRequestException('LEGAL_ENTITY_NOT_FOUND')
+
+        const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
+        if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
+
+        const orderNo = await this.generateOrderNo(dto.customerPartyId, orderDate)
+
+        const created = await this.prisma.$transaction(async (tx) => {
+            const salesOrder = await tx.salesOrder.create({
+                data: {
+                    legalEntityId: legalEntity.id,
+                    orderNo,
+                    customerPartyId: dto.customerPartyId,
+                    status: SalesOrderStatus.DRAFT,
+                    orderDate,
+                    currency: legalEntity.baseCurrency || 'VND',
+                    note: dto.note?.trim() || null,
+                    lines: {
+                        create: dto.lines.map((line, index) => ({
+                            lineNo: index + 1,
+                            productId: line.productId,
+                            receivingWarehouseId: line.receivingWarehouseId ?? null,
+                            orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
+                            orderedV15Qty:
+                                line.orderedV15Qty == null
+                                    ? null
+                                    : new Prisma.Decimal(line.orderedV15Qty),
+                            unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
+                            taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                            note: line.note?.trim() || null,
+                        })),
+                    },
+                },
+                select: { id: true, orderNo: true },
+            })
+
+            await this.notificationOutbox.emit(
+                {
+                    eventType: PURCHASE_NOTIFICATION_EVENTS.SALES_ORDER_REQUESTED,
+                    aggregateType: 'SALES_ORDER',
+                    aggregateId: salesOrder.id,
+                    dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.SALES_ORDER_REQUESTED}:${salesOrder.id}`,
+                    payload: {
+                        entityType: 'SALES_ORDER',
+                        entityId: salesOrder.id,
+                        workItemSourceType: 'SALES_ORDER',
+                        workItemSourceId: salesOrder.id,
+                        orderNo: salesOrder.orderNo,
+                        customerName: customer.name,
+                        actionRequired: true,
+                        recipientPermissionPrefixes: ['purchases.'],
+                        excludeUserIds: actorId ? [actorId] : [],
+                    },
+                },
+                tx,
+            )
+            return salesOrder
+        })
+
+        return this.detail(created.id)
+    }
+
+    async createFromPurchaseOrder(purchaseOrderId: string, dto: CreateSalesOrderFromPurchaseDto) {
+        const purchaseOrder = await this.prisma.purchaseOrder.findFirst({
+            where: {
+                id: purchaseOrderId,
+                orderType: PurchaseOrderType.SINGLE,
+                bizType: PurchaseBizType.COMMERCIAL,
+            },
+            include: { lines: { orderBy: { lineNo: 'asc' } } },
+        })
+        if (!purchaseOrder) throw new NotFoundException('RETAIL_PURCHASE_ORDER_NOT_FOUND')
+        if (purchaseOrder.salesOrderId) {
+            throw new BadRequestException({
+                code: 'PURCHASE_ORDER_ALREADY_LINKED',
+                message: 'Đơn mua này đã gắn với một đơn đặt hàng kinh doanh.',
+            })
+        }
+
+        const customer = await this.prisma.party.findUnique({
+            where: { id: dto.customerPartyId },
+            select: { id: true },
+        })
+        if (!customer) throw new BadRequestException('CUSTOMER_NOT_FOUND')
+
+        const orderDate = dto.orderDate ? new Date(dto.orderDate) : purchaseOrder.orderDate
+        if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
+
+        const sourceLines = dto.lines?.length
+            ? dto.lines.map((line) => ({
+                  productId: line.productId,
+                  orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
+                  orderedV15Qty:
+                      line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
+                  unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
+                  taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                  note: line.note?.trim() || null,
+              }))
+            : purchaseOrder.lines.map((line) => ({
+                  productId: line.productId,
+                  orderedActualQty: line.orderedQty,
+                  orderedV15Qty: null,
+                  // Selling price belongs to sales; purchasing only records what was ordered.
+                  unitPrice: new Prisma.Decimal(0),
+                  taxRate: line.taxRate,
+                  note: null,
+              }))
+        if (!sourceLines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+
+        const orderNo = await this.generateOrderNo(dto.customerPartyId, orderDate)
+
+        const created = await this.prisma.$transaction(async (tx) => {
+            const salesOrder = await tx.salesOrder.create({
+                data: {
+                    legalEntityId: purchaseOrder.legalEntityId,
+                    orderNo,
+                    customerPartyId: dto.customerPartyId,
+                    status: SalesOrderStatus.DRAFT,
+                    orderDate,
+                    currency: purchaseOrder.currency,
+                    note: dto.note?.trim() || null,
+                    lines: {
+                        create: sourceLines.map((line, index) => ({
+                            lineNo: index + 1,
+                            productId: line.productId,
+                            orderedActualQty: line.orderedActualQty,
+                            orderedV15Qty: line.orderedV15Qty,
+                            unitPrice: line.unitPrice,
+                            taxRate: line.taxRate,
+                            note: line.note,
+                        })),
+                    },
+                },
+                select: { id: true },
+            })
+            await tx.purchaseOrder.update({
+                where: { id: purchaseOrder.id },
+                data: { salesOrderId: salesOrder.id, version: { increment: 1 } },
+            })
+            return salesOrder
+        })
+
+        return this.detail(created.id)
+    }
+
+    async unlinkPurchaseOrder(purchaseOrderId: string) {
+        const purchaseOrder = await this.prisma.purchaseOrder.findUnique({
+            where: { id: purchaseOrderId },
+            select: { id: true, salesOrderId: true },
+        })
+        if (!purchaseOrder?.salesOrderId) throw new BadRequestException('PURCHASE_ORDER_NOT_LINKED')
+        await this.prisma.purchaseOrder.update({
+            where: { id: purchaseOrder.id },
+            data: { salesOrderId: null, version: { increment: 1 } },
+        })
+        return { success: true }
+    }
+}

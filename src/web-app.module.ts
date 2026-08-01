@@ -24,6 +24,8 @@ import { PurchaseOrdersModule } from './modules/purchases/purchase-orders/purcha
 import { GoodsReceiptsModule } from './modules/purchases/goods-receipts/goods-receipts.module'
 import { SupplierInvoicesModule } from './modules/purchases/supplier-invoices/supplier-invoices.module'
 import { CommercialLotsModule } from './modules/purchases/commercial-lots/commercial-lots.module'
+import { CommercialPaymentsModule } from './modules/purchases/commercial-payments/commercial-payments.module'
+import { SalesOrdersModule } from './modules/sales/sales-orders.module'
 import { SupplierSettlementsModule } from './modules/settlements/supplier-settlements.module'
 
 import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.module'
@@ -44,6 +46,8 @@ import { CommodityPriceQuotesModule } from './modules/commodity-price-quotes/com
 import { VcbFxRatesModule } from './modules/vcb-fx-rates/vcb-fx-rates.module'
 import { EnvironmentTaxesModule } from './modules/environment-taxes/environment-taxes.module'
 import { OperationsModule } from './modules/operations/operations.module'
+import { VatRatesModule } from './modules/vat-rates/vat-rates.module'
+import { NotificationsModule } from './modules/notifications/notifications.module'
 
 @Module({
     imports: [
@@ -76,6 +80,8 @@ import { OperationsModule } from './modules/operations/operations.module'
         VcbFxRatesModule,
         EnvironmentTaxesModule,
         OperationsModule,
+        VatRatesModule,
+        NotificationsModule,
 
         BankingModule,
         BankPurposesModule,
@@ -86,6 +92,8 @@ import { OperationsModule } from './modules/operations/operations.module'
         GoodsReceiptsModule,
         SupplierInvoicesModule,
         CommercialLotsModule,
+        CommercialPaymentsModule,
+        SalesOrdersModule,
         SupplierSettlementsModule,
 
         BackgroundJobsModule,

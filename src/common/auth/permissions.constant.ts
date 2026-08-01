@@ -71,6 +71,7 @@ export const PERMISSIONS = {
         print: 'purchases.print',
         approve: 'purchases.approve',
         reject: 'purchases.reject',
+        approvePaymentRequest: 'purchases.payment_requests.approve',
     },
     sales: {
         view: 'sales.view',

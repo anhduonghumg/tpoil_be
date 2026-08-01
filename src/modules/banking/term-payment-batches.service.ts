@@ -93,6 +93,7 @@ export class TermPaymentBatchesService {
     async listPendingPaymentRequests() {
         const requests = await this.prisma.purchaseTermPaymentRequest.findMany({
             where: {
+                supplierInvoiceId: null,
                 status: {
                     in: [TermPaymentRequestStatus.DRAFT, TermPaymentRequestStatus.SUBMITTED],
                 },
@@ -153,6 +154,7 @@ export class TermPaymentBatchesService {
             const requests = await tx.purchaseTermPaymentRequest.findMany({
                 where: {
                     id: { in: ids },
+                    supplierInvoiceId: null,
                     status: { in: [TermPaymentRequestStatus.DRAFT, TermPaymentRequestStatus.SUBMITTED] },
                 },
                 include: {

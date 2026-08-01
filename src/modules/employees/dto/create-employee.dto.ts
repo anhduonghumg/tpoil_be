@@ -1,6 +1,6 @@
 // src/employees/dto/create-employee.dto.ts
-import { IsEmail, IsEnum, IsOptional, IsString, IsUUID, IsArray } from 'class-validator'
-import { Type } from 'class-transformer'
+import { IsEmail, IsEnum, IsOptional, IsString, IsUUID, IsArray, IsInt, Min } from 'class-validator'
+import { Transform, Type } from 'class-transformer'
 import { DMYtoDate } from './date.transform'
 import { AddressDto } from './address.dto'
 import { CitizenDto } from './citizen.dto'
@@ -45,8 +45,15 @@ export class CreateEmployeeDto {
     @IsOptional() @IsUUID() managerId?: string
     @IsOptional() @IsString() managerName?: string
 
-    @IsOptional() @IsUUID() siteId?: string
-    @IsOptional() @IsString() floor?: string
+    @IsOptional()
+    @Transform(({ value }) => (value === '' || value === null ? undefined : value))
+    @IsUUID()
+    siteId?: string
+    @IsOptional()
+    @Transform(({ value }) => (value === '' || value === null || value === undefined ? undefined : Number(value)))
+    @IsInt()
+    @Min(0)
+    floor?: number
     @IsOptional() @IsString() area?: string
     @IsOptional() @IsString() desk?: string
 

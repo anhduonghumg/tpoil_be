@@ -16,9 +16,10 @@ import { ProductMatcher } from './matching/product-matcher'
 import { RegionMatcher } from './matching/region-matcher'
 import { PricePdfPreviewLine, PricePdfPreviewResult } from './types/price-pdf-preview'
 import { BackgroundJobsService } from '../background-jobs/background-jobs.service'
-import { PricePdfStorage } from './price-file.storage'
 import * as fs from 'fs/promises'
+import { createHash } from 'crypto'
 import pdf = require('pdf-parse')
+import Tesseract = require('tesseract.js')
 import { Decimal } from '@prisma/client/runtime/library'
 // const pdfParse = require('pdf-parse')
 // const pdf = require('pdf-parse')
@@ -36,29 +37,29 @@ export class PriceBulletinsService {
         private readonly prisma: PrismaService,
         private readonly artifacts: JobArtifactsService,
         private readonly bg: BackgroundJobsService,
-        private readonly storage: PricePdfStorage,
         private readonly productMatcher: ProductMatcher,
         private readonly regionMatcher: RegionMatcher,
     ) {}
 
     async startImportPreview(file: Express.Multer.File) {
-        const { filePath, checksum } = await this.storage.savePdfBuffer({
-            buffer: file.buffer,
-            originalName: file.originalname,
-        })
+        const checksum = createHash('sha256').update(file.buffer).digest('hex')
 
         const run = await this.bg.createRun({
             type: BackgroundJobType.PRICE_BULLETIN_IMPORT_PDF,
             name: `Bóc tách PDF: ${file.originalname}`,
-            payload: { fileName: file.originalname, filePath, checksum },
+            payload: { fileName: file.originalname, checksum },
         })
 
         await this.artifacts.upsertArtifact({
             runId: run.id,
             kind: ARTIFACT_PRICE_PDF_INPUT,
-            fileUrl: filePath,
+            fileUrl: 'DB_BUFFER',
             checksum,
-            content: { fileName: file.originalname },
+            content: {
+                fileName: file.originalname,
+                mimeType: file.mimetype,
+                bufferBase64: file.buffer.toString('base64'),
+            },
         })
 
         await this.bg.enqueueRun({
@@ -77,7 +78,9 @@ export class PriceBulletinsService {
             const input = await this.artifacts.getArtifact(runId, ARTIFACT_PRICE_PDF_INPUT)
             if (!input?.fileUrl) throw new Error('Không tìm thấy tệp tin PDF')
 
-            const buffer = await fs.readFile(input.fileUrl)
+            const content = input.content as { bufferBase64?: string } | null
+            const buffer = content?.bufferBase64 ? Buffer.from(content.bufferBase64, 'base64') : input?.fileUrl ? await fs.readFile(input.fileUrl) : null
+            if (!buffer) throw new Error('PDF input not found')
             const preview = await this.parseAndMapPdf(buffer)
 
             await this.artifacts.upsertArtifact({
@@ -86,10 +89,12 @@ export class PriceBulletinsService {
                 content: preview as any,
                 checksum: input.checksum ?? undefined,
             })
+            await this.artifacts.deleteArtifact(runId, ARTIFACT_PRICE_PDF_INPUT)
 
             await this.bg.markSuccess(runId, { stats: preview.stats })
             return preview
         } catch (err) {
+            await this.artifacts.deleteArtifact(runId, ARTIFACT_PRICE_PDF_INPUT).catch(() => undefined)
             await this.bg.markFailed(runId, err)
             throw err
         }
@@ -245,6 +250,25 @@ export class PriceBulletinsService {
         return Number(cleaned.replace(/\./g, ''))
     }
 
+    private stripVietnamese(input: string) {
+        return String(input ?? '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/đ/g, 'd')
+            .replace(/Đ/g, 'D')
+    }
+
+    private normalizeProductName(raw: string) {
+        return raw
+            .replace(/\s+/g, ' ')
+            .replace(/\bRON\s+95\s*[- ]?111\b/gi, 'RON 95-III')
+            .replace(/\bRON\s+95\s*[- ]?II1\b/gi, 'RON 95-III')
+            .replace(/\bRON\s+92\s*[- ]?11\b/gi, 'RON 92-II')
+            .replace(/\b0,05S\s*[- ]?[I1]\]/gi, '0,05S-II')
+            .replace(/\b0,001S\s*[- ]?V\b/gi, '0,001S-V')
+            .trim()
+    }
+
     private extractTpoilData(text: string): { effectiveFrom: Date; lines: RawLine[] } {
         const t = text
             .replace(/\u00A0/g, ' ')
@@ -270,6 +294,58 @@ export class PriceBulletinsService {
 
             if (priceV1 > 0 && priceV2 > 0) {
                 lines.push({ productNameRaw, priceV1, priceV2 })
+            }
+        }
+
+        return { effectiveFrom, lines }
+    }
+
+    private extractTpoilDataNormalized(text: string): { effectiveFrom: Date; lines: RawLine[] } {
+        const normalized = this.stripVietnamese(text)
+            .replace(/\u00A0/g, ' ')
+            .replace(/[|]/g, ' ')
+            .replace(/[–—]/g, '-')
+        const t = normalized
+            .replace(/\r/g, ' ')
+            .replace(/\n/g, ' ')
+            .replace(/\s+/g, ' ')
+
+        const effMatch = t.match(/hieu\s+luc\s+tu\s*(\d{1,2})\s*gio\s*(\d{1,2})\s*phut,?\s*ngay\s*(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/i)
+        if (!effMatch) throw new Error('Khong tim thay moc thoi gian hieu luc')
+        const [_, hh, mm, dd, MM, yyyy] = effMatch
+        const effectiveFrom = new Date(Date.UTC(Number(yyyy), Number(MM) - 1, Number(dd), Number(hh) - 7, Number(mm)))
+
+        const lines: RawLine[] = []
+        const seen = new Set<string>()
+        const addLine = (productNameRaw: string, priceV1Raw: string, priceV2Raw: string) => {
+            const priceV1 = this.parseVnNumber(priceV1Raw)
+            const priceV2 = this.parseVnNumber(priceV2Raw)
+            const productStarts = Array.from(productNameRaw.matchAll(/\b(Xang|Dau|Diezen|Mazut)\b/gi))
+            if (productStarts.length > 1) {
+                productNameRaw = productNameRaw.slice(productStarts[productStarts.length - 1].index)
+            }
+            const normalizedName = this.normalizeProductName(productNameRaw)
+            const key = `${normalizedName}:${priceV1}:${priceV2}`
+
+            if (normalizedName && priceV1 > 0 && priceV2 > 0 && !seen.has(key)) {
+                seen.add(key)
+                lines.push({ productNameRaw: normalizedName, priceV1, priceV2 })
+            }
+        }
+
+        const textLineRegex = /\b(Xang|Dau|Diezen|Mazut)\s+(.{1,80}?)\s+Dong\s*\/\s*lit\s+([\d.,]+)\s+([\d.,]+)/gi
+        let match
+        while ((match = textLineRegex.exec(t)) !== null) {
+            addLine(`${match[1]} ${match[2]}`, match[3], match[4])
+        }
+
+        const ocrLineRegex = /\b(Xang|Dau|Diezen|Mazut)\s+(.{1,80}?)\s+(\d[\d.,]{3,})\s*-?\s+(\d[\d.,]{3,})\b/i
+        for (const line of normalized.split(/\r?\n/)) {
+            const compactLine = line.replace(/\s+/g, ' ').trim()
+            if (compactLine.length > 180) continue
+            const lineMatch = compactLine.match(ocrLineRegex)
+            if (lineMatch) {
+                addLine(`${lineMatch[1]} ${lineMatch[2]}`, lineMatch[3], lineMatch[4])
             }
         }
 
@@ -708,10 +784,39 @@ export class PriceBulletinsService {
         })
     }
 
-    async parseAndMapPdf(buffer: Buffer): Promise<PricePdfPreviewResult> {
+    private async readPdfTextWithOcrFallback(buffer: Buffer) {
         const parsed = await pdf(buffer)
-        const rawText = parsed.text
-        const { effectiveFrom, lines: rawLines } = this.extractTpoilData(rawText)
+        const pdfText = parsed.text || ''
+
+        if (pdfText.trim().length > 50) {
+            try {
+                this.extractTpoilDataNormalized(pdfText)
+                return pdfText
+            } catch {
+                // Some PDFs expose partial text but keep the table/effective time as images.
+            }
+        }
+
+        const { pdf: pdfToImg } = await import('pdf-to-img')
+        const document = await pdfToImg(buffer, { scale: 3 })
+        const pageTexts: string[] = []
+        let pageNo = 0
+
+        for await (const image of document) {
+            pageNo += 1
+            const result = await Tesseract.recognize(image, 'vie+eng', {
+                cachePath: '.cache/tesseract',
+            } as any)
+            pageTexts.push(result.data.text || '')
+            if (pageNo >= 3) break
+        }
+
+        return pageTexts.join('\n')
+    }
+
+    async parseAndMapPdf(buffer: Buffer): Promise<PricePdfPreviewResult> {
+        const rawText = await this.readPdfTextWithOcrFallback(buffer)
+        const { effectiveFrom, lines: rawLines } = this.extractTpoilDataNormalized(rawText)
         const r1 = await this.regionMatcher.findByCodeOrName('VÙNG I')
         const r2 = await this.regionMatcher.findByCodeOrName('VÙNG II')
         const previewLines: PricePdfPreviewLine[] = []

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, ConflictException, HttpException, Injectable, NotFoundException } from '@nestjs/common'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { Prisma } from '@prisma/client'
 import { CreateEmployeeDto } from './dto/create-employee.dto'
@@ -27,6 +27,12 @@ function normPhoneVN(v?: string) {
     let s = v.replace(/\s+/g, '')
     s = s.replace(/^\+84/, '0')
     return s
+}
+
+function normInt(v?: number | string | null) {
+    if (v === undefined || v === null || v === '') return undefined
+    const n = Number(v)
+    return Number.isInteger(n) ? n : undefined
 }
 
 function toJsonString(v?: any) {
@@ -60,7 +66,7 @@ function parseDate(v?: string | Date | null): Date | undefined {
 }
 
 function mapCreateInput(dto: CreateEmployeeDto): Prisma.EmployeeCreateInput {
-    // JSON fields giữ nguyên; email/phone trim; floor là string
+    // JSON fields giữ nguyên; email/phone trim
     return {
         code: normStr(dto.code),
         fullName: normStr(dto.fullName),
@@ -80,7 +86,7 @@ function mapCreateInput(dto: CreateEmployeeDto): Prisma.EmployeeCreateInput {
 
         title: normStr(dto.title),
         grade: normStr(dto.grade),
-        floor: normStr(dto.floor),
+        floor: normInt(dto.floor),
         area: normStr(dto.area),
         desk: normStr(dto.desk),
 
@@ -119,6 +125,36 @@ function mapUpdateInput(dto: UpdateEmployeeDto): Prisma.EmployeeUpdateInput {
 @Injectable()
 export class EmployeesService {
     constructor(private prisma: PrismaService) {}
+
+    private async validateRelations(
+        tx: Prisma.TransactionClient,
+        dto: Pick<CreateEmployeeDto, 'siteId' | 'managerId' | 'departmentId' | 'departmentIds'>,
+    ) {
+        if (dto.siteId) {
+            const site = await tx.site.findUnique({ where: { id: dto.siteId }, select: { id: true } })
+            if (!site) throw new NotFoundException('Khong tim thay site duoc chon')
+        }
+
+        if (dto.managerId) {
+            const manager = await tx.employee.findFirst({
+                where: { id: dto.managerId, deletedAt: null },
+                select: { id: true },
+            })
+            if (!manager) throw new NotFoundException('Khong tim thay quan ly duoc chon')
+        }
+
+        const departmentIds = dto.departmentIds ?? (dto.departmentId ? [dto.departmentId] : [])
+        if (departmentIds.length) {
+            const departments = await tx.department.findMany({
+                where: { id: { in: departmentIds }, deletedAt: null },
+                select: { id: true },
+            })
+            const found = new Set(departments.map((d) => d.id))
+            const missing = departmentIds.filter((id) => !found.has(id))
+            if (missing.length) throw new NotFoundException('Khong tim thay phong ban duoc chon')
+        }
+    }
+
     async list(params: {
         q?: string
         status?: 'active' | 'inactive' | 'probation' | 'suspended' | 'terminated'
@@ -189,6 +225,7 @@ export class EmployeesService {
         const data = mapCreateInput(dto)
         try {
             return await this.prisma.$transaction(async (tx) => {
+                await this.validateRelations(tx, dto)
                 const emp = await tx.employee.create({ data })
                 const deptIds = dto.departmentIds ?? (dto.departmentId ? [dto.departmentId] : [])
                 if (deptIds && deptIds.length) {
@@ -214,6 +251,7 @@ export class EmployeesService {
             return await this.prisma.$transaction(async (tx) => {
                 // 1) Tồn tại & chưa bị soft-delete
                 const current = await tx.employee.findFirst({ where: { id, deletedAt: null } })
+                await this.validateRelations(tx, dto)
                 if (!current) throw new AppException('NOT_FOUND', 'Không tìm thấy nhân viên')
 
                 // 2) Update employee chính
@@ -297,9 +335,14 @@ export class EmployeesService {
     }
 
     private handlePrismaError(e: any): never {
+        if (e instanceof HttpException) throw e
+
         if (e?.code === 'P2002') {
             const field = e?.meta?.target?.[0] || 'unique'
             throw new ConflictException(`Trùng dữ liệu ở trường: ${field}`)
+        }
+        if (e?.code === 'P2025') {
+            throw new NotFoundException('Khong tim thay ban ghi lien quan')
         }
         if (e?.code === 'P2025') {
             throw new NotFoundException('Không tìm thấy bản ghi:' + e)

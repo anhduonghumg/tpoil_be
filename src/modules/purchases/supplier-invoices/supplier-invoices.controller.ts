@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
+import type { Request } from 'express'
 import { CreateSupplierInvoiceDto, PostSupplierInvoiceDto } from './dto/supplier-invoice.dto'
 import { SupplierInvoiceImportPdfDto } from './dto/import-pdf.dto'
 import { FileInterceptor } from '@nestjs/platform-express'
@@ -47,7 +48,7 @@ export class SupplierInvoicesController {
     }
 
     @Post(':id/post')
-    post(@Param('id') id: string, @Body() dto: PostSupplierInvoiceDto) {
-        return this.service.post(id, dto)
+    post(@Param('id') id: string, @Body() dto: PostSupplierInvoiceDto, @Req() req: Request) {
+        return this.service.post(id, dto, (req as any).user?.id)
     }
 }

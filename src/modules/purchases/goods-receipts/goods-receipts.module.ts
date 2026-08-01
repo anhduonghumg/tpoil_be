@@ -5,6 +5,7 @@ import { GoodsReceiptsService } from './goods-receipts.service'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
 import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
+import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 
 @Module({
     controllers: [GoodsReceiptsController],
@@ -13,6 +14,7 @@ import { InventoryCoreService } from 'src/modules/inventory/inventory-core.servi
         InventoryCoreService,
         GoodsReceiptPostingService,
         PrismaService,
+        PermissionsGuard,
     ],
     exports: [GoodsReceiptsService],
 })

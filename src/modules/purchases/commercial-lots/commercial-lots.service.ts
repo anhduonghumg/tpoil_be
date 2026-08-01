@@ -10,14 +10,16 @@ import {
     SupplierInvoiceStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
 import {
     CreateCommercialLotWithdrawalDto,
     ListCommercialLotsQueryDto,
+    ListLotWithdrawalsQueryDto,
 } from './dto/commercial-lot.dto'
+import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
+import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
 
 const detailInclude = Prisma.validator<Prisma.PurchaseOrderInclude>()({
-    supplier: { select: { id: true, code: true, name: true, taxCode: true } },
+    supplier: { select: { id: true, code: true, name: true, taxCode: true, bankAccountNo: true } },
     contract: { select: { id: true, code: true, name: true, startDate: true, endDate: true } },
     lines: {
         orderBy: { lineNo: 'asc' },
@@ -39,6 +41,20 @@ const detailInclude = Prisma.validator<Prisma.PurchaseOrderInclude>()({
                     actualQty: true,
                     netAmount: true,
                     taxAmount: true,
+                },
+            },
+        },
+    },
+    termPaymentRequests: {
+        orderBy: { createdAt: 'desc' },
+        include: {
+            supplierInvoice: { select: { id: true, invoiceNo: true, invoiceDate: true } },
+            payments: {
+                orderBy: { paidAt: 'desc' },
+                include: {
+                    sourceBankAccount: {
+                        select: { id: true, bankCode: true, bankName: true, accountNo: true },
+                    },
                 },
             },
         },
@@ -65,7 +81,7 @@ const detailInclude = Prisma.validator<Prisma.PurchaseOrderInclude>()({
 export class CommercialLotsService {
     constructor(
         private readonly prisma: PrismaService,
-        private readonly receiptPosting: GoodsReceiptPostingService,
+        private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
     private quantityTotals(order: any) {
@@ -82,7 +98,8 @@ export class CommercialLotsService {
             0,
         )
         const accountingValue = (order.lines ?? []).reduce(
-            (sum: number, line: any) => sum + Number(line.commercialLotPosition?.accountingValue ?? 0),
+            (sum: number, line: any) =>
+                sum + Number(line.commercialLotPosition?.accountingValue ?? 0),
             0,
         )
         return {
@@ -132,7 +149,8 @@ export class CommercialLotsService {
         if (!payment.isPaid) return 'PENDING_PAYMENT'
 
         const totals = this.quantityTotals(order)
-        if (totals.remainingToWithdraw <= 0 && totals.invoicedQty >= totals.orderedQty) return 'COMPLETED'
+        if (totals.remainingToWithdraw <= 0 && totals.invoicedQty >= totals.orderedQty)
+            return 'COMPLETED'
         if (totals.withdrawnQty > 0) return 'WITHDRAWING'
         return 'READY_TO_WITHDRAW'
     }
@@ -161,7 +179,11 @@ export class CommercialLotsService {
                 ? {
                       OR: [
                           { orderNo: { contains: query.keyword.trim(), mode: 'insensitive' } },
-                          { supplier: { name: { contains: query.keyword.trim(), mode: 'insensitive' } } },
+                          {
+                              supplier: {
+                                  name: { contains: query.keyword.trim(), mode: 'insensitive' },
+                              },
+                          },
                       ],
                   }
                 : {}),
@@ -206,6 +228,56 @@ export class CommercialLotsService {
         return this.mapOrder(order)
     }
 
+    async listWithdrawals(query: ListLotWithdrawalsQueryDto) {
+        const page = Math.max(query.page ?? 1, 1)
+        const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
+        const status = query.status ?? CommercialLotWithdrawalStatus.DRAFT
+        const keyword = query.keyword?.trim()
+        const where: Prisma.CommercialLotWithdrawalWhereInput = {
+            status,
+            purchaseOrder: { orderType: PurchaseOrderType.LOT, bizType: 'COMMERCIAL' },
+            ...(keyword
+                ? {
+                      OR: [
+                          { withdrawalNo: { contains: keyword, mode: 'insensitive' } },
+                          { purchaseOrder: { orderNo: { contains: keyword, mode: 'insensitive' } } },
+                      ],
+                  }
+                : {}),
+        }
+
+        const [rows, total] = await this.prisma.$transaction([
+            this.prisma.commercialLotWithdrawal.findMany({
+                where,
+                orderBy: [{ withdrawalDate: 'asc' }, { createdAt: 'asc' }],
+                skip: (page - 1) * limit,
+                take: limit,
+                include: {
+                    purchaseOrder: {
+                        select: {
+                            id: true,
+                            orderNo: true,
+                            supplier: { select: { code: true, name: true } },
+                        },
+                    },
+                    destinationWarehouse: { select: { id: true, code: true, name: true } },
+                    lines: {
+                        orderBy: { lineNo: 'asc' },
+                        include: {
+                            commercialLotPosition: {
+                                include: {
+                                    product: { select: { id: true, code: true, name: true, uom: true } },
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+            this.prisma.commercialLotWithdrawal.count({ where }),
+        ])
+        return { items: rows, total, page, limit }
+    }
+
     async createWithdrawal(
         purchaseOrderId: string,
         dto: CreateCommercialLotWithdrawalDto,
@@ -213,7 +285,9 @@ export class CommercialLotsService {
     ) {
         const withdrawalNo = dto.withdrawalNo.trim()
         if (!withdrawalNo) throw new BadRequestException('WITHDRAWAL_NO_REQUIRED')
-        if (new Set(dto.lines.map((line) => line.commercialLotPositionId)).size !== dto.lines.length) {
+        if (
+            new Set(dto.lines.map((line) => line.commercialLotPositionId)).size !== dto.lines.length
+        ) {
             throw new BadRequestException('WITHDRAWAL_POSITION_DUPLICATED')
         }
 
@@ -233,7 +307,8 @@ export class CommercialLotsService {
                 },
             })
             if (!order) throw new BadRequestException('COMMERCIAL_LOT_PURCHASE_NOT_WITHDRAWABLE')
-            if (!order.supplierInvoices.length) throw new BadRequestException('POSTED_SUPPLIER_INVOICE_REQUIRED')
+            if (!order.supplierInvoices.length)
+                throw new BadRequestException('POSTED_SUPPLIER_INVOICE_REQUIRED')
             if (
                 order.supplierInvoices.some(
                     (invoice) => invoice.openItem?.status !== PayableOpenItemStatus.SETTLED,
@@ -313,7 +388,9 @@ export class CommercialLotsService {
                             actualQty: new Prisma.Decimal(line.actualQty),
                             v15Qty: line.v15Qty == null ? null : new Prisma.Decimal(line.v15Qty),
                             temperatureC:
-                                line.temperatureC == null ? null : new Prisma.Decimal(line.temperatureC),
+                                line.temperatureC == null
+                                    ? null
+                                    : new Prisma.Decimal(line.temperatureC),
                             density: line.density == null ? null : new Prisma.Decimal(line.density),
                         })),
                     },
@@ -335,7 +412,9 @@ export class CommercialLotsService {
                     include: {
                         commercialLotPosition: {
                             include: {
-                                product: { select: { id: true, code: true, name: true, uom: true } },
+                                product: {
+                                    select: { id: true, code: true, name: true, uom: true },
+                                },
                             },
                         },
                     },
@@ -360,6 +439,7 @@ export class CommercialLotsService {
                 },
                 include: {
                     purchaseOrder: true,
+                    destinationWarehouse: { select: { code: true, name: true } },
                     lines: {
                         include: {
                             commercialLotPosition: {
@@ -387,26 +467,21 @@ export class CommercialLotsService {
                         receiptDate: withdrawal.withdrawalDate,
                         status: GoodsReceiptStatus.CONFIRMED,
                         purchaseOrderId: withdrawal.purchaseOrderId,
-                        note: `Rút lô ${withdrawal.withdrawalNo}`,
+                        note: `Rút lô ${withdrawal.withdrawalNo} (theo dõi, không thay đổi tồn kinh doanh)`,
                     },
                 })
-                await this.receiptPosting.postSingleLineReceipt({
-                    tx,
-                    goodsReceiptId: receipt.id,
-                    warehouseId: withdrawal.destinationWarehouseId,
-                    productId: position.productId,
-                    purchaseOrderLineId: position.purchaseOrderLineId,
-                    actualQty: line.actualQty,
-                    v15Qty: line.v15Qty,
-                    temperatureC: line.temperatureC,
-                    density: line.density,
-                    effectiveAt: withdrawal.withdrawalDate,
-                    actorId,
-                })
-                await this.receiptPosting.releasePendingForInvoice(tx, {
-                    goodsReceiptId: receipt.id,
-                    occurredAt: withdrawal.withdrawalDate,
-                    actorId,
+                await tx.goodsReceiptLine.create({
+                    data: {
+                        goodsReceiptId: receipt.id,
+                        lineNo: 1,
+                        purchaseOrderLineId: position.purchaseOrderLineId,
+                        productId: position.productId,
+                        ownerPartyId: position.supplierCustomerId,
+                        actualQty: line.actualQty,
+                        v15Qty: line.v15Qty,
+                        temperatureC: line.temperatureC,
+                        density: line.density,
+                    },
                 })
                 await tx.commercialLotWithdrawalLine.update({
                     where: { id: line.id },
@@ -439,31 +514,84 @@ export class CommercialLotsService {
                 positions.length > 0 &&
                 positions.every(
                     (position) =>
-                        position.invoicedQty.greaterThanOrEqualTo(position.purchaseOrderLine.orderedQty) &&
-                        position.withdrawnQty.greaterThanOrEqualTo(position.invoicedQty),
+                        position.invoicedQty.greaterThanOrEqualTo(
+                            position.purchaseOrderLine.orderedQty,
+                        ) && position.withdrawnQty.greaterThanOrEqualTo(position.invoicedQty),
                 )
             await tx.purchaseOrder.update({
                 where: { id: purchaseOrderId },
                 data: {
-                    status: completed ? PurchaseOrderStatus.COMPLETED : PurchaseOrderStatus.IN_PROGRESS,
+                    status: completed
+                        ? PurchaseOrderStatus.COMPLETED
+                        : PurchaseOrderStatus.IN_PROGRESS,
                     version: { increment: 1 },
                 },
             })
+            await this.notificationOutbox.emit(
+                {
+                    eventType: PURCHASE_NOTIFICATION_EVENTS.WITHDRAWAL_CONFIRMED,
+                    aggregateType: 'COMMERCIAL_PURCHASE_WITHDRAWAL',
+                    aggregateId: withdrawal.id,
+                    dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.WITHDRAWAL_CONFIRMED}:${withdrawal.id}`,
+                    payload: {
+                        entityType: 'COMMERCIAL_PURCHASE',
+                        entityId: purchaseOrderId,
+                        orderNo: withdrawal.purchaseOrder.orderNo,
+                        withdrawalNo: withdrawal.withdrawalNo,
+                        warehouseCode:
+                            withdrawal.destinationWarehouse.code || withdrawal.destinationWarehouse.name,
+                        recipientUserIds: withdrawal.purchaseOrder.createdById
+                            ? [withdrawal.purchaseOrder.createdById]
+                            : [],
+                        excludeUserIds: actorId ? [actorId] : [],
+                    },
+                },
+                tx,
+            )
         })
         return this.detail(purchaseOrderId)
     }
 
-    async cancelWithdrawal(purchaseOrderId: string, withdrawalId: string) {
-        const result = await this.prisma.commercialLotWithdrawal.updateMany({
-            where: {
-                id: withdrawalId,
-                purchaseOrderId,
-                status: CommercialLotWithdrawalStatus.DRAFT,
-            },
-            data: {
-                status: CommercialLotWithdrawalStatus.CANCELLED,
-                version: { increment: 1 },
-            },
+    async cancelWithdrawal(purchaseOrderId: string, withdrawalId: string, actorId?: string | null) {
+        const result = await this.prisma.$transaction(async (tx) => {
+            const withdrawal = await tx.commercialLotWithdrawal.findFirst({
+                where: {
+                    id: withdrawalId,
+                    purchaseOrderId,
+                    status: CommercialLotWithdrawalStatus.DRAFT,
+                },
+                include: { purchaseOrder: { select: { orderNo: true, createdById: true } } },
+            })
+            if (!withdrawal) return { count: 0 }
+            const updated = await tx.commercialLotWithdrawal.updateMany({
+                where: { id: withdrawal.id, status: CommercialLotWithdrawalStatus.DRAFT },
+                data: {
+                    status: CommercialLotWithdrawalStatus.CANCELLED,
+                    version: { increment: 1 },
+                },
+            })
+            if (updated.count) {
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: PURCHASE_NOTIFICATION_EVENTS.WITHDRAWAL_CANCELLED,
+                        aggregateType: 'COMMERCIAL_PURCHASE_WITHDRAWAL',
+                        aggregateId: withdrawal.id,
+                        dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.WITHDRAWAL_CANCELLED}:${withdrawal.id}`,
+                        payload: {
+                            entityType: 'COMMERCIAL_PURCHASE',
+                            entityId: purchaseOrderId,
+                            orderNo: withdrawal.purchaseOrder.orderNo,
+                            withdrawalNo: withdrawal.withdrawalNo,
+                            recipientUserIds: withdrawal.purchaseOrder.createdById
+                                ? [withdrawal.purchaseOrder.createdById]
+                                : [],
+                            excludeUserIds: actorId ? [actorId] : [],
+                        },
+                    },
+                    tx,
+                )
+            }
+            return updated
         })
         if (result.count !== 1) throw new BadRequestException('LOT_WITHDRAWAL_NOT_DRAFT')
         return this.detail(purchaseOrderId)

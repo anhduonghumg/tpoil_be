@@ -25,17 +25,23 @@ export class AppBootstrapService {
         const now = new Date()
         const month = now.getMonth() + 1
         const permissions = authSession?.permissions ?? []
-        const canSeeBankingNotifications = permissions.some((code) => code === 'system.rbac.admin' || code.startsWith('banking.'))
-        const canSeePurchaseNotifications = permissions.some((code) => code === 'system.rbac.admin' || code.startsWith('purchases.'))
+        const roleNames = (authSession?.roles ?? []).map((role: any) => (typeof role === 'string' ? role : `${role.code ?? ''} ${role.name ?? ''}`)).join(' ')
+        const canSeeBankingNotifications = /bank|ngân hàng|ngan hang/i.test(roleNames) || permissions.some((code) => code === 'system.rbac.admin' || code.startsWith('banking.'))
+        const canSeePurchaseNotifications = /purchas|mua hàng|mua hang/i.test(roleNames) || permissions.some((code) => code === 'system.rbac.admin' || code.startsWith('purchases.'))
+        const canApprovePayments =
+            permissions.includes('system.rbac.admin') ||
+            permissions.includes('purchases.payment_requests.approve') ||
+            (authSession?.roles ?? []).some((role: any) => /director|giám đốc|giam doc/i.test(typeof role === 'string' ? role : `${role.code ?? ''} ${role.name ?? ''}`))
         const recentPaymentThreshold = new Date()
         recentPaymentThreshold.setDate(recentPaymentThreshold.getDate() - 7)
 
-        const [birthdays, contractsExpiry, pendingTermPayments, paidTermPayments] = await Promise.all([
+        const [birthdays, contractsExpiry, pendingTermPayments, paidTermPayments, directorPendingCount, bankPendingCount, purchaseApprovedCount, purchaseReturnedCount] = await Promise.all([
             this.employeesService.birthdays(month),
             this.contractsService.getContractExpiryCounts(),
             canSeeBankingNotifications
                 ? this.prisma.purchaseTermPaymentRequest.count({
                       where: {
+                          supplierInvoiceId: null,
                           status: {
                               in: [TermPaymentRequestStatus.DRAFT, TermPaymentRequestStatus.SUBMITTED],
                           },
@@ -56,13 +62,37 @@ export class AppBootstrapService {
                 : Promise.resolve(0),
             canSeePurchaseNotifications
                 ? this.prisma.purchaseTermPaymentRequest.count({
-                      where: {
-                          status: {
+                    where: {
+                        supplierInvoiceId: null,
+                        status: {
                               in: [TermPaymentRequestStatus.PAID, TermPaymentRequestStatus.PARTIALLY_PAID],
                           },
                           updatedAt: {
                               gte: recentPaymentThreshold,
                           },
+                      },
+                  })
+                : Promise.resolve(0),
+            canApprovePayments
+                ? this.prisma.purchaseTermPaymentRequest.count({
+                      where: { supplierInvoiceId: { not: null }, status: TermPaymentRequestStatus.PENDING_DIRECTOR_APPROVAL },
+                  })
+                : Promise.resolve(0),
+            canSeeBankingNotifications
+                ? this.prisma.purchaseTermPaymentRequest.count({
+                      where: { supplierInvoiceId: { not: null }, status: TermPaymentRequestStatus.SUBMITTED },
+                  })
+                : Promise.resolve(0),
+            canSeePurchaseNotifications
+                ? this.prisma.purchaseTermPaymentRequest.count({
+                      where: { supplierInvoiceId: { not: null }, status: TermPaymentRequestStatus.SUBMITTED },
+                  })
+                : Promise.resolve(0),
+            canSeePurchaseNotifications
+                ? this.prisma.purchaseTermPaymentRequest.count({
+                      where: {
+                          supplierInvoiceId: { not: null },
+                          status: { in: [TermPaymentRequestStatus.DIRECTOR_REJECTED, TermPaymentRequestStatus.BANK_RETURNED] },
                       },
                   })
                 : Promise.resolve(0),
@@ -79,6 +109,12 @@ export class AppBootstrapService {
                 },
                 termPurchasePayments: {
                     paidCount: paidTermPayments,
+                },
+                commercialPayments: {
+                    directorPendingCount,
+                    bankPendingCount,
+                    purchaseApprovedCount,
+                    purchaseReturnedCount,
                 },
                 birthdays: {
                     month,

@@ -13,6 +13,7 @@ import { CronModule } from './modules/cron/cron.module'
 import { PriceBulletinsWorkerModule } from './modules/price-bulletins/price-bulletins.worker.module'
 import { SupplierInvoicesWorkerModule } from './modules/purchases/supplier-invoices/supplier-invoices.worker.module'
 import { PurchaseOrdersWorkerModule } from './modules/purchases/purchase-orders/purchase-orders.worker.module'
+import { NotificationsModule } from './modules/notifications/notifications.module'
 
 @Module({
     imports: [
@@ -30,6 +31,7 @@ import { PurchaseOrdersWorkerModule } from './modules/purchases/purchase-orders/
         JobArtifactsModule,
         PriceBulletinsWorkerModule,
         PurchaseOrdersWorkerModule,
+        NotificationsModule,
     ],
 })
 export class WorkerModule {}

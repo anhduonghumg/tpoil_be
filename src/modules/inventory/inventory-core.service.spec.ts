@@ -43,7 +43,7 @@ describe('InventoryCoreService', () => {
 
     it('rejects a posting that would make lot stock negative', async () => {
         const tx = {
-            $queryRaw: jest.fn(),
+            $executeRaw: jest.fn(),
             inventoryPosting: {
                 findUnique: jest.fn().mockResolvedValue(null),
                 create: jest.fn().mockResolvedValue({ id: 'posting-1', entries: [] }),
@@ -88,7 +88,7 @@ describe('InventoryCoreService', () => {
 
     it('updates stock and availability in the same posting transaction', async () => {
         const tx = {
-            $queryRaw: jest.fn(),
+            $executeRaw: jest.fn(),
             inventoryPosting: {
                 findUnique: jest.fn().mockResolvedValue(null),
                 create: jest.fn().mockResolvedValue({ id: 'posting-1', entries: [] }),
@@ -148,7 +148,7 @@ describe('InventoryCoreService', () => {
 
     it('rejects reservation when all on-hand stock is already restricted', async () => {
         const tx = {
-            $queryRaw: jest.fn(),
+            $executeRaw: jest.fn(),
             inventoryReservationEvent: {
                 findUnique: jest.fn().mockResolvedValue(null),
                 create: jest.fn(),

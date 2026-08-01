@@ -3,6 +3,7 @@ import {
     ArrayMinSize,
     IsArray,
     IsDateString,
+    IsEnum,
     IsInt,
     IsNumber,
     IsOptional,
@@ -11,6 +12,7 @@ import {
     Min,
     ValidateNested,
 } from 'class-validator'
+import { CommercialLotWithdrawalStatus } from '@prisma/client'
 
 export class ListCommercialLotsQueryDto {
     @IsOptional()
@@ -32,6 +34,28 @@ export class ListCommercialLotsQueryDto {
     @IsOptional()
     @IsDateString()
     dateTo?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    page?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    limit?: number
+}
+
+export class ListLotWithdrawalsQueryDto {
+    @IsOptional()
+    @IsString()
+    keyword?: string
+
+    @IsOptional()
+    @IsEnum(CommercialLotWithdrawalStatus)
+    status?: CommercialLotWithdrawalStatus
 
     @IsOptional()
     @Type(() => Number)

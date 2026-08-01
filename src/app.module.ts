@@ -34,6 +34,8 @@ import { PurchaseOrdersModule } from './modules/purchases/purchase-orders/purcha
 import { GoodsReceiptsModule } from './modules/purchases/goods-receipts/goods-receipts.module'
 import { SupplierInvoicesModule } from './modules/purchases/supplier-invoices/supplier-invoices.module'
 import { CommercialLotsModule } from './modules/purchases/commercial-lots/commercial-lots.module'
+import { CommercialPaymentsModule } from './modules/purchases/commercial-payments/commercial-payments.module'
+import { SalesOrdersModule } from './modules/sales/sales-orders.module'
 import { SupplierSettlementsModule } from './modules/settlements/supplier-settlements.module'
 import { ProductsModule } from './modules/products/products.module'
 import { SupplierLocationsModule } from './modules/supplier-locations/supplier-locations.module'
@@ -42,6 +44,8 @@ import { BackgroundJobsModule } from './modules/background-jobs/background-jobs.
 import { JobArtifactsModule } from './modules/job-artifacts/job-artifacts.module'
 import { BankingModule } from './modules/banking/banking.module'
 import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module'
+import { VatRatesModule } from './modules/vat-rates/vat-rates.module'
+import { NotificationsModule } from './modules/notifications/notifications.module'
 
 @Module({
     imports: [
@@ -79,6 +83,8 @@ import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module
         GoodsReceiptsModule,
         SupplierInvoicesModule,
         CommercialLotsModule,
+        CommercialPaymentsModule,
+        SalesOrdersModule,
         SupplierSettlementsModule,
         ProductsModule,
         SupplierLocationsModule,
@@ -88,6 +94,8 @@ import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module
         BankingModule,
         BankImportsModule,
         BankAccountsModule,
+        VatRatesModule,
+        NotificationsModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],

@@ -1,4 +1,5 @@
 import { IsDateString, IsInt, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
+import { Type } from 'class-transformer'
 
 export class CreateGoodsReceiptAutoConfirmDto {
     @IsUUID()
@@ -57,10 +58,56 @@ export class ListGoodsReceiptsQueryDto {
     supplierCustomerId?: string
 
     @IsOptional()
+    @IsUUID()
+    warehouseId?: string
+
+    @IsOptional()
+    @IsUUID()
+    productId?: string
+
+    @IsOptional()
+    @IsString()
+    status?: string
+
+    @IsOptional()
+    @IsString()
+    keyword?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateFrom?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateTo?: string
+
+    @IsOptional()
+    @Type(() => Number)
     @IsInt()
     page?: number
 
     @IsOptional()
+    @Type(() => Number)
     @IsInt()
     limit?: number
+}
+
+export class GoodsReceiptStockCardQueryDto {
+    @IsUUID()
+    warehouseId: string
+
+    @IsUUID()
+    productId: string
+
+    @IsOptional()
+    @IsUUID()
+    ownerPartyId?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateFrom?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateTo?: string
 }

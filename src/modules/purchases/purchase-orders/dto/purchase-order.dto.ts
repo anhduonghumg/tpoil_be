@@ -122,8 +122,9 @@ export class PurchaseOrderPaymentPlanDto {
 }
 
 export class CreatePurchaseOrderDto {
+    @IsOptional()
     @IsString()
-    orderNo!: string
+    orderNo?: string
 
     @IsUUID()
     supplierCustomerId!: string

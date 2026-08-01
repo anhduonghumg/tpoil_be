@@ -11,10 +11,18 @@ export interface TermPurchasePaymentNotifications {
     paidCount: number
 }
 
+export interface CommercialPaymentNotifications {
+    directorPendingCount: number
+    bankPendingCount: number
+    purchaseApprovedCount: number
+    purchaseReturnedCount: number
+}
+
 export interface NotificationsPayload {
     contracts: ContractsNotifications
     termPayments: TermPaymentsNotifications
     termPurchasePayments: TermPurchasePaymentNotifications
+    commercialPayments: CommercialPaymentNotifications
     // birthdays?: BirthdaysNotifications;
 }
 
@@ -23,6 +31,7 @@ export interface AppBootstrapResponse {
         contracts: ContractsNotifications
         termPayments: TermPaymentsNotifications
         termPurchasePayments: TermPurchasePaymentNotifications
+        commercialPayments: CommercialPaymentNotifications
         birthdays: {
             month: number
             count: number

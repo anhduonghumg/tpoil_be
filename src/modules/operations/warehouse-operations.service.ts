@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import {
+    CommercialLotWithdrawalStatus,
     ExpectedSupplyStatus,
     InventoryDocumentStatus,
     InventoryMovementStatus,
@@ -290,7 +291,23 @@ export class WarehouseOperationsService {
             this.prisma.commercialLotPosition.findMany({
             where: {
                 invoicedQty: { gt: new Prisma.Decimal(0) },
-                ...(q.supplierLocationId ? { plannedWarehouseId: q.supplierLocationId } : {}),
+                ...(q.supplierLocationId
+                    ? {
+                          OR: [
+                              { plannedWarehouseId: q.supplierLocationId },
+                              {
+                                  withdrawalLines: {
+                                      some: {
+                                          withdrawal: {
+                                              status: CommercialLotWithdrawalStatus.CONFIRMED,
+                                              destinationWarehouseId: q.supplierLocationId,
+                                          },
+                                      },
+                                  },
+                              },
+                          ],
+                      }
+                    : {}),
                 ...(q.productId ? { productId: q.productId } : {}),
             },
             include: {
@@ -300,6 +317,18 @@ export class WarehouseOperationsService {
                 purchaseOrderLine: {
                     select: {
                         purchaseOrder: { select: { id: true, orderNo: true } },
+                    },
+                },
+                withdrawalLines: {
+                    where: { withdrawal: { status: CommercialLotWithdrawalStatus.CONFIRMED } },
+                    select: {
+                        actualQty: true,
+                        withdrawal: {
+                            select: {
+                                destinationWarehouseId: true,
+                                destinationWarehouse: { select: { id: true, code: true, name: true } },
+                            },
+                        },
                     },
                 },
             },
@@ -316,7 +345,7 @@ export class WarehouseOperationsService {
                     purchaseOrder: {
                         orderType: 'LOT',
                         bizType: 'COMMERCIAL',
-                        status: { in: ['APPROVED', 'IN_PROGRESS'] },
+                        status: { in: ['DRAFT', 'APPROVED', 'IN_PROGRESS'] },
                     },
                 },
                 include: {
@@ -340,40 +369,61 @@ export class WarehouseOperationsService {
         ])
 
         const invoiceRows = positions
-            .map((position) => {
-                const remainingQty = position.invoicedQty.minus(position.withdrawnQty)
-                if (remainingQty.lessThanOrEqualTo(0)) return null
-
-                const accountingValue = position.invoicedQty.isZero()
-                    ? new Prisma.Decimal(0)
-                    : position.accountingValue.mul(remainingQty).div(position.invoicedQty)
+            .flatMap((position) => {
+                const allocatedByWarehouse = new Map<
+                    string,
+                    { warehouse: typeof position.plannedWarehouse; qty: Prisma.Decimal }
+                >([
+                    [
+                        position.plannedWarehouseId,
+                        { warehouse: position.plannedWarehouse, qty: new Prisma.Decimal(position.invoicedQty) },
+                    ],
+                ])
+                for (const line of position.withdrawalLines) {
+                    const warehouseId = line.withdrawal.destinationWarehouseId
+                    if (warehouseId === position.plannedWarehouseId) continue
+                    const planned = allocatedByWarehouse.get(position.plannedWarehouseId)!
+                    planned.qty = planned.qty.minus(line.actualQty)
+                    const destination = allocatedByWarehouse.get(warehouseId)
+                    allocatedByWarehouse.set(warehouseId, {
+                        warehouse: line.withdrawal.destinationWarehouse,
+                        qty: (destination?.qty ?? new Prisma.Decimal(0)).plus(line.actualQty),
+                    })
+                }
                 const isExportable = position.stockState === 'EXPORTABLE'
                 const isTemporary = position.stockState === 'TEMPORARY_EXPORT'
 
-                return {
-                    id: `commercial-lot:${position.id}`,
-                    source: 'COMMERCIAL_LOT',
-                    includeInAccounting: true,
-                    commercialLotPositionId: position.id,
-                    supplierLocationId: position.plannedWarehouseId,
-                    supplierLocation: position.plannedWarehouse,
-                    supplier: position.supplier,
-                    product: position.product,
-                    orderNo: position.purchaseOrderLine.purchaseOrder.orderNo,
-                    stockState: position.stockState,
-                    accountingQty: remainingQty,
-                    accountingValue,
-                    exportableQty: isExportable ? remainingQty : new Prisma.Decimal(0),
-                    temporaryExportQty: isTemporary ? remainingQty : new Prisma.Decimal(0),
-                    nonExportableQty: !isExportable && !isTemporary ? remainingQty : new Prisma.Decimal(0),
-                }
+                return [...allocatedByWarehouse.entries()]
+                    .filter(([, allocation]) => allocation.qty.greaterThan(0))
+                    .map(([warehouseId, allocation]) => {
+                        const accountingValue = position.invoicedQty.isZero()
+                            ? new Prisma.Decimal(0)
+                            : position.accountingValue.mul(allocation.qty).div(position.invoicedQty)
+                        return {
+                            id: `commercial-lot:${position.id}:warehouse:${warehouseId}`,
+                            source: 'COMMERCIAL_LOT',
+                            includeInAccounting: true,
+                            commercialLotPositionId: position.id,
+                            supplierLocationId: warehouseId,
+                            supplierLocation: allocation.warehouse,
+                            supplier: position.supplier,
+                            product: position.product,
+                            orderNo: position.purchaseOrderLine.purchaseOrder.orderNo,
+                            stockState: position.stockState,
+                            accountingQty: allocation.qty,
+                            accountingValue,
+                            exportableQty: isExportable ? allocation.qty : new Prisma.Decimal(0),
+                            temporaryExportQty: isTemporary ? allocation.qty : new Prisma.Decimal(0),
+                            nonExportableQty: !isExportable && !isTemporary ? allocation.qty : new Prisma.Decimal(0),
+                        }
+                    })
             })
-            .filter((row): row is NonNullable<typeof row> => row !== null)
 
         const pendingOrderRows = pendingOrderLines
             .map((line) => {
                 const invoicedQty = line.commercialLotPosition?.invoicedQty ?? new Prisma.Decimal(0)
-                const pendingInvoiceQty = line.orderedQty.minus(invoicedQty)
+                const expectedQty = line.actualReceivedQty ?? line.orderedQty
+                const pendingInvoiceQty = expectedQty.minus(invoicedQty)
                 if (pendingInvoiceQty.lessThanOrEqualTo(0)) return null
 
                 return {

@@ -26,6 +26,8 @@ import * as puppeteer from 'puppeteer-core'
 import { renderPurchaseOrderPrintHtml } from './templates/purchase-order-print.template'
 import { Browser } from 'puppeteer-core'
 import { PaymentRequestPrintData, renderPaymentRequestPrintHtml } from './templates/payment-request-print.template'
+import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
+import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
 
 @Injectable()
 export class PurchaseOrdersService {
@@ -34,6 +36,7 @@ export class PurchaseOrdersService {
         private readonly contractCheck: ContractCheckService,
         private readonly backgroundJobsService: BackgroundJobsService,
         private readonly jobArtifactsService: JobArtifactsService,
+        private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
     private async renderMergedPdfFromHtmls(htmls: string[]): Promise<Buffer> {
@@ -153,6 +156,56 @@ export class PurchaseOrdersService {
         return d
     }
 
+    private commercialOrderPeriod(orderDate: Date) {
+        const year = String(orderDate.getUTCFullYear()).slice(-2)
+        const month = String(orderDate.getUTCMonth() + 1).padStart(2, '0')
+        return `${year}${month}`
+    }
+
+    private async generateCommercialOrderNo(supplierCustomerId: string, orderDate: Date) {
+        const supplier = await this.prisma.party.findUnique({
+            where: { id: supplierCustomerId },
+            select: { id: true, code: true },
+        })
+        if (!supplier?.code?.trim()) throw new BadRequestException('SUPPLIER_CODE_REQUIRED')
+
+        const sequence = await this.prisma.documentSequence.upsert({
+            where: {
+                moduleCode_period: {
+                    moduleCode: 'PURCHASE_COMMERCIAL',
+                    period: this.commercialOrderPeriod(orderDate),
+                },
+            },
+            create: {
+                moduleCode: 'PURCHASE_COMMERCIAL',
+                period: this.commercialOrderPeriod(orderDate),
+                currentNo: 1,
+            },
+            update: { currentNo: { increment: 1 } },
+        })
+        const supplierCode = supplier.code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+        return `TM${this.commercialOrderPeriod(orderDate)}${String(sequence.currentNo).padStart(4, '0')}${supplierCode}`
+    }
+
+    private async refreshCommercialOrderNo(
+        currentOrderNo: string,
+        currentSupplierCustomerId: string,
+        supplierCustomerId: string,
+    ) {
+        const suppliers = await this.prisma.party.findMany({
+            where: { id: { in: [currentSupplierCustomerId, supplierCustomerId] } },
+            select: { id: true, code: true },
+        })
+        const normalize = (code?: string | null) => code?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+        const previousCode = normalize(suppliers.find((item) => item.id === currentSupplierCustomerId)?.code)
+        const nextCode = normalize(suppliers.find((item) => item.id === supplierCustomerId)?.code)
+        if (!nextCode) throw new BadRequestException('SUPPLIER_CODE_REQUIRED')
+        const prefix = previousCode && currentOrderNo.toUpperCase().endsWith(previousCode)
+            ? currentOrderNo.slice(0, -previousCode.length)
+            : currentOrderNo.replace(/[A-Z]+$/i, '')
+        return `${prefix}${nextCode}`
+    }
+
     private async isDepartmentHead(userId?: string | null) {
         if (!userId) return false
         const now = new Date()
@@ -208,6 +261,32 @@ export class PurchaseOrdersService {
             throw new BadRequestException('PURCHASE_ORDER_WAREHOUSES_MUST_BELONG_TO_ONE_LEGAL_ENTITY')
         }
         return legalEntityIds[0]
+    }
+
+    private async createExpectedSupplies(
+        tx: Prisma.TransactionClient,
+        args: { purchaseOrderId: string; legalEntityId: string; expectedAt: Date | null; lines: Array<{ id: string; productId: string; receivingWarehouseId: string | null; orderedQty: Prisma.Decimal | number }> },
+    ) {
+        const legalEntity = await tx.legalEntity.findUnique({
+            where: { id: args.legalEntityId },
+            select: { partyId: true },
+        })
+        if (!legalEntity) throw new BadRequestException('LEGAL_ENTITY_NOT_FOUND')
+
+        await tx.expectedSupply.createMany({
+            data: args.lines.map((line) => {
+                if (!line.receivingWarehouseId) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+                return {
+                    expectedNo: `EXP-PO-${args.purchaseOrderId}-${line.id}`,
+                    warehouseId: line.receivingWarehouseId,
+                    productId: line.productId,
+                    ownerPartyId: legalEntity.partyId,
+                    purchaseOrderLineId: line.id,
+                    expectedActualQty: line.orderedQty,
+                    expectedAt: args.expectedAt,
+                }
+            }),
+        })
     }
 
     private mapPurchaseOrder<T extends Record<string, any>>(order: T) {
@@ -408,7 +487,7 @@ export class PurchaseOrdersService {
     }
 
     async create(dto: {
-        orderNo: string
+        orderNo?: string
         supplierCustomerId: string
         supplierLocationId?: string
         orderType: any
@@ -436,9 +515,6 @@ export class PurchaseOrdersService {
             taxRate?: number
         }>
     }, actorId?: string | null) {
-        const orderNo = (dto.orderNo ?? '').trim()
-        if (!orderNo) throw new BadRequestException('ORDER_NO_REQUIRED')
-
         const orderDate = this.toDateOrThrow(dto.orderDate, 'ORDER_DATE_INVALID')
         const expectedDate = dto.expectedDate ? this.toDateOrThrow(dto.expectedDate, 'EXPECTED_DATE_INVALID') : null
 
@@ -554,10 +630,12 @@ export class PurchaseOrdersService {
         })
         const autoApproved = await this.isDepartmentHead(actorId)
         const now = new Date()
+        const orderNo = await this.generateCommercialOrderNo(dto.supplierCustomerId, orderDate)
 
         // 8) create PO
-        const po = await this.prisma.purchaseOrder.create({
-            data: {
+        const po = await this.prisma.$transaction(async (tx) => {
+            const created = await tx.purchaseOrder.create({
+                data: {
                 orderNo,
                 legalEntityId,
                 supplierCustomerId: dto.supplierCustomerId,
@@ -595,21 +673,158 @@ export class PurchaseOrdersService {
                     })),
                 },
             },
-            include: {
-                supplier: { select: { id: true, name: true, code: true } },
-                paymentPlans: {
-                    orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
-                },
-                lines: {
-                    include: {
-                        receivingWarehouse: { select: { id: true, code: true, name: true } },
-                        product: { select: { id: true, name: true, code: true } },
+                include: {
+                    supplier: { select: { id: true, name: true, code: true } },
+                    paymentPlans: {
+                        orderBy: [{ sortOrder: 'asc' }, { dueDate: 'asc' }],
+                    },
+                    lines: {
+                        include: {
+                            receivingWarehouse: { select: { id: true, code: true, name: true } },
+                            product: { select: { id: true, name: true, code: true } },
+                        },
                     },
                 },
-            },
+            })
+            await this.createExpectedSupplies(tx, {
+                purchaseOrderId: created.id,
+                legalEntityId,
+                expectedAt: expectedDate ?? orderDate,
+                lines: created.lines,
+            })
+            if (dto.orderType === 'LOT' && !autoApproved) {
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: PURCHASE_NOTIFICATION_EVENTS.ORDER_PENDING_APPROVAL,
+                        aggregateType: 'COMMERCIAL_PURCHASE',
+                        aggregateId: created.id,
+                        dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.ORDER_PENDING_APPROVAL}:${created.id}`,
+                        payload: {
+                            entityType: 'COMMERCIAL_PURCHASE',
+                            entityId: created.id,
+                            orderNo: created.orderNo,
+                            actionRequired: true,
+                            recipientPermissionCodes: ['purchases.approve'],
+                            excludeUserIds: actorId ? [actorId] : [],
+                        },
+                    },
+                    tx,
+                )
+            }
+            return created
         })
 
         return { po: this.mapPurchaseOrder(po), warnings: { contract: warning } }
+    }
+
+    async updateDraft(id: string, dto: any) {
+        const current = await this.prisma.purchaseOrder.findUnique({ where: { id }, include: { supplierInvoices: { select: { id: true } } } })
+        if (!current) throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
+        if (current.status !== PurchaseOrderStatus.DRAFT || current.supplierInvoices.length) throw new BadRequestException('ONLY_DRAFT_PURCHASE_ORDER_CAN_BE_UPDATED')
+
+        const orderDate = this.toDateOrThrow(dto.orderDate, 'ORDER_DATE_INVALID')
+        const expectedDate = dto.expectedDate ? this.toDateOrThrow(dto.expectedDate, 'EXPECTED_DATE_INVALID') : null
+        const lines = (dto.lines ?? []).map((line: any) => ({
+            productId: line.productId,
+            orderedQty: Number(line.orderedQty) || 0,
+            supplierLocationId: line.supplierLocationId,
+            unitPrice: line.unitPrice == null ? null : Number(line.unitPrice),
+            discountAmount: Number(line.discountAmount ?? 0),
+            taxRate: line.taxRate == null ? null : Number(line.taxRate),
+        })).filter((line: any) => line.productId && line.orderedQty > 0)
+        if (!lines.length || lines.some((line: any) => !line.supplierLocationId)) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+
+        const locationIds = Array.from(new Set(lines.map((line: any) => line.supplierLocationId))) as string[]
+        const legalEntityId = await this.assertLocationsBelongToSupplier({ supplierCustomerId: dto.supplierCustomerId, locationIds })
+        const contract = await this.contractCheck.requireActivePurchaseContract({ supplierCustomerId: dto.supplierCustomerId, onDate: orderDate })
+        const orderNo = current.supplierCustomerId === dto.supplierCustomerId
+            ? current.orderNo
+            : await this.refreshCommercialOrderNo(current.orderNo, current.supplierCustomerId, dto.supplierCustomerId)
+        const plans = dto.paymentMode === 'POSTPAID' ? (dto.paymentPlans ?? []).map((plan: any, index: number) => ({ dueDate: this.toDateOrThrow(plan.dueDate, 'PAYMENT_PLAN_DUE_DATE_INVALID'), amount: new Prisma.Decimal(Number(plan.amount) || 0), note: plan.note?.trim() || null, sortOrder: plan.sortOrder ?? index })).filter((plan: any) => plan.amount.gt(0)) : []
+        if (dto.paymentMode === 'POSTPAID' && !plans.length) throw new BadRequestException('PAYMENT_PLANS_REQUIRED')
+
+        await this.prisma.$transaction(async (tx) => {
+            await tx.expectedSupply.deleteMany({ where: { purchaseOrderLine: { purchaseOrderId: id } } })
+            await tx.purchaseOrderLine.deleteMany({ where: { purchaseOrderId: id } })
+            await tx.purchaseOrderPaymentPlan.deleteMany({ where: { purchaseOrderId: id } })
+            const updated = await tx.purchaseOrder.update({ where: { id }, data: {
+                orderNo,
+                supplierCustomerId: dto.supplierCustomerId, legalEntityId, contractId: contract.id, contractNo: contract.code,
+                paymentMode: dto.paymentMode, paymentTermType: dto.paymentTermType ?? PaymentTermType.SAME_DAY,
+                paymentTermDays: dto.paymentMode === 'POSTPAID' ? Number(dto.paymentTermDays) || null : null,
+                orderDate, expectedDate, note: dto.note?.trim() || null,
+                paymentPlans: { create: plans },
+                lines: { create: lines.map((line: any, index: number) => ({ lineNo: index + 1, productId: line.productId, receivingWarehouseId: line.supplierLocationId, orderedQty: new Prisma.Decimal(line.orderedQty), unitPrice: line.unitPrice == null ? null : new Prisma.Decimal(line.unitPrice), discountAmount: new Prisma.Decimal(line.discountAmount), taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate) })) },
+            }, include: { lines: true } })
+            await this.createExpectedSupplies(tx, {
+                purchaseOrderId: id,
+                legalEntityId,
+                expectedAt: expectedDate ?? orderDate,
+                lines: updated.lines,
+            })
+        })
+        return this.detail(id)
+    }
+
+    async updateActualReceived(id: string, rows: Array<{ purchaseOrderLineId: string; actualReceivedQty: number }>) {
+        if (!rows.length) throw new BadRequestException('ACTUAL_RECEIVED_LINES_REQUIRED')
+
+        const order = await this.prisma.purchaseOrder.findUnique({
+            where: { id },
+            include: {
+                supplierInvoices: { select: { id: true } },
+                lines: { select: { id: true, productId: true, receivingWarehouseId: true } },
+            },
+        })
+        if (!order) throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
+        if (order.supplierInvoices.length) throw new BadRequestException('ACTUAL_RECEIVED_LOCKED_AFTER_INVOICE')
+        if (new Set(rows.map((row) => row.purchaseOrderLineId)).size !== rows.length) {
+            throw new BadRequestException('ACTUAL_RECEIVED_LINE_DUPLICATED')
+        }
+
+        const validLineIds = new Set(order.lines.map((line) => line.id))
+        for (const row of rows) {
+            if (!validLineIds.has(row.purchaseOrderLineId) || !Number.isFinite(Number(row.actualReceivedQty)) || Number(row.actualReceivedQty) < 0) {
+                throw new BadRequestException('ACTUAL_RECEIVED_LINE_INVALID')
+            }
+        }
+
+        await this.prisma.$transaction(async (tx) => {
+            const legalEntity = await tx.legalEntity.findUnique({
+                where: { id: order.legalEntityId },
+                select: { partyId: true },
+            })
+            if (!legalEntity) throw new BadRequestException('LEGAL_ENTITY_NOT_FOUND')
+
+            const linesById = new Map(order.lines.map((line) => [line.id, line]))
+            for (const row of rows) {
+                const qty = new Prisma.Decimal(row.actualReceivedQty)
+                const line = linesById.get(row.purchaseOrderLineId)!
+                await tx.purchaseOrderLine.update({
+                    where: { id: row.purchaseOrderLineId },
+                    data: { actualReceivedQty: qty },
+                })
+                const expected = await tx.expectedSupply.updateMany({
+                    where: { purchaseOrderLineId: row.purchaseOrderLineId },
+                    data: { expectedActualQty: qty, version: { increment: 1 } },
+                })
+                if (expected.count === 0) {
+                    if (!line.receivingWarehouseId) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+                    await tx.expectedSupply.create({
+                        data: {
+                            expectedNo: `EXP-PO-${order.id}-${line.id}`,
+                            warehouseId: line.receivingWarehouseId,
+                            productId: line.productId,
+                            ownerPartyId: legalEntity.partyId,
+                            purchaseOrderLineId: line.id,
+                            expectedActualQty: qty,
+                            expectedAt: order.expectedDate ?? order.orderDate,
+                        },
+                    })
+                }
+            }
+        })
+        return this.detail(id)
     }
 
     async approve(id: string, actorId?: string | null) {
@@ -629,30 +844,52 @@ export class PurchaseOrdersService {
             onDate: po.orderDate,
         })
 
-        const approved = await this.prisma.purchaseOrder.update({
-            where: { id },
-            data: {
-                status: PurchaseOrderStatus.APPROVED,
-                contractId: contract.id,
-                contractNo: contract.code,
-                approvedById: actorId ?? null,
-                approvedAt: new Date(),
-            },
-            include: {
-                supplier: { select: { id: true, name: true, code: true } },
-                lines: {
-                    include: {
-                        product: { select: { id: true, code: true, name: true, uom: true } },
-                        receivingWarehouse: { select: { id: true, code: true, name: true } },
+        const approved = await this.prisma.$transaction(async (tx) => {
+            const updated = await tx.purchaseOrder.update({
+                where: { id },
+                data: {
+                    status: PurchaseOrderStatus.APPROVED,
+                    contractId: contract.id,
+                    contractNo: contract.code,
+                    approvedById: actorId ?? null,
+                    approvedAt: new Date(),
+                },
+                include: {
+                    supplier: { select: { id: true, name: true, code: true } },
+                    lines: {
+                        include: {
+                            product: { select: { id: true, code: true, name: true, uom: true } },
+                            receivingWarehouse: { select: { id: true, code: true, name: true } },
+                        },
                     },
                 },
-            },
+            })
+            if (updated.orderType === 'LOT') {
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: PURCHASE_NOTIFICATION_EVENTS.ORDER_APPROVED,
+                        aggregateType: 'COMMERCIAL_PURCHASE',
+                        aggregateId: updated.id,
+                        dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.ORDER_APPROVED}:${updated.id}:${updated.approvedAt?.toISOString()}`,
+                        payload: {
+                            entityType: 'COMMERCIAL_PURCHASE',
+                            entityId: updated.id,
+                            orderNo: updated.orderNo,
+                            resolvedActions: ['REVIEW_PURCHASE_ORDER'],
+                            recipientUserIds: updated.createdById ? [updated.createdById] : [],
+                            excludeUserIds: actorId ? [actorId] : [],
+                        },
+                    },
+                    tx,
+                )
+            }
+            return updated
         })
 
         return { po: this.mapPurchaseOrder(approved), warnings: { contract: warning } }
     }
 
-    async cancel(id: string) {
+    async cancel(id: string, actorId?: string | null) {
         const po = await this.prisma.purchaseOrder.findUnique({
             where: { id },
             include: {
@@ -693,9 +930,31 @@ export class PurchaseOrdersService {
             throw new BadRequestException('PO_HAS_SUPPLIER_INVOICES')
         }
 
-        return this.prisma.purchaseOrder.update({
-            where: { id },
-            data: { status: PurchaseOrderStatus.CANCELLED },
+        return this.prisma.$transaction(async (tx) => {
+            const updated = await tx.purchaseOrder.update({
+                where: { id },
+                data: { status: PurchaseOrderStatus.CANCELLED },
+            })
+            if (updated.orderType === 'LOT') {
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: PURCHASE_NOTIFICATION_EVENTS.ORDER_CANCELLED,
+                        aggregateType: 'COMMERCIAL_PURCHASE',
+                        aggregateId: updated.id,
+                        dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.ORDER_CANCELLED}:${updated.id}`,
+                        payload: {
+                            entityType: 'COMMERCIAL_PURCHASE',
+                            entityId: updated.id,
+                            orderNo: updated.orderNo,
+                            resolvedActions: ['REVIEW_PURCHASE_ORDER'],
+                            recipientUserIds: updated.createdById ? [updated.createdById] : [],
+                            excludeUserIds: actorId ? [actorId] : [],
+                        },
+                    },
+                    tx,
+                )
+            }
+            return updated
         })
     }
 
@@ -858,6 +1117,24 @@ export class PurchaseOrdersService {
             where: { id },
             include: {
                 supplier: { select: { id: true, name: true, code: true } },
+                salesOrder: {
+                    select: {
+                        id: true,
+                        orderNo: true,
+                        orderDate: true,
+                        status: true,
+                        customer: { select: { id: true, code: true, name: true } },
+                        lines: {
+                            orderBy: { lineNo: 'asc' },
+                            select: {
+                                id: true,
+                                productId: true,
+                                orderedActualQty: true,
+                                product: { select: { id: true, code: true, name: true, uom: true } },
+                            },
+                        },
+                    },
+                },
                 receipts: {
                     select: {
                         id: true,
@@ -1655,6 +1932,53 @@ export class PurchaseOrdersService {
             deputyDirectorName: 'Nguyễn Ngọc Mai',
             requesterSignName: 'Lê Thị Hoài',
         }
+    }
+
+    async printPaymentRequestByRequestId(requestId: string): Promise<Buffer> {
+        const request = await this.prisma.purchaseTermPaymentRequest.findUnique({
+            where: { id: requestId },
+            include: {
+                purchaseOrder: {
+                    include: {
+                        supplier: { select: { code: true, name: true } },
+                    },
+                },
+                supplierInvoice: { select: { invoiceNo: true } },
+            },
+        })
+        if (!request) throw new NotFoundException('PAYMENT_REQUEST_NOT_FOUND')
+
+        const supplier = request.purchaseOrder.supplier
+        const amount = Number(request.amountVnd ?? 0)
+        const data: PaymentRequestPrintData = {
+            cityText: 'Thanh Hóa',
+            printDate: new Date(),
+            requesterName: 'Lê Thị Hoài',
+            requesterDepartment: 'Mua hàng',
+            beneficiaryName: request.supplierName || supplier?.name || '',
+            beneficiaryAccountNo: '',
+            beneficiaryBankName: '',
+            totalAmount: amount,
+            totalAmountText: this.numberToVietnameseMoney(amount),
+            rows: [
+                {
+                    supplierCode: supplier?.code || '',
+                    orderNo: request.purchaseOrder.orderNo,
+                    note: request.note || request.supplierInvoice?.invoiceNo || '',
+                    amount,
+                    content:
+                        request.content ||
+                        `Thanh toán đề nghị ${request.requestNo} cho ${request.supplierName || supplier?.name || ''}`,
+                },
+            ],
+            bankDepartmentLabel: 'BỘ PHẬN NGÂN HÀNG',
+            purchaseDepartmentLabel: 'BỘ PHẬN MUA HÀNG',
+            deputyDirectorLabel: 'Phó Giám Đốc',
+            requesterLabel: 'Người Đề Nghị',
+            deputyDirectorName: 'Nguyễn Ngọc Mai',
+            requesterSignName: 'Lê Thị Hoài',
+        }
+        return this.renderMergedPdfFromHtmls([renderPaymentRequestPrintHtml(data)])
     }
 
     async printPaymentRequestBatchSync(dto: CreatePurchaseOrderPrintBatchDto): Promise<Buffer> {

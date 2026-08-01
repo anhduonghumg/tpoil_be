@@ -17,6 +17,8 @@ import * as crypto from 'node:crypto'
 import { ARTIFACT_PDF_INPUT, ARTIFACT_PDF_PREVIEW, QB_SUPPLIER_INVOICE } from './jobs/supplier-invoice-queues'
 import { CreateSupplierInvoiceDto } from './dto/supplier-invoice.dto'
 import PdfParse from 'pdf-parse'
+import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
+import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
 
 @Injectable()
 export class SupplierInvoicesService {
@@ -28,6 +30,7 @@ export class SupplierInvoicesService {
         private readonly bgJobs: BackgroundJobsService,
         private readonly artifacts: JobArtifactsService,
         private readonly drive: GoogleDriveService,
+        private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
     private async findExistingFileByChecksum(checksum: string) {
@@ -612,11 +615,17 @@ export class SupplierInvoicesService {
         }
     }
 
-    async post(id: string, payload?: { note?: string }) {
+    async post(id: string, payload?: { note?: string }, actorId?: string | null) {
         await this.prisma.$transaction(async (tx) => {
             const inv = await tx.supplierInvoice.findUnique({
                 where: { id },
-                include: { lines: { include: { receiptLine: true } }, openItem: true },
+                include: {
+                    lines: { include: { receiptLine: true } },
+                    openItem: true,
+                    purchaseOrder: {
+                        select: { id: true, orderNo: true, orderType: true, createdById: true },
+                    },
+                },
             })
             if (!inv) throw new NotFoundException('INVOICE_NOT_FOUND')
             if (inv.status === SupplierInvoiceStatus.POSTED && inv.openItem) return
@@ -661,6 +670,28 @@ export class SupplierInvoicesService {
                     goodsReceiptId,
                     occurredAt: now,
                 })
+            }
+            if (inv.purchaseOrder?.orderType === 'LOT') {
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: PURCHASE_NOTIFICATION_EVENTS.INVOICE_POSTED,
+                        aggregateType: 'COMMERCIAL_PURCHASE_INVOICE',
+                        aggregateId: inv.id,
+                        dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.INVOICE_POSTED}:${inv.id}`,
+                        payload: {
+                            entityType: 'COMMERCIAL_PURCHASE',
+                            entityId: inv.purchaseOrder.id,
+                            orderNo: inv.purchaseOrder.orderNo,
+                            invoiceNo: inv.invoiceNo,
+                            recipientUserIds: inv.purchaseOrder.createdById
+                                ? [inv.purchaseOrder.createdById]
+                                : [],
+                            recipientPermissionPrefixes: ['purchases.'],
+                            excludeUserIds: actorId ? [actorId] : [],
+                        },
+                    },
+                    tx,
+                )
             }
         })
         return this.detail(id)

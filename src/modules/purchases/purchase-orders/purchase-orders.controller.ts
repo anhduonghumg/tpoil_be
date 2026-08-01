@@ -1,5 +1,5 @@
 // src/modules/purchases/purchase-orders/purchase-orders.controller.ts
-import { Body, Controller, Get, NotFoundException, Param, Post, Query, Req, Res, UseGuards, UseInterceptors } from '@nestjs/common'
+import { Body, Controller, Get, NotFoundException, Param, Patch, Post, Query, Req, Res, UseGuards, UseInterceptors } from '@nestjs/common'
 import type { Request, Response } from 'express'
 import path from 'path'
 import { PurchaseOrdersService } from './purchase-orders.service'
@@ -37,6 +37,14 @@ export class PurchaseOrdersController {
         return this.service.validateContract(supplierCustomerId, orderDate)
     }
 
+    @Get('payment-requests/:requestId/print')
+    async printPaymentRequest(@Param('requestId') requestId: string, @Res() res: Response) {
+        const pdfBuffer = await this.service.printPaymentRequestByRequestId(requestId)
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `inline; filename="payment-request-${requestId}.pdf"`)
+        return res.send(pdfBuffer)
+    }
+
     @Get(':id')
     detail(@Param('id') id: string) {
         return this.service.detail(id)
@@ -47,14 +55,27 @@ export class PurchaseOrdersController {
         return this.service.create(dto, (req as any).user?.id)
     }
 
+    @Patch(':id')
+    updateDraft(@Param('id') id: string, @Body() dto: CreatePurchaseOrderDto) {
+        return this.service.updateDraft(id, dto)
+    }
+
+    @Patch(':id/actual-received')
+    updateActualReceived(
+        @Param('id') id: string,
+        @Body() body: { lines: Array<{ purchaseOrderLineId: string; actualReceivedQty: number }> },
+    ) {
+        return this.service.updateActualReceived(id, body?.lines ?? [])
+    }
+
     @Post(':id/approve')
     approve(@Param('id') id: string, @Body() _dto: ApprovePurchaseOrderDto, @Req() req: Request) {
         return this.service.approve(id, (req as any).user?.id)
     }
 
     @Post(':id/cancel')
-    cancel(@Param('id') id: string) {
-        return this.service.cancel(id)
+    cancel(@Param('id') id: string, @Req() req: Request) {
+        return this.service.cancel(id, (req as any).user?.id)
     }
 
     @Get(':id/print')

@@ -114,7 +114,7 @@ export class SupplierLocationsService {
         if (!area) throw new BadRequestException({ code: 'WAREHOUSE_AREA_INVALID' })
     }
 
-    async select(q: { supplierCustomerId: string; keyword?: string; limit?: number; isActive?: boolean }) {
+    async select(q: { supplierCustomerId?: string; keyword?: string; limit?: number; isActive?: boolean }) {
         const keyword = q.keyword?.trim()
         const items = await this.prisma.warehouse.findMany({
             where: {

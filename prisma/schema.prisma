@@ -229,6 +229,57 @@ enum CronJobStatus {
   FAILED
 }
 
+enum NotificationOutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  DEAD
+}
+
+enum NotificationSeverity {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+enum NotificationRecipientStatus {
+  UNREAD
+  READ
+  ARCHIVED
+}
+
+enum NotificationChannel {
+  IN_APP
+  WEB_SSE
+  MOBILE_PUSH
+  EMAIL
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+}
+
+enum NotificationDevicePlatform {
+  WEB
+  IOS
+  ANDROID
+}
+
+enum NotificationPushProvider {
+  FCM
+  APNS
+}
+
+enum NotificationWorkItemStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
 enum QtyUom {
   LITER
   KG
@@ -295,7 +346,11 @@ enum TermPurchaseFlowType {
 
 enum TermPaymentRequestStatus {
   DRAFT
+  PENDING_DIRECTOR_APPROVAL
+  DIRECTOR_REJECTED
   SUBMITTED
+  BANK_VERIFIED
+  BANK_RETURNED
   IN_BATCH
   SENT_TO_BANK
   PARTIALLY_PAID
@@ -856,6 +911,167 @@ model User {
 
   employee     Employee?
   roleBindings UserRoleBinding[]
+  notificationRecipients NotificationRecipient[]
+  notificationPreferences NotificationPreference[]
+  notificationDevices NotificationDevice[]
+  notificationWorkItems NotificationWorkItem[]
+}
+
+// =======================================
+// Common Notification
+// =======================================
+model NotificationOutbox {
+  id            String                   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  eventType     String
+  aggregateType String
+  aggregateId   String
+  dedupeKey     String                   @unique
+  payload       Json
+  status        NotificationOutboxStatus @default(PENDING)
+  attempts      Int                      @default(0)
+  availableAt   DateTime                 @default(now()) @db.Timestamptz(6)
+  lockedAt      DateTime?                @db.Timestamptz(6)
+  processedAt   DateTime?                @db.Timestamptz(6)
+  error         String?
+  createdAt     DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime                 @updatedAt @db.Timestamptz(6)
+
+  notification Notification?
+
+  @@index([status, availableAt])
+  @@index([aggregateType, aggregateId])
+}
+
+model NotificationTemplate {
+  id            String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code          String   @unique
+  moduleCode    String
+  category      String
+  titleTemplate String
+  bodyTemplate  String
+  defaultAction String?
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([moduleCode, category])
+}
+
+model Notification {
+  id            String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  outboxId      String               @unique @db.Uuid
+  eventType     String
+  moduleCode    String
+  category      String
+  severity      NotificationSeverity @default(INFO)
+  title         String
+  body          String
+  entityType    String?
+  entityId      String?
+  action        String?
+  metadata      Json?
+  occurredAt    DateTime             @default(now()) @db.Timestamptz(6)
+  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+
+  outbox     NotificationOutbox       @relation(fields: [outboxId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  recipients NotificationRecipient[]
+
+  @@index([moduleCode, category, createdAt])
+  @@index([entityType, entityId])
+}
+
+model NotificationRecipient {
+  id             String                      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  notificationId String                      @db.Uuid
+  userId         String                      @db.Uuid
+  status         NotificationRecipientStatus @default(UNREAD)
+  readAt         DateTime?                   @db.Timestamptz(6)
+  archivedAt     DateTime?                   @db.Timestamptz(6)
+  createdAt      DateTime                    @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime                    @updatedAt @db.Timestamptz(6)
+
+  notification Notification          @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  deliveries   NotificationDelivery[]
+
+  @@unique([notificationId, userId])
+  @@index([userId, status, createdAt])
+}
+
+model NotificationPreference {
+  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId       String   @db.Uuid
+  category     String
+  inAppEnabled Boolean  @default(true)
+  pushEnabled  Boolean  @default(true)
+  emailEnabled Boolean  @default(false)
+  muteUntil    DateTime? @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([userId, category])
+}
+
+model NotificationDevice {
+  id           String                   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId       String                   @db.Uuid
+  platform     NotificationDevicePlatform
+  pushProvider NotificationPushProvider?
+  pushToken    String?                  @unique
+  deviceId     String
+  appVersion   String?
+  locale       String?                  @default("vi-VN")
+  enabled      Boolean                  @default(true)
+  lastSeenAt   DateTime                 @default(now()) @db.Timestamptz(6)
+  createdAt    DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                 @updatedAt @db.Timestamptz(6)
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  deliveries NotificationDelivery[]
+
+  @@unique([userId, deviceId])
+  @@index([userId, enabled])
+}
+
+model NotificationDelivery {
+  id                      String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  notificationRecipientId String                     @db.Uuid
+  channel                 NotificationChannel
+  deviceId                String?                    @db.Uuid
+  status                  NotificationDeliveryStatus @default(PENDING)
+  attemptCount            Int                        @default(0)
+  providerMessageId       String?
+  errorCode               String?
+  sentAt                  DateTime?                  @db.Timestamptz(6)
+  deliveredAt             DateTime?                  @db.Timestamptz(6)
+  createdAt               DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime                   @updatedAt @db.Timestamptz(6)
+
+  recipient NotificationRecipient @relation(fields: [notificationRecipientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  device    NotificationDevice?    @relation(fields: [deviceId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([status, channel, createdAt])
+  @@index([notificationRecipientId])
+}
+
+model NotificationWorkItem {
+  id             String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId         String                     @db.Uuid
+  sourceType     String
+  sourceId       String
+  action         String
+  status         NotificationWorkItemStatus @default(OPEN)
+  dueAt          DateTime?                  @db.Timestamptz(6)
+  completedAt    DateTime?                  @db.Timestamptz(6)
+  createdAt      DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime                   @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([userId, sourceType, sourceId, action])
+  @@index([userId, status, dueAt])
 }
 
 // =======================================
@@ -1424,6 +1640,10 @@ model PurchaseOrder {
   contract         Contract? @relation(fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   deliveryLocation String?
 
+  // Retail commercial purchases answer a customer order raised by sales.
+  salesOrderId String?     @db.Uuid
+  salesOrder   SalesOrder? @relation("SalesOrderPurchaseOrders", fields: [salesOrderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
   version      Int       @default(1)
   createdById  String?   @db.Uuid
   approvedById String?   @db.Uuid
@@ -1450,12 +1670,13 @@ model PurchaseOrder {
   landedCostDocuments       LandedCostDocument[]
   commercialLotWithdrawals  CommercialLotWithdrawal[]
 
-  @@unique([legalEntityId, orderNo])
+  @@index([legalEntityId, orderNo])
   @@index([supplierCustomerId, orderDate])
   @@index([status])
   @@index([priceRegionId])
   @@index([bizType])
   @@index([contractId])
+  @@index([salesOrderId])
 }
 
 model TermPurchaseProfile {
@@ -1481,6 +1702,7 @@ model PurchaseOrderLine {
   plannedReceivingArea   WarehouseArea? @relation("PurchaseOrderLinePlannedArea", fields: [plannedReceivingAreaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   orderedQty Decimal  @db.Decimal(18, 3)
+  actualReceivedQty Decimal? @db.Decimal(18, 3)
   unitPrice  Decimal? @db.Decimal(18, 2)
   taxRate    Decimal? @db.Decimal(5, 2)
 
@@ -1673,6 +1895,12 @@ model PurchaseTermPaymentRequest {
   purchaseOrderId String        @db.Uuid
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
+  supplierInvoiceId String?          @db.Uuid
+  supplierInvoice   SupplierInvoice? @relation(fields: [supplierInvoiceId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  beneficiaryBankAccountId String?           @db.Uuid
+  beneficiaryBankAccount   PartyBankAccount? @relation(fields: [beneficiaryBankAccountId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
   orderDocumentId      String?                    @db.Uuid
   orderDocument        PurchaseTermOrderDocument? @relation(fields: [orderDocumentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   sourcePricingStageId String?                    @db.Uuid
@@ -1682,6 +1910,9 @@ model PurchaseTermPaymentRequest {
   requestDate  DateTime @db.Date
   supplierName String
   content      String?
+  beneficiaryAccountNo   String?
+  beneficiaryAccountName String?
+  beneficiaryBankName    String?
 
   amountVnd       Decimal   @default(0) @db.Decimal(18, 2)
   currency        String    @default("VND")
@@ -1689,18 +1920,64 @@ model PurchaseTermPaymentRequest {
 
   status TermPaymentRequestStatus @default(DRAFT)
   note   String?
+  approvalNote String?
+  approvedById String? @db.Uuid
+  approvedAt DateTime?
+  bankCheckedById String? @db.Uuid
+  bankCheckedAt DateTime?
+  bankCheckNote String?
+  returnedReason String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   bankInstructions PurchaseTermBankInstruction[]
   batchItems       TermPaymentBatchItem[]
+  payments         PaymentRequestPayment[]
 
   @@index([purchaseOrderId, status])
+  @@unique([supplierInvoiceId])
+  @@index([beneficiaryBankAccountId])
   @@index([orderDocumentId])
   @@index([sourcePricingStageId])
   @@index([requestNo])
   @@index([requestDate])
+}
+
+model PartyBankAccount {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  partyId String @db.Uuid
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  bankName String
+  bankCode String?
+  accountNo String
+  accountName String
+  isDefault Boolean @default(false)
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paymentRequests PurchaseTermPaymentRequest[]
+  @@unique([partyId, accountNo])
+  @@index([partyId, isActive])
+}
+
+model PaymentRequestPayment {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  paymentRequestId String @db.Uuid
+  paymentRequest PurchaseTermPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sourceBankAccountId String @db.Uuid
+  sourceBankAccount BankAccount @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  amountVnd Decimal @db.Decimal(18, 2)
+  paidAt DateTime @db.Date
+  proofFileUrl String?
+  proofFileName String?
+  note String?
+  createdById String? @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@index([paymentRequestId, paidAt])
+  @@index([sourceBankAccountId])
 }
 
 model TermPaymentBatch {
@@ -1912,11 +2189,12 @@ model SalesOrder {
   createdAt       DateTime         @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime         @updatedAt @db.Timestamptz(6)
 
-  legalEntity  LegalEntity            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  customer     Party                  @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines        SalesOrderLine[]
-  reservations InventoryReservation[]
-  deliveries   SalesDelivery[]
+  legalEntity     LegalEntity            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer        Party                  @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines           SalesOrderLine[]
+  reservations    InventoryReservation[]
+  deliveries      SalesDelivery[]
+  purchaseOrders  PurchaseOrder[]        @relation("SalesOrderPurchaseOrders")
 
   @@unique([legalEntityId, orderNo])
   @@index([customerPartyId, status, orderDate])
@@ -1933,12 +2211,17 @@ model SalesOrderLine {
   taxRate          Decimal? @db.Decimal(9, 6)
   note             String?
 
-  salesOrder    SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product       Product             @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  deliveryLines SalesDeliveryLine[]
+  // Warehouse the customer wants the goods delivered to; purchasing reuses it on the purchase order.
+  receivingWarehouseId String? @db.Uuid
+
+  salesOrder         SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product            Product             @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receivingWarehouse Warehouse?          @relation("SalesOrderLineWarehouse", fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  deliveryLines      SalesDeliveryLine[]
 
   @@unique([salesOrderId, lineNo])
   @@index([productId])
+  @@index([receivingWarehouseId])
 }
 
 model SalesDelivery {
@@ -2641,6 +2924,7 @@ model BankAccount {
   imports            BankStatementImport[]
   transactions       BankTransaction[]
   termPaymentBatches TermPaymentBatch[]
+  paymentRequestPayments PaymentRequestPayment[]
 
   @@unique([bankCode, accountNo])
   @@index([isActive])
@@ -3129,6 +3413,21 @@ model PriceBulletinItem {
   @@index([productId, regionId])
 }
 
+model VatRate {
+  id       String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  name     String  @unique
+  rate     Decimal @db.Decimal(5, 2)
+  isExempt Boolean @default(false)
+  isActive Boolean @default(true)
+  isDefault Boolean @default(false)
+  sortOrder Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
 // =======================================
 // Audit Log
 // =======================================
@@ -3233,6 +3532,7 @@ model Party {
   shippingAddress String?
   contactEmail    String?
   contactPhone    String?
+  bankAccountNo  String?
   creditLimit     Decimal?  @db.Decimal(24, 4)
   tempLimit       Decimal?  @db.Decimal(24, 4)
   tempFrom        DateTime?
@@ -3260,6 +3560,7 @@ model Party {
 
   roles                         PartyRole[]
   contacts                      ContactPerson[]
+  bankAccounts                  PartyBankAccount[]
   contracts                     Contract[]
   riskFlags                     RiskFlag[]
   creditHistories               CreditLimitHistory[]
@@ -3413,6 +3714,7 @@ model Warehouse {
   expectedSupplies             ExpectedSupply[]
   reconciliationSessions       WarehouseReconciliation[]
   salesDeliveries              SalesDelivery[]
+  salesOrderLines              SalesOrderLine[]                @relation("SalesOrderLineWarehouse")
   commercialLotPositions       CommercialLotPosition[]         @relation("CommercialLotPlannedWarehouse")
   commercialLotWithdrawals     CommercialLotWithdrawal[]       @relation("CommercialLotDestinationWarehouse")
 
@@ -4296,6 +4598,7 @@ model SupplierInvoice {
   purchaseOrder PurchaseOrder?        @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   lines         SupplierInvoiceLine[]
   openItem      PayableOpenItem?
+  paymentRequests PurchaseTermPaymentRequest[]
 
   @@unique([legalEntityId, supplierCustomerId, invoiceSymbol, invoiceNo])
   @@unique([legalEntityId, sourceFileChecksum])
