@@ -953,6 +953,58 @@ export class PurchaseTermPricingService {
         })
     }
 
+    /**
+     * Restates the cost of quantities that were already SOLD from this layer while the price
+     * was still provisional (spec v1.2 §10, GĐ 8).
+     *
+     * Without this, finalising a TERM price would only fix stock still on hand and the margin
+     * on everything already invoiced would stay wrong for good.
+     *
+     * The adjustment is booked as an append-only REVALUATION entry carrying the sales
+     * delivery line, so profitability picks it up as extra cost of that exact sale. It does
+     * NOT touch the layer balance: that value left the layer when the goods were issued.
+     * Sign follows SALES_ISSUE — value leaving is negative, so a higher final price produces
+     * a negative delta (more cost).
+     */
+    private async revalueIssuedPortion(
+        tx: Prisma.TransactionClient,
+        args: { costLayerId: string; finalUnitCost: Prisma.Decimal; runId: string },
+    ) {
+        const issues = await tx.costLayerEntry.findMany({
+            where: {
+                costLayerId: args.costLayerId,
+                type: 'SALES_ISSUE',
+                reversedBy: null,
+            },
+        })
+        for (const issue of issues) {
+            const qty = issue.actualQtyDelta.negated()
+            if (!qty.greaterThan(0)) continue
+            // What the sale was originally charged per unit.
+            const chargedUnit = issue.valueDelta.negated().div(qty)
+            const delta = qty.mul(args.finalUnitCost.minus(chargedUnit))
+            if (delta.isZero()) continue
+
+            const idempotencyKey = `pricing:${args.runId}:issue:${issue.id}:revalue`
+            const existing = await tx.costLayerEntry.findUnique({ where: { idempotencyKey } })
+            if (existing) continue
+
+            await tx.costLayerEntry.create({
+                data: {
+                    costLayerId: args.costLayerId,
+                    type: 'REVALUATION',
+                    // A DB check allows one source link per entry: cite the sale, not the
+                    // pricing line, so the report can attribute the adjustment.
+                    salesDeliveryLineId: issue.salesDeliveryLineId,
+                    valueDelta: delta.negated(),
+                    idempotencyKey,
+                    effectiveAt: new Date(),
+                },
+            })
+        }
+        return issues.length
+    }
+
     private async createCostLayers(tx: Prisma.TransactionClient, order: any, runId: string, stageId: string) {
         const stage = await tx.purchasePricingStage.findUnique({
             where: {
@@ -1012,6 +1064,11 @@ export class PurchaseTermPricingService {
                             isProvisional: false,
                             version: { increment: 1 },
                         },
+                    })
+                    await this.revalueIssuedPortion(tx, {
+                        costLayerId: existing.id,
+                        finalUnitCost: unitCost,
+                        runId,
                     })
                 } else {
                     const layer = await tx.inventoryCostLayer.create({

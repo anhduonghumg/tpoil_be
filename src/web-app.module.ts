@@ -25,6 +25,7 @@ import { GoodsReceiptsModule } from './modules/purchases/goods-receipts/goods-re
 import { SupplierInvoicesModule } from './modules/purchases/supplier-invoices/supplier-invoices.module'
 import { CommercialLotsModule } from './modules/purchases/commercial-lots/commercial-lots.module'
 import { CommercialPaymentsModule } from './modules/purchases/commercial-payments/commercial-payments.module'
+import { CommercialRetailModule } from './modules/purchases/commercial-retail/commercial-retail.module'
 import { SalesOrdersModule } from './modules/sales/sales-orders.module'
 import { SupplierSettlementsModule } from './modules/settlements/supplier-settlements.module'
 
@@ -93,6 +94,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         SupplierInvoicesModule,
         CommercialLotsModule,
         CommercialPaymentsModule,
+        CommercialRetailModule,
         SalesOrdersModule,
         SupplierSettlementsModule,
 

@@ -22,3 +22,28 @@ export const PURCHASE_NOTIFICATION_EVENTS = {
 export type PurchaseNotificationEvent =
     (typeof PURCHASE_NOTIFICATION_EVENTS)[keyof typeof PURCHASE_NOTIFICATION_EVENTS]
 
+/** Internal sales flow (SINGLE/LOT) — sales-implementation-spec v1.2 §13. */
+export const SALES_NOTIFICATION_EVENTS = {
+    ORDER_REVIEW_REQUESTED: 'sales.order.review_requested',
+    ORDER_APPROVED: 'sales.order.approved',
+    ORDER_REJECTED: 'sales.order.rejected',
+    ORDER_RECALLED: 'sales.order.recalled',
+    ORDER_CANCELLED: 'sales.order.cancelled',
+    ORDER_STOCK_INSUFFICIENT: 'sales.order.stock_insufficient',
+    DELIVERY_READY: 'sales.delivery.ready',
+    DELIVERY_RETURNED: 'sales.delivery.returned',
+    DELIVERY_POSTED: 'sales.delivery.posted',
+    RECONCILIATION_VARIANCE: 'sales.reconciliation.variance',
+    RECONCILIATION_RESOLVED: 'sales.reconciliation.resolved',
+    WITHDRAWAL_NEED_SOURCE: 'sales.withdrawal.need_source',
+    WITHDRAWAL_APPROVED: 'sales.withdrawal.approved',
+    WITHDRAWAL_CANCELLED: 'sales.withdrawal.cancelled',
+    RECEIVABLE_OVERDUE: 'sales.receivable.overdue',
+    INVOICE_ISSUED: 'sales.invoice.issued',
+    INVOICE_ISSUE_FAILED: 'sales.invoice.issue_failed',
+    INVOICE_CANCELLED: 'sales.invoice.cancelled',
+} as const
+
+export type SalesNotificationEvent =
+    (typeof SALES_NOTIFICATION_EVENTS)[keyof typeof SALES_NOTIFICATION_EVENTS]
+

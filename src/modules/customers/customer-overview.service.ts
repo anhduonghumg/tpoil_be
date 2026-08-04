@@ -88,16 +88,66 @@ export class CustomerOverviewService {
             }
         }
 
+        // Real receivable position instead of the previous placeholder zeros.
+        const receivables = await this.prisma.receivableOpenItem.findMany({
+            where: { customerPartyId: customer.id, status: { not: 'VOIDED' } },
+            select: {
+                originalAmount: true,
+                outstandingAmount: true,
+                dueDate: true,
+                status: true,
+            },
+        })
+        // dueDate is a DATE: something due today is not overdue yet.
+        const asOf = new Date()
+        asOf.setHours(0, 0, 0, 0)
+        const sum = (values: Array<{ toNumber?: () => number } | any>) =>
+            values.reduce((total, value) => total + (value?.toNumber?.() ?? Number(value ?? 0)), 0)
+        const invoices = sum(receivables.map((item) => item.originalAmount))
+        const balance = sum(
+            receivables.filter((item) => item.status !== 'SETTLED').map((item) => item.outstandingAmount),
+        )
         const debt = {
             opening: 0,
-            invoices: 0,
-            payments: 0,
-            balance: 0,
+            invoices,
+            payments: invoices - balance,
+            balance,
+            overdue: sum(
+                receivables
+                    .filter((item) => item.status !== 'SETTLED' && item.dueDate && item.dueDate < asOf)
+                    .map((item) => item.outstandingAmount),
+            ),
+            openItems: receivables.filter((item) => item.status !== 'SETTLED').length,
             currency: 'VND',
         }
 
+        // Commercial stock the customer still holds on active lot orders (spec v1.2 §11).
+        const lotPositions = await this.prisma.salesLotPosition.findMany({
+            where: {
+                orderLine: {
+                    salesOrder: { kind: 'LOT', status: 'CONFIRMED', customerPartyId: customer.id },
+                },
+            },
+            include: {
+                orderLine: {
+                    include: {
+                        product: { select: { id: true, code: true, name: true, uom: true } },
+                        issueWarehouse: { select: { id: true, code: true, name: true } },
+                    },
+                },
+            },
+        })
         const inventory = {
-            items: [],
+            items: lotPositions.map((position) => ({
+                sku: position.orderLine.product.code,
+                name: position.orderLine.product.name,
+                warehouseCode: position.orderLine.issueWarehouse?.code ?? '',
+                warehouseName: position.orderLine.issueWarehouse?.name,
+                qty: position.totalQty
+                    .minus(position.issuedQty)
+                    .minus(position.adjustedQty)
+                    .toNumber(),
+            })),
             totalValue: 0,
             currency: 'VND',
         }

@@ -3,6 +3,7 @@ import * as bcrypt from 'bcrypt'
 import { PERMISSIONS } from '../src/common/auth/permissions.constant'
 import { seedUsersPermissions } from './02_users_permissions.seed'
 import { seedOperationsPermissions } from './03_operations_permissions.seed'
+import { seedSalesPermissions } from './04_sales_permissions.seed'
 
 const prisma = new PrismaClient()
 
@@ -57,6 +58,7 @@ async function main() {
     await seedPermissionCatalog()
     await seedUsersPermissions(prisma)
     await seedOperationsPermissions(prisma)
+    await seedSalesPermissions(prisma)
 
     const allPermissions = await prisma.permission.findMany({ select: { id: true } })
     await prisma.rolePermission.createMany({

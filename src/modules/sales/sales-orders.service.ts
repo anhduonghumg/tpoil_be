@@ -3,6 +3,7 @@ import {
     Prisma,
     PurchaseBizType,
     PurchaseOrderType,
+    SalesOrderKind,
     SalesOrderStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
@@ -21,6 +22,7 @@ const detailInclude = Prisma.validator<Prisma.SalesOrderInclude>()({
         include: {
             product: { select: { id: true, code: true, name: true, uom: true } },
             receivingWarehouse: { select: { id: true, code: true, name: true } },
+            issueWarehouse: { select: { id: true, code: true, name: true } },
         },
     },
     purchaseOrders: {
@@ -58,7 +60,7 @@ export class SalesOrdersService {
         return `${year}${month}`
     }
 
-    private async generateOrderNo(customerPartyId: string, orderDate: Date) {
+    async generateOrderNo(customerPartyId: string, orderDate: Date) {
         const customer = await this.prisma.party.findUnique({
             where: { id: customerPartyId },
             select: { code: true },
@@ -116,6 +118,7 @@ export class SalesOrdersService {
         const keyword = query.keyword?.trim()
         const where: Prisma.SalesOrderWhereInput = {
             customerPartyId: query.customerPartyId ?? undefined,
+            kind: query.kind ? (query.kind as SalesOrderKind) : undefined,
             status: query.status ? (query.status as SalesOrderStatus) : undefined,
             ...(keyword
                 ? {
@@ -150,8 +153,9 @@ export class SalesOrdersService {
     }
 
     /**
-     * Sales records what the customer ordered and hands it to purchasing, who then
-     * buys the goods from a supplier.
+     * DAY_TRADE only (legacy buy-to-order flow): sales records what the customer ordered
+     * and hands it to purchasing, who then buys the goods from a supplier.
+     * SINGLE/LOT orders are created by SalesOrderWorkflowService instead.
      */
     async create(dto: CreateSalesOrderDto, actorId?: string | null) {
         const customer = await this.prisma.party.findUnique({
@@ -177,10 +181,12 @@ export class SalesOrdersService {
                     legalEntityId: legalEntity.id,
                     orderNo,
                     customerPartyId: dto.customerPartyId,
+                    kind: SalesOrderKind.DAY_TRADE,
                     status: SalesOrderStatus.DRAFT,
                     orderDate,
                     currency: legalEntity.baseCurrency || 'VND',
                     note: dto.note?.trim() || null,
+                    createdById: actorId ?? null,
                     lines: {
                         create: dto.lines.map((line, index) => ({
                             lineNo: index + 1,
@@ -192,6 +198,9 @@ export class SalesOrdersService {
                                     ? null
                                     : new Prisma.Decimal(line.orderedV15Qty),
                             unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
+                            discountAmount: new Prisma.Decimal(line.discountAmount ?? 0),
+                            vehiclePlate: line.vehiclePlate?.trim() || null,
+                            driverName: line.driverName?.trim() || null,
                             taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
                             note: line.note?.trim() || null,
                         })),
@@ -214,8 +223,10 @@ export class SalesOrdersService {
                         orderNo: salesOrder.orderNo,
                         customerName: customer.name,
                         actionRequired: true,
+                        // No actor exclusion: this is purchasing's work queue, so whoever
+                        // holds the purchasing role must get the task even if they typed
+                        // the order in themselves.
                         recipientPermissionPrefixes: ['purchases.'],
-                        excludeUserIds: actorId ? [actorId] : [],
                     },
                 },
                 tx,
@@ -281,6 +292,7 @@ export class SalesOrdersService {
                     legalEntityId: purchaseOrder.legalEntityId,
                     orderNo,
                     customerPartyId: dto.customerPartyId,
+                    kind: SalesOrderKind.DAY_TRADE,
                     status: SalesOrderStatus.DRAFT,
                     orderDate,
                     currency: purchaseOrder.currency,
@@ -307,6 +319,43 @@ export class SalesOrdersService {
         })
 
         return this.detail(created.id)
+    }
+
+    /** Purchasing bought against an existing customer order: tie the two together. */
+    async attachPurchaseOrder(salesOrderId: string, purchaseOrderId: string) {
+        const salesOrder = await this.prisma.salesOrder.findUnique({
+            where: { id: salesOrderId },
+            select: { id: true, kind: true },
+        })
+        if (!salesOrder) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
+        if (salesOrder.kind !== SalesOrderKind.DAY_TRADE) {
+            throw new BadRequestException({
+                code: 'SALES_ORDER_NOT_DAY_TRADE',
+                message: 'Chỉ đơn mua bán trong ngày mới gắn được với đơn mua lẻ.',
+            })
+        }
+
+        const purchaseOrder = await this.prisma.purchaseOrder.findFirst({
+            where: {
+                id: purchaseOrderId,
+                orderType: PurchaseOrderType.SINGLE,
+                bizType: PurchaseBizType.COMMERCIAL,
+            },
+            select: { id: true, salesOrderId: true },
+        })
+        if (!purchaseOrder) throw new NotFoundException('RETAIL_PURCHASE_ORDER_NOT_FOUND')
+        if (purchaseOrder.salesOrderId && purchaseOrder.salesOrderId !== salesOrderId) {
+            throw new BadRequestException({
+                code: 'PURCHASE_ORDER_ALREADY_LINKED',
+                message: 'Đơn mua này đã gắn với một đơn đặt hàng khác.',
+            })
+        }
+
+        await this.prisma.purchaseOrder.update({
+            where: { id: purchaseOrder.id },
+            data: { salesOrderId, version: { increment: 1 } },
+        })
+        return this.detail(salesOrderId)
     }
 
     async unlinkPurchaseOrder(purchaseOrderId: string) {

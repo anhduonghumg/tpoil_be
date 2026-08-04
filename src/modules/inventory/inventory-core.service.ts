@@ -490,7 +490,7 @@ export class InventoryCoreService {
         }
 
         const actualQty = this.decimal(args.actualQty)
-        if (!actualQty.isPositive()) {
+        if (!actualQty.greaterThan(0)) {
             throw new BadRequestException({ code: 'RESERVATION_QTY_MUST_BE_POSITIVE' })
         }
         await this.lockKeys(tx, [
@@ -584,7 +584,8 @@ export class InventoryCoreService {
             where: { id: args.reservationLineId },
         })
         const actualQty = this.decimal(args.actualQty)
-        if (!actualQty.isPositive() || actualQty.greaterThan(line.activeActualQty)) {
+        // Decimal treats zero as positively signed, so quantity guards must compare explicitly.
+        if (!actualQty.greaterThan(0) || actualQty.greaterThan(line.activeActualQty)) {
             throw new ConflictException({ code: 'RESERVATION_RELEASE_EXCEEDS_ACTIVE_QTY' })
         }
 
@@ -604,7 +605,8 @@ export class InventoryCoreService {
         const releasedActualQty = this.decimal(line.releasedActualQty).plus(actualQty)
         const reservedActualQty = this.decimal(balance.reservedActualQty).minus(actualQty)
         const v15Qty = args.v15Qty == null ? null : this.decimal(args.v15Qty)
-        if (this.decimal(line.activeV15Qty).isPositive() && !v15Qty?.isPositive()) {
+        // Only holds that actually track V15 may demand a V15 amount back.
+        if (this.decimal(line.activeV15Qty).greaterThan(0) && !v15Qty?.greaterThan(0)) {
             throw new BadRequestException({ code: 'RESERVATION_RELEASE_V15_QTY_REQUIRED' })
         }
         if (v15Qty?.greaterThan(this.decimal(line.activeV15Qty))) {
@@ -665,7 +667,7 @@ export class InventoryCoreService {
             where: { id: args.reservationLineId },
         })
         const actualQty = this.decimal(args.actualQty)
-        if (!actualQty.isPositive() || actualQty.greaterThan(line.activeActualQty)) {
+        if (!actualQty.greaterThan(0) || actualQty.greaterThan(line.activeActualQty)) {
             throw new ConflictException({ code: 'RESERVATION_CONSUME_EXCEEDS_ACTIVE_QTY' })
         }
 
@@ -683,7 +685,7 @@ export class InventoryCoreService {
         })
 
         const v15Qty = args.v15Qty == null ? null : this.decimal(args.v15Qty)
-        if (this.decimal(line.activeV15Qty).isPositive() && !v15Qty?.isPositive()) {
+        if (this.decimal(line.activeV15Qty).greaterThan(0) && !v15Qty?.greaterThan(0)) {
             throw new BadRequestException({ code: 'RESERVATION_CONSUME_V15_QTY_REQUIRED' })
         }
         if (v15Qty?.greaterThan(this.decimal(line.activeV15Qty))) {
@@ -753,7 +755,7 @@ export class InventoryCoreService {
                 ? await tx.inventoryPendingRelease.findUniqueOrThrow({ where: { id: args.restrictionId } })
                 : await tx.inventoryBlock.findUniqueOrThrow({ where: { id: args.restrictionId } })
         const actualQty = this.decimal(args.actualQty)
-        if (!actualQty.isPositive()) throw new BadRequestException({ code: 'RESTRICTION_QTY_MUST_BE_POSITIVE' })
+        if (!actualQty.greaterThan(0)) throw new BadRequestException({ code: 'RESTRICTION_QTY_MUST_BE_POSITIVE' })
 
         await this.lockKeys(tx, [
             `availability:${this.availabilityKey(

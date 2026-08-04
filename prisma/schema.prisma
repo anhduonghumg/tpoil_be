@@ -313,17 +313,117 @@ enum CommercialLotWithdrawalStatus {
 
 enum SalesOrderStatus {
   DRAFT
+  PENDING_REVIEW
   CONFIRMED
+  REJECTED
+  AWAITING_STOCK
   PARTIALLY_RESERVED
   RESERVED
+  WAREHOUSE_PROCESSING
   PARTIALLY_DELIVERED
+  DELIVERED
+  AWAITING_RECONCILIATION
+  AWAITING_INVOICE
   COMPLETED
   CANCELLED
+}
+
+/// DAY_TRADE: legacy buy-to-order flow owned by retail purchasing.
+/// SINGLE/LOT: internal sales flow issuing from own stock (sales-implementation-spec v1.2).
+enum SalesOrderKind {
+  DAY_TRADE
+  SINGLE
+  LOT
+}
+
+enum SalesApprovalType {
+  PRICE
+  CREDIT
+  EXCEPTION
+}
+
+enum SalesApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  STALE
+  CANCELLED
+}
+
+enum SalesReconciliationStatus {
+  OPEN
+  MATCHED
+  VARIANCE
+  RESOLVED
+}
+
+/// Lifecycle of a request to draw part of an existing LOT order (spec v1.2 §4.3).
+/// NEED_SOURCE = no matching lot order found; the request waits, nothing is auto-created.
+enum SalesWithdrawalStatus {
+  DRAFT
+  NEED_SOURCE
+  PENDING_REVIEW
+  APPROVED
+  RESERVED
+  WAREHOUSE_PROCESSING
+  ISSUED
+  REJECTED
+  CANCELLED
+}
+
+/// Where an alias came from, so learned entries can be reviewed or cleared in bulk.
+enum SalesAliasSource {
+  IMPORTED
+  MANUAL
+  LEARNED
+}
+
+enum SalesAliasEntityType {
+  PARTY
+  WAREHOUSE
+  PRODUCT
+}
+
+enum SalesInvoiceStatus {
+  DRAFT
+  PENDING_ISSUE
+  ISSUED
+  ISSUE_FAILED
+  CANCELLED
+}
+
+/// ADJUSTMENT/REPLACEMENT are new documents pointing at the original; cancelling is a
+/// status change on the original itself (spec v1.2 D8).
+enum SalesInvoiceDocumentType {
+  ORIGINAL
+  ADJUSTMENT
+  REPLACEMENT
+}
+
+enum ReceivableOpenItemStatus {
+  OPEN
+  PARTIALLY_SETTLED
+  SETTLED
+  VOIDED
+}
+
+enum ReceivableEntryType {
+  OPEN
+  RECEIPT
+  CREDIT_NOTE
+  FX_DIFFERENCE
+  REVERSAL
+}
+
+enum ReceivableAllocationStatus {
+  ACTIVE
+  REVERSED
 }
 
 enum SalesDeliveryStatus {
   DRAFT
   READY
+  RETURNED
   POSTED
   VOIDED
 }
@@ -909,12 +1009,12 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  employee     Employee?
-  roleBindings UserRoleBinding[]
-  notificationRecipients NotificationRecipient[]
+  employee                Employee?
+  roleBindings            UserRoleBinding[]
+  notificationRecipients  NotificationRecipient[]
   notificationPreferences NotificationPreference[]
-  notificationDevices NotificationDevice[]
-  notificationWorkItems NotificationWorkItem[]
+  notificationDevices     NotificationDevice[]
+  notificationWorkItems   NotificationWorkItem[]
 }
 
 // =======================================
@@ -958,22 +1058,22 @@ model NotificationTemplate {
 }
 
 model Notification {
-  id            String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  outboxId      String               @unique @db.Uuid
-  eventType     String
-  moduleCode    String
-  category      String
-  severity      NotificationSeverity @default(INFO)
-  title         String
-  body          String
-  entityType    String?
-  entityId      String?
-  action        String?
-  metadata      Json?
-  occurredAt    DateTime             @default(now()) @db.Timestamptz(6)
-  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+  id         String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  outboxId   String               @unique @db.Uuid
+  eventType  String
+  moduleCode String
+  category   String
+  severity   NotificationSeverity @default(INFO)
+  title      String
+  body       String
+  entityType String?
+  entityId   String?
+  action     String?
+  metadata   Json?
+  occurredAt DateTime             @default(now()) @db.Timestamptz(6)
+  createdAt  DateTime             @default(now()) @db.Timestamptz(6)
 
-  outbox     NotificationOutbox       @relation(fields: [outboxId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  outbox     NotificationOutbox      @relation(fields: [outboxId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   recipients NotificationRecipient[]
 
   @@index([moduleCode, category, createdAt])
@@ -990,8 +1090,8 @@ model NotificationRecipient {
   createdAt      DateTime                    @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime                    @updatedAt @db.Timestamptz(6)
 
-  notification Notification          @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  notification Notification           @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   deliveries   NotificationDelivery[]
 
   @@unique([notificationId, userId])
@@ -999,15 +1099,15 @@ model NotificationRecipient {
 }
 
 model NotificationPreference {
-  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId       String   @db.Uuid
+  id           String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId       String    @db.Uuid
   category     String
-  inAppEnabled Boolean  @default(true)
-  pushEnabled  Boolean  @default(true)
-  emailEnabled Boolean  @default(false)
+  inAppEnabled Boolean   @default(true)
+  pushEnabled  Boolean   @default(true)
+  emailEnabled Boolean   @default(false)
   muteUntil    DateTime? @db.Timestamptz(6)
-  createdAt    DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
@@ -1015,18 +1115,18 @@ model NotificationPreference {
 }
 
 model NotificationDevice {
-  id           String                   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId       String                   @db.Uuid
+  id           String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId       String                     @db.Uuid
   platform     NotificationDevicePlatform
   pushProvider NotificationPushProvider?
-  pushToken    String?                  @unique
+  pushToken    String?                    @unique
   deviceId     String
   appVersion   String?
-  locale       String?                  @default("vi-VN")
-  enabled      Boolean                  @default(true)
-  lastSeenAt   DateTime                 @default(now()) @db.Timestamptz(6)
-  createdAt    DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime                 @updatedAt @db.Timestamptz(6)
+  locale       String?                    @default("vi-VN")
+  enabled      Boolean                    @default(true)
+  lastSeenAt   DateTime                   @default(now()) @db.Timestamptz(6)
+  createdAt    DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                   @updatedAt @db.Timestamptz(6)
 
   user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   deliveries NotificationDelivery[]
@@ -1050,23 +1150,28 @@ model NotificationDelivery {
   updatedAt               DateTime                   @updatedAt @db.Timestamptz(6)
 
   recipient NotificationRecipient @relation(fields: [notificationRecipientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  device    NotificationDevice?    @relation(fields: [deviceId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  device    NotificationDevice?   @relation(fields: [deviceId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([status, channel, createdAt])
   @@index([notificationRecipientId])
 }
 
 model NotificationWorkItem {
-  id             String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId         String                     @db.Uuid
-  sourceType     String
-  sourceId       String
-  action         String
-  status         NotificationWorkItemStatus @default(OPEN)
-  dueAt          DateTime?                  @db.Timestamptz(6)
-  completedAt    DateTime?                  @db.Timestamptz(6)
-  createdAt      DateTime                   @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime                   @updatedAt @db.Timestamptz(6)
+  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId     String @db.Uuid
+  sourceType String
+  sourceId   String
+  action     String
+
+  /// Version/cycle of the source entity that last touched this item. The processor ignores
+  /// events carrying an older value, so a late event cannot reopen a newer state (spec v1.2 D6).
+  sourceVersion Int?
+
+  status      NotificationWorkItemStatus @default(OPEN)
+  dueAt       DateTime?                  @db.Timestamptz(6)
+  completedAt DateTime?                  @db.Timestamptz(6)
+  createdAt   DateTime                   @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime                   @updatedAt @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
@@ -1388,6 +1493,7 @@ model Contract {
   attachments          ContractAttachment[]
   warehouseRentalLinks WarehouseRentalContractLink[]
   purchaseOrders       PurchaseOrder[]
+  salesOrders          SalesOrder[]                  @relation("SalesOrderContract")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1510,6 +1616,8 @@ model Vehicle {
   documents          VehicleDocument[]
   dispatchOrders     VehicleDispatchOrder[]
   inventoryMovements InventoryMovement[]
+  salesDeliveries    SalesDelivery[]
+  salesWithdrawals   SalesLotWithdrawalRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1529,12 +1637,14 @@ model Driver {
   note     String?
   isActive Boolean @default(true)
 
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
   goodsReceipts      GoodsReceipt[]
   documents          DriverDocument[]
   dispatchOrders     VehicleDispatchOrder[]
   inventoryMovements InventoryMovement[]
+  salesDeliveries    SalesDelivery[]
+  salesWithdrawals   SalesLotWithdrawalRequest[]
 
   @@index([fullName])
   @@index([phone])
@@ -1549,8 +1659,8 @@ model Product {
   status   MasterStatus @default(ACTIVE)
   version  Int          @default(1)
 
-  createdAt                     DateTime                       @default(now())
-  updatedAt                     DateTime                       @updatedAt
+  createdAt                     DateTime                        @default(now())
+  updatedAt                     DateTime                        @updatedAt
   purchaseOrderLines            PurchaseOrderLine[]
   salesOrderLines               SalesOrderLine[]
   priceQuotes                   CommodityPriceQuote[]
@@ -1581,6 +1691,9 @@ model Product {
   landedCostAllocations         LandedCostAllocation[]
   supplierInvoiceLines          SupplierInvoiceLine[]
   aliases                       ProductAlias[]
+  salesWithdrawalLines          SalesLotWithdrawalRequestLine[]
+  salesInvoiceLines             SalesInvoiceLine[]
+  salesAliases                  SalesEntityAlias[]              @relation("SalesAliasProduct")
   commercialLotPositions        CommercialLotPosition[]
 
   @@index([name])
@@ -1701,10 +1814,10 @@ model PurchaseOrderLine {
   plannedReceivingAreaId String?        @db.Uuid
   plannedReceivingArea   WarehouseArea? @relation("PurchaseOrderLinePlannedArea", fields: [plannedReceivingAreaId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  orderedQty Decimal  @db.Decimal(18, 3)
+  orderedQty        Decimal  @db.Decimal(18, 3)
   actualReceivedQty Decimal? @db.Decimal(18, 3)
-  unitPrice  Decimal? @db.Decimal(18, 2)
-  taxRate    Decimal? @db.Decimal(5, 2)
+  unitPrice         Decimal? @db.Decimal(18, 2)
+  taxRate           Decimal? @db.Decimal(5, 2)
 
   discountAmount Decimal @default(0) @db.Decimal(18, 2)
 
@@ -1906,10 +2019,10 @@ model PurchaseTermPaymentRequest {
   sourcePricingStageId String?                    @db.Uuid
   sourcePricingStage   PurchasePricingStage?      @relation(fields: [sourcePricingStageId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  requestNo    String
-  requestDate  DateTime @db.Date
-  supplierName String
-  content      String?
+  requestNo              String
+  requestDate            DateTime @db.Date
+  supplierName           String
+  content                String?
   beneficiaryAccountNo   String?
   beneficiaryAccountName String?
   beneficiaryBankName    String?
@@ -1918,15 +2031,15 @@ model PurchaseTermPaymentRequest {
   currency        String    @default("VND")
   paymentDeadline DateTime? @db.Date
 
-  status TermPaymentRequestStatus @default(DRAFT)
-  note   String?
-  approvalNote String?
-  approvedById String? @db.Uuid
-  approvedAt DateTime?
-  bankCheckedById String? @db.Uuid
-  bankCheckedAt DateTime?
-  bankCheckNote String?
-  returnedReason String?
+  status          TermPaymentRequestStatus @default(DRAFT)
+  note            String?
+  approvalNote    String?
+  approvedById    String?                  @db.Uuid
+  approvedAt      DateTime?
+  bankCheckedById String?                  @db.Uuid
+  bankCheckedAt   DateTime?
+  bankCheckNote   String?
+  returnedReason  String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1935,8 +2048,8 @@ model PurchaseTermPaymentRequest {
   batchItems       TermPaymentBatchItem[]
   payments         PaymentRequestPayment[]
 
-  @@index([purchaseOrderId, status])
   @@unique([supplierInvoiceId])
+  @@index([purchaseOrderId, status])
   @@index([beneficiaryBankAccountId])
   @@index([orderDocumentId])
   @@index([sourcePricingStageId])
@@ -1945,36 +2058,37 @@ model PurchaseTermPaymentRequest {
 }
 
 model PartyBankAccount {
-  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  partyId String @db.Uuid
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  bankName String
-  bankCode String?
-  accountNo String
+  id          String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  partyId     String   @db.Uuid
+  party       Party    @relation(fields: [partyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  bankName    String
+  bankCode    String?
+  accountNo   String
   accountName String
-  isDefault Boolean @default(false)
-  isActive Boolean @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isDefault   Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   paymentRequests PurchaseTermPaymentRequest[]
+
   @@unique([partyId, accountNo])
   @@index([partyId, isActive])
 }
 
 model PaymentRequestPayment {
-  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  paymentRequestId String @db.Uuid
-  paymentRequest PurchaseTermPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  sourceBankAccountId String @db.Uuid
-  sourceBankAccount BankAccount @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  amountVnd Decimal @db.Decimal(18, 2)
-  paidAt DateTime @db.Date
-  proofFileUrl String?
-  proofFileName String?
-  note String?
-  createdById String? @db.Uuid
-  createdAt DateTime @default(now())
+  id                  String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  paymentRequestId    String                     @db.Uuid
+  paymentRequest      PurchaseTermPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sourceBankAccountId String                     @db.Uuid
+  sourceBankAccount   BankAccount                @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  amountVnd           Decimal                    @db.Decimal(18, 2)
+  paidAt              DateTime                   @db.Date
+  proofFileUrl        String?
+  proofFileName       String?
+  note                String?
+  createdById         String?                    @db.Uuid
+  createdAt           DateTime                   @default(now())
 
   @@index([paymentRequestId, paidAt])
   @@index([sourceBankAccountId])
@@ -2181,23 +2295,50 @@ model SalesOrder {
   legalEntityId   String           @db.Uuid
   orderNo         String
   customerPartyId String           @db.Uuid
+  kind            SalesOrderKind   @default(DAY_TRADE)
   status          SalesOrderStatus @default(DRAFT)
   orderDate       DateTime         @db.Date
   currency        String           @db.Char(3)
   note            String?
-  version         Int              @default(1)
-  createdAt       DateTime         @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime         @updatedAt @db.Timestamptz(6)
 
-  legalEntity     LegalEntity            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  customer        Party                  @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines           SalesOrderLine[]
-  reservations    InventoryReservation[]
-  deliveries      SalesDelivery[]
-  purchaseOrders  PurchaseOrder[]        @relation("SalesOrderPurchaseOrders")
+  contractId      String?         @db.Uuid
+  paymentTermType PaymentTermType @default(SAME_DAY)
+  paymentTermDays Int?
+
+  // Approval workflow (SINGLE/LOT). approvalCycle increments on each resubmission;
+  // approvedById stays null when every internal check passed and no manual approval was needed.
+  approvalCycle  Int       @default(0)
+  policySnapshot Json?
+  createdById    String?   @db.Uuid
+  submittedById  String?   @db.Uuid
+  submittedAt    DateTime? @db.Timestamptz(6)
+  approvedById   String?   @db.Uuid
+  approvedAt     DateTime? @db.Timestamptz(6)
+  rejectedReason String?
+  cancelledById  String?   @db.Uuid
+  cancelledAt    DateTime? @db.Timestamptz(6)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  legalEntity      LegalEntity                 @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer         Party                       @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  contract         Contract?                   @relation("SalesOrderContract", fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  lines            SalesOrderLine[]
+  reservations     InventoryReservation[]
+  deliveries       SalesDelivery[]
+  purchaseOrders   PurchaseOrder[]             @relation("SalesOrderPurchaseOrders")
+  approvalRequests SalesApprovalRequest[]
+  reconciliation   SalesReconciliation?
+  withdrawals      SalesLotWithdrawalRequest[] @relation("SalesOrderWithdrawals")
+  receivableItems  ReceivableOpenItem[]
+  invoices         SalesInvoice[]
 
   @@unique([legalEntityId, orderNo])
   @@index([customerPartyId, status, orderDate])
+  @@index([kind, status])
+  @@index([contractId])
 }
 
 model SalesOrderLine {
@@ -2208,60 +2349,640 @@ model SalesOrderLine {
   orderedActualQty Decimal  @db.Decimal(24, 6)
   orderedV15Qty    Decimal? @db.Decimal(24, 6)
   unitPrice        Decimal  @db.Decimal(24, 8)
+  discountAmount   Decimal  @default(0) @db.Decimal(24, 8)
   taxRate          Decimal? @db.Decimal(9, 6)
   note             String?
 
   // Warehouse the customer wants the goods delivered to; purchasing reuses it on the purchase order.
+  // Keeps its DAY_TRADE meaning only — SINGLE/LOT use issueWarehouseId instead (spec v1.2 D9).
   receivingWarehouseId String? @db.Uuid
 
-  salesOrder         SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product            Product             @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  receivingWarehouse Warehouse?          @relation("SalesOrderLineWarehouse", fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  deliveryLines      SalesDeliveryLine[]
+  // Issue warehouse for SINGLE/LOT lines; required before submit, must share the order's legal entity.
+  issueWarehouseId String? @db.Uuid
+
+  // SINGLE lines may only be fulfilled once. This pointer is the constraint (spec v1.2 P0-2):
+  // set when a delivery line posts, cleared by a correction so the revision can post.
+  effectiveDeliveryLineId String? @unique @db.Uuid
+
+  // Truck and driver as told by the customer; free text since they are not our fleet.
+  // For SINGLE they are the prefill for the per-warehouse SalesDelivery.
+  vehiclePlate String?
+  driverName   String?
+
+  salesOrder          SalesOrder                      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product             Product                         @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receivingWarehouse  Warehouse?                      @relation("SalesOrderLineWarehouse", fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  issueWarehouse      Warehouse?                      @relation("SalesOrderLineIssueWarehouse", fields: [issueWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  deliveryLines       SalesDeliveryLine[]
+  reconciliationLines SalesReconciliationLine[]
+  lotPosition         SalesLotPosition?
+  withdrawalLines     SalesLotWithdrawalRequestLine[] @relation("SalesWithdrawalLineOrderLine")
+
+  invoiceLines          SalesInvoiceLine[]
+  effectiveDeliveryLine SalesDeliveryLine?         @relation("SalesOrderLineEffectiveDelivery", fields: [effectiveDeliveryLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  reservationLines      InventoryReservationLine[]
 
   @@unique([salesOrderId, lineNo])
   @@index([productId])
   @@index([receivingWarehouseId])
+  @@index([issueWarehouseId])
 }
 
-model SalesDelivery {
-  id           String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  deliveryNo   String              @unique
-  salesOrderId String              @db.Uuid
-  warehouseId  String              @db.Uuid
-  status       SalesDeliveryStatus @default(DRAFT)
-  plannedAt    DateTime?           @db.Timestamptz(6)
-  deliveredAt  DateTime?           @db.Timestamptz(6)
-  note         String?
-  version      Int                 @default(1)
-  createdAt    DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime            @updatedAt @db.Timestamptz(6)
+/// Parallel per-department approval request for a sales order (spec v1.2 §3.5).
+/// One PENDING per (salesOrderId, approvalCycle, type) — enforced by partial unique in SQL.
+/// GĐ 5 adds withdrawalRequestId as the second XOR target.
+model SalesApprovalRequest {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
 
-  salesOrder SalesOrder          @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  warehouse  Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines      SalesDeliveryLine[]
-  posting    InventoryPosting?   @relation("SalesDeliveryPosting")
+  /// Exactly one target (DB CHECK): the sales order, or the withdrawal request.
+  salesOrderId        String? @db.Uuid
+  withdrawalRequestId String? @db.Uuid
+
+  approvalCycle Int
+  type          SalesApprovalType
+  status        SalesApprovalStatus @default(PENDING)
+  reasonDetail  Json?
+  requestedById String?             @db.Uuid
+  decidedById   String?             @db.Uuid
+  decidedAt     DateTime?           @db.Timestamptz(6)
+  decisionNote  String?
+  createdAt     DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime            @updatedAt @db.Timestamptz(6)
+
+  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([salesOrderId, approvalCycle, status])
+  @@index([status, type])
+}
+
+/// Remaining draw balance of one line of a LOT order (spec v1.2 §3.4).
+/// "Đang giữ" is NOT stored: it is derived from active reservation lines of approved
+/// withdrawal requests, so the two can never drift apart.
+/// Còn rút được = totalQty − issuedQty − adjustedQty − đang giữ.
+model SalesLotPosition {
+  id               String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesOrderLineId String  @unique @db.Uuid
+  totalQty         Decimal @db.Decimal(24, 6)
+  /// Only quantities the warehouse actually issued count as drawn (nguyên tắc 7).
+  issuedQty        Decimal @default(0) @db.Decimal(24, 6)
+  /// Projection of approved SalesLotAdjustment rows.
+  adjustedQty      Decimal @default(0) @db.Decimal(24, 6)
+  version          Int     @default(1)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  orderLine   SalesOrderLine       @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  adjustments SalesLotAdjustment[]
+}
+
+/// Append-only reduction of a lot commitment; only approved rows move adjustedQty (§3.4).
+model SalesLotAdjustment {
+  id                 String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesLotPositionId String              @db.Uuid
+  qty                Decimal             @db.Decimal(24, 6)
+  reason             String
+  status             SalesApprovalStatus @default(PENDING)
+  requestedById      String?             @db.Uuid
+  decidedById        String?             @db.Uuid
+  decidedAt          DateTime?           @db.Timestamptz(6)
+  decisionNote       String?
+  createdAt          DateTime            @default(now()) @db.Timestamptz(6)
+
+  position SalesLotPosition @relation(fields: [salesLotPositionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([salesLotPositionId, status])
+}
+
+/// A draw against an existing LOT order. It never creates a new sales order (nguyên tắc 1);
+/// the source lot must be chosen by sales when several match (nguyên tắc 4).
+model SalesLotWithdrawalRequest {
+  id              String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  requestNo       String                @unique
+  customerPartyId String                @db.Uuid
+  /// Source LOT order — null only while the request sits in NEED_SOURCE.
+  salesOrderId    String?               @db.Uuid
+  status          SalesWithdrawalStatus @default(DRAFT)
+
+  /// Prefill for the per-warehouse delivery; the delivery row stays authoritative (review 8.3).
+  vehiclePlate String?
+  driverName   String?
+  vehicleId    String? @db.Uuid
+  driverId     String? @db.Uuid
+
+  requestDate    DateTime  @db.Date
+  note           String?
+  approvalCycle  Int       @default(0)
+  createdById    String?   @db.Uuid
+  submittedById  String?   @db.Uuid
+  submittedAt    DateTime? @db.Timestamptz(6)
+  approvedById   String?   @db.Uuid
+  approvedAt     DateTime? @db.Timestamptz(6)
+  rejectedReason String?
+  cancelledById  String?   @db.Uuid
+  cancelledAt    DateTime? @db.Timestamptz(6)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  customer         Party                           @relation("SalesWithdrawalCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOrder       SalesOrder?                     @relation("SalesOrderWithdrawals", fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  vehicle          Vehicle?                        @relation(fields: [vehicleId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  driver           Driver?                         @relation(fields: [driverId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  lines            SalesLotWithdrawalRequestLine[]
+  deliveries       SalesDelivery[]
+  reservations     InventoryReservation[]
+  approvalRequests SalesApprovalRequest[]
+  reconciliation   SalesReconciliation?
+  receivableItems  ReceivableOpenItem[]
+  invoices         SalesInvoice[]
+
+  @@index([customerPartyId, status])
+  @@index([salesOrderId, status])
+}
+
+model SalesLotWithdrawalRequestLine {
+  id        String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  requestId String @db.Uuid
+  lineNo    Int
+
+  /// Set once the source lot order line is chosen; productId/warehouseId keep the request
+  /// readable while it is still NEED_SOURCE.
+  salesOrderLineId String?  @db.Uuid
+  productId        String   @db.Uuid
+  warehouseId      String   @db.Uuid
+  requestedQty     Decimal  @db.Decimal(24, 6)
+  requestedV15Qty  Decimal? @db.Decimal(24, 6)
+
+  request          SalesLotWithdrawalRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  orderLine        SalesOrderLine?            @relation("SalesWithdrawalLineOrderLine", fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product          Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse        Warehouse                  @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reservationLines InventoryReservationLine[]
+
+  @@unique([requestId, lineNo])
+  @@index([salesOrderLineId])
+}
+
+/// Reconciliation of what was ordered vs planned vs actually issued, per line and warehouse
+/// (spec v1.2 §3.6). Dual target: a SINGLE order reconciles as a whole; GĐ 5 adds the
+/// withdrawal request as the second target.
+model SalesReconciliation {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  /// Exactly one target (DB CHECK): a SINGLE order reconciles as a whole, a LOT draw
+  /// reconciles per withdrawal request (spec v1.2 §3.6).
+  salesOrderId        String? @unique @db.Uuid
+  withdrawalRequestId String? @unique @db.Uuid
+
+  status       SalesReconciliationStatus @default(OPEN)
+  resolvedById String?                   @db.Uuid
+  resolvedAt   DateTime?                 @db.Timestamptz(6)
+  version      Int                       @default(1)
+  createdAt    DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime                  @updatedAt @db.Timestamptz(6)
+
+  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines             SalesReconciliationLine[]
+
+  @@index([status])
+}
+
+model SalesReconciliationLine {
+  id                  String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reconciliationId    String @db.Uuid
+  salesOrderLineId    String @db.Uuid
+  salesDeliveryId     String @db.Uuid
+  salesDeliveryLineId String @unique @db.Uuid
+  warehouseId         String @db.Uuid
+
+  orderedQty            Decimal  @db.Decimal(24, 6)
+  plannedQty            Decimal  @db.Decimal(24, 6)
+  warehouseConfirmedQty Decimal  @db.Decimal(24, 6)
+  docQty                Decimal? @db.Decimal(24, 6)
+  actualQty             Decimal  @db.Decimal(24, 6)
+  v15Qty                Decimal? @db.Decimal(24, 6)
+
+  status       SalesReconciliationStatus @default(OPEN)
+  varianceNote String?
+  resolvedById String?                   @db.Uuid
+  resolvedAt   DateTime?                 @db.Timestamptz(6)
+
+  /// A correction supersedes the old line with the revision's line; superseded rows keep
+  /// their history but drop out of the aggregate. One-to-one: a revision line replaces
+  /// exactly one earlier line.
+  supersededById String? @unique @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  reconciliation SalesReconciliation      @relation(fields: [reconciliationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  orderLine      SalesOrderLine           @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  delivery       SalesDelivery            @relation(fields: [salesDeliveryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  deliveryLine   SalesDeliveryLine        @relation(fields: [salesDeliveryLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supersededBy   SalesReconciliationLine? @relation("SalesReconciliationSupersede", fields: [supersededById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  supersedes     SalesReconciliationLine? @relation("SalesReconciliationSupersede")
+
+  @@index([reconciliationId, status])
+  @@index([salesOrderLineId])
+  @@index([salesDeliveryId])
+  @@index([supersededById])
+}
+
+/// How the outside world writes the name of a customer, warehouse or product.
+///
+/// Real data drove this table: "Kho Nghi Sơn" is written as NGHISON, NSon, ns, apns — but
+/// also as "Anh Phát", "AP", "Quảng Hưng", "PV Oil Nghi Sơn", the operators of that depot.
+/// No fuzzy algorithm can derive those, so an explicit mapping is the primary lookup and
+/// fuzzy matching only ever proposes candidates.
+///
+/// Business owns this data: they import it, add to it, and it also grows itself whenever a
+/// sale resolves an unknown spelling by hand.
+model SalesEntityAlias {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  entityType SalesAliasEntityType
+
+  /// Exactly one target, matching the entityType (DB CHECK).
+  partyId     String? @db.Uuid
+  warehouseId String? @db.Uuid
+  productId   String? @db.Uuid
+
+  /// As typed by the outside world, kept for display.
+  externalName   String
+  /// Lookup key: diacritics stripped, punctuation removed, upper-cased.
+  normalizedName String
+
+  source      SalesAliasSource @default(MANUAL)
+  note        String?
+  createdById String?          @db.Uuid
+
+  validFrom DateTime  @default(now()) @db.Timestamptz(6)
+  validTo   DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  party     Party?     @relation("SalesAliasParty", fields: [partyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  product   Product?   @relation("SalesAliasProduct", fields: [productId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([entityType, normalizedName])
+  @@index([partyId])
+  @@index([warehouseId])
+  @@index([productId])
+}
+
+/// Every quick-entry paste: what was pasted, what the parser made of it, and what the sale
+/// corrected. Feeds the "spellings we still do not recognise" screen so business can close
+/// the gaps with data instead of guesswork.
+model SalesQuickEntryLog {
+  id          String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  rawText     String
+  parsed      Json?
+  /// What the sale actually confirmed, when they did.
+  confirmed   Json?
+  usedAi      Boolean  @default(false)
+  /// Normalised tokens that matched nothing — the backlog for alias maintenance.
+  unmatched   Json?
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([createdAt])
+}
+
+/// Output VAT invoice issued through MISA meInvoice (spec v1.2 §3.7, §10).
+///
+/// One ORIGINAL per commercial document — a SINGLE order as a whole, or one LOT draw —
+/// enforced by partial unique indexes. Adjustments and replacements are new rows citing the
+/// original, so the legal document trail is never overwritten.
+model SalesInvoice {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  /// Created before the first MISA call and reused as the stable transaction key, so a
+  /// retry can ask MISA "did this one already go out?" instead of publishing twice.
+  invoiceNoInternal String @unique
+
+  /// Exactly one target (DB CHECK).
+  salesOrderId        String? @db.Uuid
+  withdrawalRequestId String? @db.Uuid
+
+  documentType      SalesInvoiceDocumentType @default(ORIGINAL)
+  originalInvoiceId String?                  @db.Uuid
+  status            SalesInvoiceStatus       @default(DRAFT)
+
+  legalEntityId   String @db.Uuid
+  customerPartyId String @db.Uuid
+
+  // Buyer details frozen at issue time — later master-data edits must not rewrite history.
+  buyerName    String
+  buyerTaxCode String?
+  buyerAddress String?
+  buyerEmail   String?
+
+  currency      String  @db.Char(3)
+  subtotal      Decimal @db.Decimal(24, 4)
+  discountTotal Decimal @default(0) @db.Decimal(24, 4)
+  taxTotal      Decimal @default(0) @db.Decimal(24, 4)
+  grandTotal    Decimal @db.Decimal(24, 4)
+
+  invoiceDate     DateTime  @db.Date
+  paymentTermDays Int?
+  dueDate         DateTime? @db.Date
+  note            String?
+
+  misaTransactionId String?   @unique
+  misaInvoiceNo     String?
+  misaTemplateNo    String?
+  misaSerial        String?
+  issuedAt          DateTime? @db.Timestamptz(6)
+  cancelledAt       DateTime? @db.Timestamptz(6)
+  cancelledById     String?   @db.Uuid
+  cancelReason      String?
+
+  createdById String?  @db.Uuid
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity       LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer          Party                      @relation("SalesInvoiceCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  originalInvoice   SalesInvoice?              @relation("SalesInvoiceCorrection", fields: [originalInvoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  corrections       SalesInvoice[]             @relation("SalesInvoiceCorrection")
+  lines             SalesInvoiceLine[]
+  issuances         SalesInvoiceIssuance[]
+  receivableItem    ReceivableOpenItem?
+
+  @@index([customerPartyId, status, invoiceDate])
+  @@index([salesOrderId])
+  @@index([withdrawalRequestId])
+  @@index([originalInvoiceId])
+}
+
+model SalesInvoiceLine {
+  id             String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesInvoiceId String @db.Uuid
+  lineNo         Int
+
+  /// Traceability back to what was ordered and what actually left the warehouse.
+  salesOrderLineId    String  @db.Uuid
+  salesDeliveryLineId String? @db.Uuid
+
+  productId      String   @db.Uuid
+  description    String
+  uom            String
+  qty            Decimal  @db.Decimal(24, 6)
+  unitPrice      Decimal  @db.Decimal(24, 8)
+  discountAmount Decimal  @default(0) @db.Decimal(24, 4)
+  taxRate        Decimal? @db.Decimal(9, 6)
+  netAmount      Decimal  @db.Decimal(24, 4)
+  taxAmount      Decimal  @default(0) @db.Decimal(24, 4)
+  lineTotal      Decimal  @db.Decimal(24, 4)
+
+  invoice      SalesInvoice       @relation(fields: [salesInvoiceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  orderLine    SalesOrderLine     @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  deliveryLine SalesDeliveryLine? @relation(fields: [salesDeliveryLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product      Product            @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([salesInvoiceId, lineNo])
+  @@index([salesOrderLineId])
+  @@index([salesDeliveryLineId])
+}
+
+/// Every call to MISA, written before and after the request so a crash in between is
+/// visible and recoverable (spec v1.2 §10.2).
+model SalesInvoiceIssuance {
+  id             String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesInvoiceId String @db.Uuid
+  attempt        Int
+  action         String
+  status         String
+
+  requestPayload  Json?
+  responsePayload Json?
+  httpStatus      Int?
+  errorCode       String?
+  errorMessage    String?
+
+  startedAt  DateTime  @default(now()) @db.Timestamptz(6)
+  finishedAt DateTime? @db.Timestamptz(6)
+
+  invoice SalesInvoice @relation(fields: [salesInvoiceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([salesInvoiceId, startedAt])
+}
+
+/// Customer receivable — the mirror of PayableOpenItem, same ledger discipline (spec v1.2 §3.8).
+/// Source is the commercial document that created the debt; GĐ 6 fills salesInvoiceId when
+/// the MISA invoice is issued.
+model ReceivableOpenItem {
+  id                  String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesInvoiceId      String? @unique @db.Uuid
+  salesOrderId        String? @db.Uuid
+  withdrawalRequestId String? @db.Uuid
+
+  legalEntityId   String @db.Uuid
+  customerPartyId String @db.Uuid
+
+  currency          String    @db.Char(3)
+  originalAmount    Decimal   @db.Decimal(24, 4)
+  outstandingAmount Decimal   @db.Decimal(24, 4)
+  dueDate           DateTime? @db.Date
+  note              String?
+
+  status  ReceivableOpenItemStatus @default(OPEN)
+  version Int                      @default(0)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  salesInvoice      SalesInvoice?              @relation(fields: [salesInvoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity       LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer          Party                      @relation("ReceivableCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  entries           ReceivableLedgerEntry[]
+  allocations       ReceivableAllocation[]
+
+  @@index([customerPartyId, status, dueDate])
+  @@index([salesOrderId])
+  @@index([withdrawalRequestId])
+}
+
+model ReceivableLedgerEntry {
+  id             String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  openItemId     String              @db.Uuid
+  type           ReceivableEntryType
+  amountDelta    Decimal             @db.Decimal(24, 4)
+  allocationId   String?             @unique @db.Uuid
+  reversalOfId   String?             @unique @db.Uuid
+  idempotencyKey String              @unique
+  effectiveAt    DateTime            @db.Timestamptz(6)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+
+  openItem   ReceivableOpenItem     @relation(fields: [openItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  allocation ReceivableAllocation?  @relation(fields: [allocationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversalOf ReceivableLedgerEntry? @relation("ReceivableLedgerEntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy ReceivableLedgerEntry? @relation("ReceivableLedgerEntryReversal")
+
+  @@index([openItemId, effectiveAt])
+}
+
+/// Money in from a customer applied to an open item; reversible, never edited in place.
+model ReceivableAllocation {
+  id                   String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bankTransactionId    String                     @db.Uuid
+  openItemId           String                     @db.Uuid
+  amountInBankCurrency Decimal                    @db.Decimal(24, 4)
+  amountInItemCurrency Decimal                    @db.Decimal(24, 4)
+  fxRate               Decimal?                   @db.Decimal(24, 10)
+  status               ReceivableAllocationStatus @default(ACTIVE)
+  reversalOfId         String?                    @unique @db.Uuid
+  idempotencyKey       String                     @unique
+  allocatedById        String?                    @db.Uuid
+  allocatedAt          DateTime                   @db.Timestamptz(6)
+
+  bankTransaction BankTransaction        @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  openItem        ReceivableOpenItem     @relation(fields: [openItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntry     ReceivableLedgerEntry?
+  reversalOf      ReceivableAllocation?  @relation("ReceivableAllocationReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy      ReceivableAllocation?  @relation("ReceivableAllocationReversal")
+
+  @@index([bankTransactionId, status])
+  @@index([openItemId, status])
+}
+
+/// Append-only business workflow audit, written inside the same transaction as the transition.
+model SalesWorkflowEvent {
+  id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  entityType String
+  entityId   String   @db.Uuid
+  eventType  String
+  fromStatus String?
+  toStatus   String?
+  actorId    String?  @db.Uuid
+  reason     String?
+  version    Int?
+  cycle      Int?
+  metadata   Json?
+  occurredAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([entityType, entityId, occurredAt])
+}
+
+/// One warehouse's share of the work for a sales order (spec v1.2 D1): a SINGLE order
+/// spanning several warehouses has one SalesDelivery per warehouse, each with its own posting.
+model SalesDelivery {
+  id                  String              @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  deliveryNo          String              @unique
+  salesOrderId        String              @db.Uuid
+  /// Set when this job serves a LOT draw; the order above is then the source lot order.
+  withdrawalRequestId String?             @db.Uuid
+  warehouseId         String              @db.Uuid
+  status              SalesDeliveryStatus @default(DRAFT)
+  plannedAt           DateTime?           @db.Timestamptz(6)
+  deliveredAt         DateTime?           @db.Timestamptz(6)
+  note                String?
+
+  // Truck and driver are authoritative here, not on the order or the withdrawal request.
+  vehiclePlate String?
+  driverName   String?
+  vehicleId    String? @db.Uuid
+  driverId     String? @db.Uuid
+
+  // Filled by the warehouse when it confirms the issue (GĐ 3).
+  issueDocNo     String?
+  sourceFileName String?
+  sourceFileUrl  String?
+  confirmedById  String?   @db.Uuid
+  confirmedAt    DateTime? @db.Timestamptz(6)
+
+  // Warehouse hands the job back to sales instead of editing sales data itself.
+  returnedReason String?
+  returnedById   String?   @db.Uuid
+  returnedAt     DateTime? @db.Timestamptz(6)
+
+  // Correction after POSTED voids this row and creates a revision (spec v1.2 §9).
+  revisionOfId String? @unique @db.Uuid
+
+  createdById String?  @db.Uuid
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  salesOrder          SalesOrder                 @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest   SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse           Warehouse                  @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  vehicle             Vehicle?                   @relation(fields: [vehicleId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  driver              Driver?                    @relation(fields: [driverId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  revisionOf          SalesDelivery?             @relation("SalesDeliveryRevision", fields: [revisionOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  revisedBy           SalesDelivery?             @relation("SalesDeliveryRevision")
+  lines               SalesDeliveryLine[]
+  posting             InventoryPosting?          @relation("SalesDeliveryPosting")
+  reconciliationLines SalesReconciliationLine[]
 
   @@index([salesOrderId, status])
   @@index([warehouseId, status, plannedAt])
+  @@index([vehicleId])
+  @@index([driverId])
 }
 
 model SalesDeliveryLine {
-  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  salesDeliveryId  String   @db.Uuid
+  id               String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesDeliveryId  String @db.Uuid
   lineNo           Int
-  salesOrderLineId String   @db.Uuid
-  ownerPartyId     String   @db.Uuid
-  actualQty        Decimal  @db.Decimal(24, 6)
-  v15Qty           Decimal? @db.Decimal(24, 6)
+  salesOrderLineId String @db.Uuid
+  ownerPartyId     String @db.Uuid
 
-  delivery    SalesDelivery    @relation(fields: [salesDeliveryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  orderLine   SalesOrderLine   @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  owner       Party            @relation("SalesDeliveryLineOwner", fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  costEntries CostLayerEntry[]
+  // Planned = what was reserved for this warehouse; actual = what the warehouse confirmed.
+  // actualQty stays null until the warehouse confirms (0 means "confirmed nothing issued").
+  plannedActualQty Decimal  @default(0) @db.Decimal(24, 6)
+  plannedV15Qty    Decimal? @db.Decimal(24, 6)
+  actualQty        Decimal? @db.Decimal(24, 6)
+  v15Qty           Decimal? @db.Decimal(24, 6)
+  temperatureC     Decimal? @db.Decimal(8, 3)
+  vcf              Decimal? @db.Decimal(14, 8)
+
+  postedAt DateTime? @db.Timestamptz(6)
+
+  delivery           SalesDelivery                @relation(fields: [salesDeliveryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  orderLine          SalesOrderLine               @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner              Party                        @relation("SalesDeliveryLineOwner", fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  costEntries        CostLayerEntry[]
+  effectiveForLine   SalesOrderLine?              @relation("SalesOrderLineEffectiveDelivery")
+  lotAllocations     SalesDeliveryLotAllocation[]
+  reconciliationLine SalesReconciliationLine?
+  invoiceLines       SalesInvoiceLine[]
 
   @@unique([salesDeliveryId, lineNo])
   @@index([salesOrderLineId])
+  @@index([ownerPartyId])
+}
+
+/// The single source of truth for WHICH lot was issued (spec v1.2 nguyên tắc 10).
+/// The same rows drive the inventory posting, the reservation consumption, the cost-layer
+/// consumption, purchase-source tracing and the profitability report — never two independent
+/// FIFO picks that could disagree.
+model SalesDeliveryLotAllocation {
+  id                  String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesDeliveryLineId String   @db.Uuid
+  inventoryLotId      String   @db.Uuid
+  ownerPartyId        String   @db.Uuid
+  actualQty           Decimal  @db.Decimal(24, 6)
+  v15Qty              Decimal? @db.Decimal(24, 6)
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+
+  deliveryLine SalesDeliveryLine @relation(fields: [salesDeliveryLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot          InventoryLot      @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner        Party             @relation("SalesDeliveryLotAllocationOwner", fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([salesDeliveryLineId, inventoryLotId])
+  @@index([inventoryLotId])
   @@index([ownerPartyId])
 }
 
@@ -2921,9 +3642,9 @@ model BankAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  imports            BankStatementImport[]
-  transactions       BankTransaction[]
-  termPaymentBatches TermPaymentBatch[]
+  imports                BankStatementImport[]
+  transactions           BankTransaction[]
+  termPaymentBatches     TermPaymentBatch[]
   paymentRequestPayments PaymentRequestPayment[]
 
   @@unique([bankCode, accountNo])
@@ -3018,6 +3739,7 @@ model BankTransaction {
   purpose     BankTransactionPurpose? @relation(fields: [purposeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   payableAllocations    PayableAllocation[]
+  receivableAllocations ReceivableAllocation[]
   termBankInstructions  PurchaseTermBankInstruction[]
   termPaymentBatchItems TermPaymentBatchItem[]
 
@@ -3414,13 +4136,13 @@ model PriceBulletinItem {
 }
 
 model VatRate {
-  id       String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  name     String  @unique
-  rate     Decimal @db.Decimal(5, 2)
-  isExempt Boolean @default(false)
-  isActive Boolean @default(true)
+  id        String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  name      String  @unique
+  rate      Decimal @db.Decimal(5, 2)
+  isExempt  Boolean @default(false)
+  isActive  Boolean @default(true)
   isDefault Boolean @default(false)
-  sortOrder Int    @default(0)
+  sortOrder Int     @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3532,7 +4254,7 @@ model Party {
   shippingAddress String?
   contactEmail    String?
   contactPhone    String?
-  bankAccountNo  String?
+  bankAccountNo   String?
   creditLimit     Decimal?  @db.Decimal(24, 4)
   tempLimit       Decimal?  @db.Decimal(24, 4)
   tempFrom        DateTime?
@@ -3607,7 +4329,12 @@ model Party {
   lotCostLayersOwned            InventoryCostLayer[]
   payableOpenItems              PayableOpenItem[]
   salesOrdersCustomer           SalesOrder[]                   @relation("SalesOrderCustomer")
+  salesWithdrawals              SalesLotWithdrawalRequest[]    @relation("SalesWithdrawalCustomer")
+  receivableOpenItems           ReceivableOpenItem[]           @relation("ReceivableCustomer")
+  salesInvoicesCustomer         SalesInvoice[]                 @relation("SalesInvoiceCustomer")
+  salesAliases                  SalesEntityAlias[]             @relation("SalesAliasParty")
   salesDeliveryLinesOwned       SalesDeliveryLine[]            @relation("SalesDeliveryLineOwner")
+  salesDeliveryLotAllocations   SalesDeliveryLotAllocation[]   @relation("SalesDeliveryLotAllocationOwner")
   commercialLotPositions        CommercialLotPosition[]        @relation("CommercialLotPositionSupplier")
 
   @@index([name])
@@ -3651,6 +4378,8 @@ model LegalEntity {
   landedCostDocuments LandedCostDocument[]
   supplierInvoices    SupplierInvoice[]
   payableOpenItems    PayableOpenItem[]
+  receivableOpenItems ReceivableOpenItem[]
+  salesInvoices       SalesInvoice[]
 
   @@index([partyId])
 }
@@ -3715,6 +4444,9 @@ model Warehouse {
   reconciliationSessions       WarehouseReconciliation[]
   salesDeliveries              SalesDelivery[]
   salesOrderLines              SalesOrderLine[]                @relation("SalesOrderLineWarehouse")
+  salesOrderIssueLines         SalesOrderLine[]                @relation("SalesOrderLineIssueWarehouse")
+  salesWithdrawalLines         SalesLotWithdrawalRequestLine[]
+  salesAliases                 SalesEntityAlias[]
   commercialLotPositions       CommercialLotPosition[]         @relation("CommercialLotPlannedWarehouse")
   commercialLotWithdrawals     CommercialLotWithdrawal[]       @relation("CommercialLotDestinationWarehouse")
 
@@ -3780,19 +4512,20 @@ model InventoryLot {
   receivedAt         DateTime @db.Timestamptz(6)
   createdAt          DateTime @default(now()) @db.Timestamptz(6)
 
-  receiptLine            GoodsReceiptLine?          @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product                Product                    @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  originOwner            Party                      @relation(fields: [originOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  ledgerEntries          InventoryLedgerEntry[]
-  stockBalances          StockBalance[]
-  reservationLines       InventoryReservationLine[]
-  pendingReleases        InventoryPendingRelease[]
-  inventoryBlocks        InventoryBlock[]
-  movementLines          InventoryMovementLine[]
-  ownershipTransferLines OwnershipTransferLine[]
-  stockAdjustmentLines   StockAdjustmentLine[]
-  landedCostAllocations  LandedCostAllocation[]
-  costLayers             InventoryCostLayer[]
+  receiptLine                 GoodsReceiptLine?            @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product                     Product                      @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  originOwner                 Party                        @relation(fields: [originOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntries               InventoryLedgerEntry[]
+  stockBalances               StockBalance[]
+  reservationLines            InventoryReservationLine[]
+  pendingReleases             InventoryPendingRelease[]
+  inventoryBlocks             InventoryBlock[]
+  movementLines               InventoryMovementLine[]
+  ownershipTransferLines      OwnershipTransferLine[]
+  stockAdjustmentLines        StockAdjustmentLine[]
+  landedCostAllocations       LandedCostAllocation[]
+  costLayers                  InventoryCostLayer[]
+  salesDeliveryLotAllocations SalesDeliveryLotAllocation[]
 
   @@index([productId, receivedAt])
   @@index([originOwnerPartyId, productId])
@@ -3875,24 +4608,27 @@ model StockBalance {
 }
 
 model InventoryReservation {
-  id              String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  reservationNo   String            @unique
-  legalEntityId   String            @db.Uuid
-  customerPartyId String?           @db.Uuid
-  salesOrderId    String?           @db.Uuid
-  manualReference String?
-  status          ReservationStatus @default(DRAFT)
-  reservedAt      DateTime          @default(now()) @db.Timestamptz(6)
-  expiresAt       DateTime?         @db.Timestamptz(6)
-  note            String?
-  version         Int               @default(1)
-  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime          @updatedAt @db.Timestamptz(6)
+  id                  String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reservationNo       String            @unique
+  legalEntityId       String            @db.Uuid
+  customerPartyId     String?           @db.Uuid
+  salesOrderId        String?           @db.Uuid
+  /// A LOT draw holds stock against its withdrawal request, not the lot order (spec §3.3).
+  withdrawalRequestId String?           @db.Uuid
+  manualReference     String?
+  status              ReservationStatus @default(DRAFT)
+  reservedAt          DateTime          @default(now()) @db.Timestamptz(6)
+  expiresAt           DateTime?         @db.Timestamptz(6)
+  note                String?
+  version             Int               @default(1)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(6)
 
-  legalEntity LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  customer    Party?                     @relation("InventoryReservationCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  salesOrder  SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines       InventoryReservationLine[]
+  legalEntity       LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer          Party?                     @relation("InventoryReservationCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines             InventoryReservationLine[]
 
   @@index([status, expiresAt])
   @@index([customerPartyId, status])
@@ -3900,12 +4636,19 @@ model InventoryReservation {
 }
 
 model InventoryReservationLine {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  reservationId      String   @db.Uuid
-  lineNo             Int
-  warehouseId        String   @db.Uuid
-  productId          String   @db.Uuid
-  ownerPartyId       String   @db.Uuid
+  id            String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  reservationId String @db.Uuid
+  lineNo        Int
+  warehouseId   String @db.Uuid
+  productId     String @db.Uuid
+  ownerPartyId  String @db.Uuid
+
+  // Sales links the hold back to the exact order line it covers, so "đang giữ" can be
+  // computed per line even when several holds share warehouse+product+owner (spec v1.2 §3.3).
+  salesOrderLineId        String? @db.Uuid
+  /// For a LOT draw the hold belongs to the withdrawal request line.
+  withdrawalRequestLineId String? @db.Uuid
+
   inventoryLotId     String?  @db.Uuid
   requestedActualQty Decimal  @db.Decimal(24, 6)
   requestedV15Qty    Decimal? @db.Decimal(24, 6)
@@ -3917,16 +4660,19 @@ model InventoryReservationLine {
   consumedV15Qty     Decimal? @db.Decimal(24, 6)
   version            Int      @default(0)
 
-  reservation InventoryReservation        @relation(fields: [reservationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  warehouse   Warehouse                   @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  product     Product                     @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  owner       Party                       @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lot         InventoryLot?               @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  events      InventoryReservationEvent[]
+  reservation           InventoryReservation           @relation(fields: [reservationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  warehouse             Warehouse                      @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product               Product                        @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  owner                 Party                          @relation(fields: [ownerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lot                   InventoryLot?                  @relation(fields: [inventoryLotId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOrderLine        SalesOrderLine?                @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequestLine SalesLotWithdrawalRequestLine? @relation(fields: [withdrawalRequestLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  events                InventoryReservationEvent[]
 
   @@unique([reservationId, lineNo])
   @@index([warehouseId, productId, ownerPartyId])
   @@index([inventoryLotId])
+  @@index([salesOrderLineId])
 }
 
 model InventoryReservationEvent {
@@ -4593,11 +5339,11 @@ model SupplierInvoice {
   createdAt          DateTime              @default(now()) @db.Timestamptz(6)
   updatedAt          DateTime              @updatedAt @db.Timestamptz(6)
 
-  legalEntity   LegalEntity           @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  supplier      Party                 @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  purchaseOrder PurchaseOrder?        @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lines         SupplierInvoiceLine[]
-  openItem      PayableOpenItem?
+  legalEntity     LegalEntity                  @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplier        Party                        @relation(fields: [supplierCustomerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrder   PurchaseOrder?               @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lines           SupplierInvoiceLine[]
+  openItem        PayableOpenItem?
   paymentRequests PurchaseTermPaymentRequest[]
 
   @@unique([legalEntityId, supplierCustomerId, invoiceSymbol, invoiceNo])

@@ -150,6 +150,15 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                     payload.workItemSourceId,
                     scalarString(payload.entityId, outbox.aggregateId),
                 )
+                // Version/cycle of the source entity when the event was emitted. Late events
+                // must not resurrect or close a work item that a newer state already settled.
+                const sourceVersion =
+                    typeof payload.sourceVersion === 'number'
+                        ? payload.sourceVersion
+                        : typeof payload.cycle === 'number'
+                          ? payload.cycle
+                          : null
+
                 if (resolvedActions.length) {
                     await tx.notificationWorkItem.updateMany({
                         where: {
@@ -157,8 +166,16 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                             sourceId: workItemSourceId,
                             action: { in: resolvedActions },
                             status: 'OPEN',
+                            ...(sourceVersion == null
+                                ? {}
+                                : {
+                                      OR: [
+                                          { sourceVersion: null },
+                                          { sourceVersion: { lte: sourceVersion } },
+                                      ],
+                                  }),
                         },
-                        data: { status: 'COMPLETED', completedAt: now },
+                        data: { status: 'COMPLETED', completedAt: now, sourceVersion },
                     })
                 }
 
@@ -188,27 +205,27 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                             const action = scalarString(payload.action, rendered.action ?? 'VIEW')
                             const dueAt =
                                 typeof payload.dueAt === 'string' ? new Date(payload.dueAt) : null
-                            await tx.notificationWorkItem.upsert({
-                                where: {
-                                    userId_sourceType_sourceId_action: {
-                                        userId,
-                                        sourceType,
-                                        sourceId,
-                                        action,
-                                    },
-                                },
-                                create: {
-                                    userId,
-                                    sourceType,
-                                    sourceId,
-                                    action,
-                                    dueAt,
-                                },
-                                update: {
-                                    status: 'OPEN',
-                                    completedAt: null,
-                                    dueAt,
-                                },
+                            const key = { userId, sourceType, sourceId, action }
+                            const current = await tx.notificationWorkItem.findUnique({
+                                where: { userId_sourceType_sourceId_action: key },
+                                select: { id: true, sourceVersion: true },
+                            })
+                            if (!current) {
+                                await tx.notificationWorkItem.create({
+                                    data: { ...key, dueAt, sourceVersion },
+                                })
+                                continue
+                            }
+                            if (
+                                sourceVersion != null &&
+                                current.sourceVersion != null &&
+                                current.sourceVersion > sourceVersion
+                            ) {
+                                continue // a newer state already settled this item
+                            }
+                            await tx.notificationWorkItem.update({
+                                where: { id: current.id },
+                                data: { status: 'OPEN', completedAt: null, dueAt, sourceVersion },
                             })
                         }
                     }
