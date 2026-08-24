@@ -234,6 +234,62 @@ export class WarehouseOperationsService {
             }),
             this.prisma.inventoryAvailabilityBalance.count({ where }),
         ])
+        const stockRows = items.length
+            ? await this.prisma.stockBalance.findMany({
+                  where: {
+                      OR: items.map((item) => ({
+                          warehouseId: item.warehouseId,
+                          productId: item.productId,
+                          ownerPartyId: item.ownerPartyId,
+                      })),
+                      actualQty: { not: new Prisma.Decimal(0) },
+                  },
+                  select: {
+                      warehouseId: true,
+                      productId: true,
+                      ownerPartyId: true,
+                      actualQty: true,
+                      lot: {
+                          select: {
+                              releaseCode: true,
+                              supplierPartyId: true,
+                              supplier: { select: { id: true, code: true, name: true } },
+                          },
+                      },
+                  },
+              })
+            : []
+        const releaseTotalsByAvailability = new Map<
+            string,
+            { TP: Prisma.Decimal; NCC: Prisma.Decimal; UNCLASSIFIED: Prisma.Decimal }
+        >()
+        const supplierTotalsByAvailability = new Map<
+            string,
+            Map<string, { supplier: { id: string; code: string; name: string }; TP: Prisma.Decimal; NCC: Prisma.Decimal; UNCLASSIFIED: Prisma.Decimal }>
+        >()
+        for (const stock of stockRows) {
+            const key = `${stock.warehouseId}:${stock.productId}:${stock.ownerPartyId}`
+            const totals = releaseTotalsByAvailability.get(key) ?? {
+                TP: new Prisma.Decimal(0),
+                NCC: new Prisma.Decimal(0),
+                UNCLASSIFIED: new Prisma.Decimal(0),
+            }
+            const releaseCode = stock.lot.releaseCode ?? 'UNCLASSIFIED'
+            totals[releaseCode] = totals[releaseCode].plus(stock.actualQty)
+            releaseTotalsByAvailability.set(key, totals)
+            if (stock.lot.supplier) {
+                const suppliers = supplierTotalsByAvailability.get(key) ?? new Map()
+                const supplierTotals = suppliers.get(stock.lot.supplier.id) ?? {
+                    supplier: stock.lot.supplier,
+                    TP: new Prisma.Decimal(0),
+                    NCC: new Prisma.Decimal(0),
+                    UNCLASSIFIED: new Prisma.Decimal(0),
+                }
+                supplierTotals[releaseCode] = supplierTotals[releaseCode].plus(stock.actualQty)
+                suppliers.set(stock.lot.supplier.id, supplierTotals)
+                supplierTotalsByAvailability.set(key, suppliers)
+            }
+        }
         return {
             items: items.map((item) => {
                 const availableQty = new Prisma.Decimal(item.onHandActualQty)
@@ -250,6 +306,19 @@ export class WarehouseOperationsService {
                     sellableQty: availableQty.minus(item.reservedActualQty),
                     pendingReleaseQty: item.pendingActualQty,
                     blockedQty: item.blockedActualQty,
+                    releaseTotals:
+                        releaseTotalsByAvailability.get(
+                            `${item.warehouseId}:${item.productId}:${item.ownerPartyId}`,
+                        ) ?? {
+                            TP: new Prisma.Decimal(0),
+                            NCC: new Prisma.Decimal(0),
+                            UNCLASSIFIED: new Prisma.Decimal(0),
+                        },
+                    supplierReleaseTotals: [
+                        ...(supplierTotalsByAvailability.get(
+                            `${item.warehouseId}:${item.productId}:${item.ownerPartyId}`,
+                        )?.values() ?? []),
+                    ],
                 }
             }),
             total,
@@ -269,7 +338,16 @@ export class WarehouseOperationsService {
                 warehouse: { select: { id: true, code: true, name: true } },
                 product: { select: { id: true, code: true, name: true, uom: true } },
                 owner: { select: { id: true, code: true, name: true } },
-                lot: { select: { id: true, lotNo: true, receivedAt: true } },
+                lot: {
+                    select: {
+                        id: true,
+                        lotNo: true,
+                        receivedAt: true,
+                        releaseCode: true,
+                        supplierPartyId: true,
+                        supplier: { select: { id: true, code: true, name: true } },
+                    },
+                },
             },
             orderBy: [{ warehouse: { name: 'asc' } }, { product: { name: 'asc' } }, { lot: { receivedAt: 'asc' } }],
         })
@@ -281,6 +359,9 @@ export class WarehouseOperationsService {
                 supplierLocation: item.warehouse,
                 physicalQty: item.actualQty,
                 postedQty: item.actualQty,
+                releaseCode: item.lot.releaseCode,
+                supplierPartyId: item.lot.supplierPartyId,
+                supplier: item.lot.supplier,
                 pendingDocQty: new Prisma.Decimal(0),
             })),
         }
@@ -316,7 +397,7 @@ export class WarehouseOperationsService {
                 product: { select: { id: true, code: true, name: true, uom: true } },
                 purchaseOrderLine: {
                     select: {
-                        purchaseOrder: { select: { id: true, orderNo: true } },
+                        purchaseOrder: { select: { id: true, orderNo: true, releaseCode: true } },
                     },
                 },
                 withdrawalLines: {
@@ -356,6 +437,7 @@ export class WarehouseOperationsService {
                         select: {
                             id: true,
                             orderNo: true,
+                            releaseCode: true,
                             supplier: { select: { id: true, code: true, name: true } },
                         },
                     },
@@ -409,6 +491,9 @@ export class WarehouseOperationsService {
                             supplier: position.supplier,
                             product: position.product,
                             orderNo: position.purchaseOrderLine.purchaseOrder.orderNo,
+                            releaseCode:
+                                position.releaseCode ??
+                                position.purchaseOrderLine.purchaseOrder.releaseCode,
                             stockState: position.stockState,
                             accountingQty: allocation.qty,
                             accountingValue,
@@ -436,6 +521,7 @@ export class WarehouseOperationsService {
                     supplier: line.purchaseOrder.supplier,
                     product: line.product,
                     orderNo: line.purchaseOrder.orderNo,
+                    releaseCode: line.purchaseOrder.releaseCode,
                     stockState: 'NON_EXPORTABLE',
                     accountingQty: new Prisma.Decimal(0),
                     accountingValue: new Prisma.Decimal(0),

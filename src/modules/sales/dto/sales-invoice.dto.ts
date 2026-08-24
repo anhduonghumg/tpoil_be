@@ -24,12 +24,39 @@ export class ListSalesInvoicesQueryDto {
 
     @IsOptional()
     @IsUUID()
+    accountantEmployeeId?: string
+
+    @IsOptional()
+    @IsUUID()
     salesOrderId?: string
 
     /** Hóa đơn của một lần rút lô có salesOrderId = null, phải lọc bằng chính phiếu rút. */
     @IsOptional()
     @IsUUID()
     withdrawalRequestId?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    page?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    limit?: number
+}
+
+/** Sources that have reached the invoicing stage but do not yet have a live original invoice. */
+export class ListUnissuedSalesInvoicesQueryDto {
+    @IsOptional()
+    @IsUUID()
+    customerPartyId?: string
+
+    @IsOptional()
+    @IsUUID()
+    accountantEmployeeId?: string
 
     @IsOptional()
     @Type(() => Number)

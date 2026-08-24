@@ -539,6 +539,7 @@ export class SupplierInvoicesService {
                 orderType: true,
                 supplierCustomerId: true,
                 status: true,
+                releaseCode: true,
             },
         })
         if (!purchaseOrder || purchaseOrder.orderType !== 'LOT') return
@@ -577,8 +578,11 @@ export class SupplierInvoicesService {
                     supplierCustomerId: purchaseOrder.supplierCustomerId,
                     plannedWarehouseId: purchaseOrderLine.receivingWarehouseId,
                     productId: purchaseOrderLine.productId,
+                    releaseCode: purchaseOrder.releaseCode,
                 },
-                update: {},
+                update: purchaseOrder.releaseCode
+                    ? { releaseCode: purchaseOrder.releaseCode }
+                    : {},
             })
             const qty = new Prisma.Decimal(invoiceLine.actualQty)
             const nextInvoicedQty = position.invoicedQty.plus(qty)

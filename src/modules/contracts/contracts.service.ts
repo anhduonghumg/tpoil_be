@@ -18,7 +18,14 @@ import dayjs from 'dayjs'
 import { DocumentStorageService } from '../uploads/document-storage.service'
 import { UploadService } from '../uploads/uploads.service'
 
-const PURCHASE_CONTRACT_TYPE_CODES = new Set(['WAREHOUSE_RENTAL', 'HDMBXD'])
+/**
+ * Loại hợp đồng mà chiều luôn là MUA, bất kể người nhập chọn gì: mình đi thuê kho thì
+ * không có chiều bán nào cả.
+ *
+ * HDMBXD ("hợp đồng mua bán xăng dầu") KHÔNG nằm ở đây: cùng một loại được dùng cả khi
+ * mình mua của PVOIL lẫn khi mình bán cho khách, nên chiều phải do người nhập quyết.
+ */
+const ALWAYS_PURCHASE_CONTRACT_TYPE_CODES = new Set(['WAREHOUSE_RENTAL'])
 
 @Injectable()
 export class ContractsService {
@@ -68,7 +75,7 @@ export class ContractsService {
             select: { code: true },
         })
         if (!type) throw new NotFoundException('Không tìm thấy loại hợp đồng')
-        return PURCHASE_CONTRACT_TYPE_CODES.has(type.code)
+        return ALWAYS_PURCHASE_CONTRACT_TYPE_CODES.has(type.code)
     }
 
     private async replaceWarehouseRentalLinks(tx: Prisma.TransactionClient, contractId: string, warehouseIds: string[]) {
@@ -259,7 +266,7 @@ export class ContractsService {
 
     // LIST
     async list(query: ContractListQueryDto) {
-        const { keyword, customerId, contractTypeId, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
+        const { keyword, customerId, contractTypeId, kind, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
 
         const startFromDate = startFrom ? new Date(startFrom) : undefined
         const startToDate = startTo ? new Date(startTo) : undefined
@@ -274,6 +281,8 @@ export class ContractsService {
                 : {}),
             ...(customerId ? { customerId } : {}),
             ...(contractTypeId ? { contractTypeId } : {}),
+            // Bán hay mua: workspace nào chỉ nhìn hợp đồng của chiều đó.
+            ...(kind ? { kind } : {}),
             ...(status ? { status } : {}),
             ...(riskLevel ? { riskLevel } : {}),
             ...(startFromDate || startToDate

@@ -5,7 +5,10 @@ import {
     SalesDeliveryStatus,
     SalesInvoiceDocumentType,
     SalesInvoiceStatus,
+    SalesLotInvoiceMode,
+    SalesOrderKind,
     SalesOrderStatus,
+    SalesWithdrawalStatus,
     SalesReconciliationStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
@@ -16,14 +19,33 @@ import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
 import { ReceivablesService } from './receivables.service'
 import { ScopedActor } from './sales-warehouse-scope.service'
+import { SalesOrderChecksService } from './sales-order-checks.service'
 import {
     CancelSalesInvoiceDto,
     InvoiceSourceDto,
     ListSalesInvoicesQueryDto,
+    ListUnissuedSalesInvoicesQueryDto,
 } from './dto/sales-invoice.dto'
+
+/**
+ * Đơn lô xuất hóa đơn cả lô được lập từ lúc đơn đã duyệt cho tới khi rút xong — trong
+ * suốt quãng đó đơn đi qua nhiều trạng thái giao hàng, hóa đơn vẫn là một.
+ */
+const invoiceableLotStatuses: SalesOrderStatus[] = [
+    SalesOrderStatus.CONFIRMED,
+    SalesOrderStatus.AWAITING_STOCK,
+    SalesOrderStatus.PARTIALLY_RESERVED,
+    SalesOrderStatus.RESERVED,
+    SalesOrderStatus.WAREHOUSE_PROCESSING,
+    SalesOrderStatus.PARTIALLY_DELIVERED,
+    SalesOrderStatus.DELIVERED,
+    SalesOrderStatus.AWAITING_RECONCILIATION,
+    SalesOrderStatus.AWAITING_INVOICE,
+]
 
 const detailInclude = Prisma.validator<Prisma.SalesInvoiceInclude>()({
     customer: { select: { id: true, code: true, name: true, taxCode: true } },
+    accountantEmployee: { select: { id: true, code: true, fullName: true } },
     salesOrder: { select: { id: true, orderNo: true, orderDate: true, kind: true } },
     withdrawalRequest: { select: { id: true, requestNo: true, requestDate: true } },
     lines: {
@@ -65,6 +87,7 @@ export class SalesInvoicesService {
         private readonly events: SalesWorkflowEventsService,
         private readonly receivables: ReceivablesService,
         private readonly notificationOutbox: NotificationOutboxService,
+        private readonly checks: SalesOrderChecksService,
     ) {}
 
     private async nextInvoiceNo(tx: Prisma.TransactionClient, date: Date) {
@@ -79,10 +102,123 @@ export class SalesInvoicesService {
         return `HD${period}${String(sequence.currentNo).padStart(5, '0')}`
     }
 
+    /** Tổng dự kiến để kế toán thấy ngay ở danh sách chưa xuất HĐ. Hóa đơn nháp vẫn được
+     * dựng lại từ dữ liệu thực xuất trước khi lưu, nên đây không thay thế bước kiểm tra đó. */
+    private summarizeUnissuedLines(
+        lines: Array<{
+            qty: Prisma.Decimal
+            unitPrice: Prisma.Decimal
+            discountAmount: Prisma.Decimal
+            taxRate: Prisma.Decimal | null
+            productCode: string | null
+        }>,
+    ) {
+        const total = lines.reduce((sum, line) => {
+            const net = line.qty.mul(line.unitPrice).minus(line.qty.mul(line.discountAmount))
+            return sum.plus(net.plus(line.taxRate ? net.mul(line.taxRate) : 0))
+        }, new Prisma.Decimal(0))
+        return {
+            itemCodes: [...new Set(lines.map((line) => line.productCode).filter((code): code is string => !!code))],
+            estimatedGrandTotal: total.toString(),
+        }
+    }
+
     /**
      * Builds the invoice content from what actually left the warehouse — never from what was
      * ordered — and refuses if the document is not ready to be billed.
      */
+    /**
+     * Hóa đơn cho cả lô, lập ngay sau khi đơn được duyệt (mẫu "ĐƠN ĐẶT HÀNG LÔ" với
+     * thời gian xuất hóa đơn = ngay sau khi xác nhận đơn hàng).
+     *
+     * Không có lệnh xuất nào để dựa vào, cũng không có gì để đối soát — hàng chưa rời
+     * kho. Vì thế dòng hóa đơn lấy thẳng từ dòng đơn và không gắn salesDeliveryLineId.
+     */
+    private async buildWholeLotDraft(
+        db: Prisma.TransactionClient | PrismaService,
+        salesOrderId: string,
+    ) {
+        const order = await db.salesOrder.findUniqueOrThrow({
+            where: { id: salesOrderId },
+            include: {
+                customer: {
+                    select: {
+                        id: true,
+                        name: true,
+                        taxCode: true,
+                        billingAddress: true,
+                        contactEmail: true,
+                        accountingOwnerEmpId: true,
+                    },
+                },
+                lines: {
+                    orderBy: { lineNo: 'asc' },
+                    include: { product: { select: { id: true, name: true, uom: true } } },
+                },
+            },
+        })
+
+        // Chỉ lập được sau khi đơn đã qua kiểm duyệt: hóa đơn ra trước hàng, nên giá và
+        // hạn mức phải được chốt trước đó.
+        if (!invoiceableLotStatuses.includes(order.status)) {
+            throw new BadRequestException({
+                code: 'INVOICE_LOT_NOT_CONFIRMED',
+                message: `Đơn lô đang ở trạng thái ${order.status} — phải được duyệt trước khi xuất hóa đơn cả lô.`,
+            })
+        }
+
+        const lines: InvoiceDraftLine[] = []
+        let subtotal = new Prisma.Decimal(0)
+        let discountTotal = new Prisma.Decimal(0)
+        let taxTotal = new Prisma.Decimal(0)
+
+        for (const orderLine of order.lines) {
+            const qty = new Prisma.Decimal(orderLine.orderedActualQty)
+            if (!qty.greaterThan(0)) continue
+            const unitPrice = new Prisma.Decimal(orderLine.unitPrice)
+            const gross = qty.mul(unitPrice)
+            const discount = new Prisma.Decimal(orderLine.discountAmount).mul(qty)
+            const netAmount = gross.minus(discount)
+            const taxRate = orderLine.taxRate == null ? null : new Prisma.Decimal(orderLine.taxRate)
+            const taxAmount = taxRate ? netAmount.mul(taxRate) : new Prisma.Decimal(0)
+
+            lines.push({
+                salesOrderLineId: orderLine.id,
+                salesDeliveryLineId: null,
+                productId: orderLine.productId,
+                description: orderLine.product.name,
+                uom: orderLine.product.uom,
+                qty,
+                unitPrice,
+                discountAmount: discount,
+                taxRate,
+                netAmount,
+                taxAmount,
+                lineTotal: netAmount.plus(taxAmount),
+            })
+            subtotal = subtotal.plus(gross)
+            discountTotal = discountTotal.plus(discount)
+            taxTotal = taxTotal.plus(taxAmount)
+        }
+        if (!lines.length) {
+            throw new BadRequestException({
+                code: 'INVOICE_NO_BILLABLE_LINE',
+                message: 'Đơn lô không có dòng nào để lập hóa đơn.',
+            })
+        }
+
+        return {
+            order,
+            lines,
+            totals: {
+                subtotal,
+                discountTotal,
+                taxTotal,
+                grandTotal: subtotal.minus(discountTotal).plus(taxTotal),
+            },
+        }
+    }
+
     private async buildDraft(
         db: Prisma.TransactionClient | PrismaService,
         source: InvoiceSourceDto,
@@ -92,6 +228,21 @@ export class SalesInvoicesService {
                 code: 'INVOICE_SOURCE_INVALID',
                 message: 'Phải chỉ rõ đúng một nguồn: đơn bán hoặc yêu cầu rút lô.',
             })
+        }
+
+        // Đơn lô chốt hóa đơn ngay khi xác nhận thì lúc lập chưa có lệnh xuất nào —
+        // hóa đơn dựng thẳng từ dòng đơn, cho cả lô.
+        if (source.salesOrderId) {
+            const lotOrder = await db.salesOrder.findUnique({
+                where: { id: source.salesOrderId },
+                select: { kind: true, lotInvoiceMode: true },
+            })
+            if (
+                lotOrder?.kind === SalesOrderKind.LOT &&
+                lotOrder.lotInvoiceMode === SalesLotInvoiceMode.ON_CONFIRMATION
+            ) {
+                return this.buildWholeLotDraft(db, source.salesOrderId)
+            }
         }
 
         const deliveries = await db.salesDelivery.findMany({
@@ -160,6 +311,7 @@ export class SalesInvoicesService {
                         taxCode: true,
                         billingAddress: true,
                         contactEmail: true,
+                        accountingOwnerEmpId: true,
                     },
                 },
             },
@@ -177,11 +329,9 @@ export class SalesInvoicesService {
                 const orderLine = line.orderLine
                 const unitPrice = new Prisma.Decimal(orderLine.unitPrice)
                 const gross = qty.mul(unitPrice)
-                // Discount on the order line covers the whole ordered quantity; bill the
-                // share that matches what actually shipped.
-                const discount = new Prisma.Decimal(orderLine.discountAmount)
-                    .mul(qty)
-                    .div(orderLine.orderedActualQty)
+                // discountAmount là chiết khấu TRÊN MỖI ĐƠN VỊ (Decimal(24,8) như đơn giá),
+                // đúng như đơn đặt hàng của kinh doanh: thành tiền = SL × (giá − chiết khấu).
+                const discount = new Prisma.Decimal(orderLine.discountAmount).mul(qty)
                 const netAmount = gross.minus(discount)
                 // taxRate is a fraction (0.1 = 10%), enforced by a 0..1 DB check on the line.
                 const taxRate = orderLine.taxRate == null ? null : new Prisma.Decimal(orderLine.taxRate)
@@ -288,6 +438,7 @@ export class SalesInvoicesService {
                     status: SalesInvoiceStatus.DRAFT,
                     legalEntityId: draft.order.legalEntityId,
                     customerPartyId: draft.order.customerPartyId,
+                    accountantEmployeeId: draft.order.customer.accountingOwnerEmpId,
                     // Buyer details frozen here: later master-data edits must not rewrite the document.
                     buyerName: draft.order.customer.name,
                     buyerTaxCode: draft.order.customer.taxCode,
@@ -338,6 +489,46 @@ export class SalesInvoicesService {
      * Publishes to MISA. Safe to call again after a crash: it asks MISA about the transaction
      * key first, so an invoice that already went out is recovered instead of duplicated.
      */
+    /**
+     * Chặn tín dụng đúng ở đây chứ không phải ở bước đặt hàng: hóa đơn phát hành ra mới
+     * đẻ ra khoản phải thu, nên đây là mốc cuối cùng còn dừng lại được.
+     *
+     * Bỏ qua với hóa đơn điều chỉnh/thay thế: chúng sửa một hóa đơn đã ra, chặn lại chỉ
+     * làm kẹt việc sửa sai. Đặt SALES_CREDIT_LIMIT_CHECK=0 để tắt tạm.
+     */
+    private async assertCreditAllows(invoice: {
+        id: string
+        customerPartyId: string
+        documentType: SalesInvoiceDocumentType
+        grandTotal: Prisma.Decimal
+    }) {
+        if (process.env.SALES_CREDIT_LIMIT_CHECK === '0') return
+        if (invoice.documentType !== SalesInvoiceDocumentType.ORIGINAL) return
+
+        const credit = await this.checks.creditStatus(this.prisma, invoice.customerPartyId, {
+            extraExposure: invoice.grandTotal,
+        })
+
+        if (credit.overdueAmount.greaterThan(0)) {
+            throw new BadRequestException({
+                code: 'CUSTOMER_HAS_OVERDUE_DEBT',
+                message: `Khách hàng đang có công nợ quá hạn ${credit.overdueAmount.toFixed(0)} — không phát hành được hóa đơn.`,
+                detail: { overdueAmount: credit.overdueAmount.toString() },
+            })
+        }
+        if (credit.limit != null && credit.exposure.greaterThan(new Prisma.Decimal(credit.limit))) {
+            throw new BadRequestException({
+                code: 'CREDIT_LIMIT_EXCEEDED',
+                message: `Phát hành hóa đơn này sẽ đưa công nợ lên ${credit.exposure.toFixed(0)}, vượt hạn mức ${new Prisma.Decimal(credit.limit).toFixed(0)}.`,
+                detail: {
+                    exposure: credit.exposure.toString(),
+                    creditLimit: String(credit.limit),
+                    invoiceAmount: invoice.grandTotal.toString(),
+                },
+            })
+        }
+    }
+
     async issue(invoiceId: string, actor: ScopedActor) {
         const invoice = await this.prisma.salesInvoice.findUnique({
             where: { id: invoiceId },
@@ -351,6 +542,9 @@ export class SalesInvoicesService {
                 message: 'Hóa đơn đã hủy, không phát hành lại được.',
             })
         }
+
+        // Kiểm trước khi động vào MISA: đã gửi đi rồi thì không rút lại được nữa.
+        await this.assertCreditAllows(invoice)
 
         const attempt =
             (await this.prisma.salesInvoiceIssuance.count({
@@ -767,6 +961,7 @@ export class SalesInvoicesService {
         const where: Prisma.SalesInvoiceWhereInput = {
             status: query.status ? (query.status as SalesInvoiceStatus) : undefined,
             customerPartyId: query.customerPartyId ?? undefined,
+            accountantEmployeeId: query.accountantEmployeeId ?? undefined,
             salesOrderId: query.salesOrderId ?? undefined,
             withdrawalRequestId: query.withdrawalRequestId ?? undefined,
         }
@@ -775,8 +970,19 @@ export class SalesInvoicesService {
                 where,
                 include: {
                     customer: { select: { id: true, code: true, name: true } },
-                    salesOrder: { select: { id: true, orderNo: true } },
-                    withdrawalRequest: { select: { id: true, requestNo: true } },
+                    accountantEmployee: { select: { id: true, code: true, fullName: true } },
+                    salesOrder: { select: { id: true, orderNo: true, orderDate: true } },
+                    withdrawalRequest: {
+                        select: {
+                            id: true,
+                            requestNo: true,
+                            salesOrder: { select: { id: true, orderNo: true, orderDate: true } },
+                        },
+                    },
+                    lines: {
+                        orderBy: { lineNo: 'asc' },
+                        select: { description: true, product: { select: { code: true, name: true } } },
+                    },
                 },
                 orderBy: [{ invoiceDate: 'desc' }, { createdAt: 'desc' }],
                 skip: (page - 1) * limit,
@@ -785,6 +991,129 @@ export class SalesInvoicesService {
             this.prisma.salesInvoice.count({ where }),
         ])
         return { items: rows, total, page, limit }
+    }
+
+    /**
+     * Documents that accounting may turn into a first/original invoice. They are deliberately
+     * separate from SalesInvoice rows because no invoice record exists yet for this tab.
+     */
+    async listUnissued(query: ListUnissuedSalesInvoicesQueryDto) {
+        const page = Math.max(query.page ?? 1, 1)
+        const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
+        const customerWhere = {
+            id: query.customerPartyId ?? undefined,
+            accountingOwnerEmpId: query.accountantEmployeeId ?? undefined,
+        }
+        const liveOriginal = {
+            none: {
+                documentType: SalesInvoiceDocumentType.ORIGINAL,
+                status: { not: SalesInvoiceStatus.CANCELLED },
+            },
+        }
+        const [orders, withdrawals] = await this.prisma.$transaction([
+            this.prisma.salesOrder.findMany({
+                where: {
+                    customer: customerWhere,
+                    invoices: liveOriginal,
+                    OR: [
+                        { kind: SalesOrderKind.SINGLE, status: SalesOrderStatus.AWAITING_INVOICE },
+                        {
+                            kind: SalesOrderKind.LOT,
+                            lotInvoiceMode: SalesLotInvoiceMode.ON_CONFIRMATION,
+                            status: { in: invoiceableLotStatuses },
+                        },
+                    ],
+                },
+                select: {
+                    id: true,
+                    orderNo: true,
+                    orderDate: true,
+                    kind: true,
+                    customer: {
+                        select: {
+                            id: true,
+                            code: true,
+                            name: true,
+                            accountingOwnerEmp: { select: { id: true, code: true, fullName: true } },
+                        },
+                    },
+                    lines: {
+                        select: {
+                            orderedActualQty: true,
+                            unitPrice: true,
+                            discountAmount: true,
+                            taxRate: true,
+                            product: { select: { code: true } },
+                        },
+                    },
+                },
+            }),
+            this.prisma.salesLotWithdrawalRequest.findMany({
+                where: {
+                    status: SalesWithdrawalStatus.ISSUED,
+                    customer: customerWhere,
+                    invoices: liveOriginal,
+                },
+                select: {
+                    id: true,
+                    requestNo: true,
+                    requestDate: true,
+                    customer: {
+                        select: {
+                            id: true,
+                            code: true,
+                            name: true,
+                            accountingOwnerEmp: { select: { id: true, code: true, fullName: true } },
+                        },
+                    },
+                    salesOrder: { select: { orderNo: true, orderDate: true } },
+                    lines: {
+                        select: {
+                            requestedQty: true,
+                            product: { select: { code: true } },
+                            orderLine: {
+                                select: { unitPrice: true, discountAmount: true, taxRate: true },
+                            },
+                        },
+                    },
+                },
+            }),
+        ])
+        const items = [
+            ...orders.map((order) => ({
+                id: `order:${order.id}`,
+                source: { salesOrderId: order.id },
+                sourceNo: order.orderNo,
+                sourceType: order.kind === SalesOrderKind.LOT ? 'LOT_ORDER' : 'SALES_ORDER',
+                sourceDate: order.orderDate,
+                customer: order.customer,
+                accountantEmployee: order.customer.accountingOwnerEmp,
+                ...this.summarizeUnissuedLines(order.lines.map((line) => ({
+                    qty: line.orderedActualQty,
+                    unitPrice: line.unitPrice,
+                    discountAmount: line.discountAmount,
+                    taxRate: line.taxRate,
+                    productCode: line.product.code,
+                }))),
+            })),
+            ...withdrawals.map((request) => ({
+                id: `withdrawal:${request.id}`,
+                source: { withdrawalRequestId: request.id },
+                sourceNo: request.salesOrder?.orderNo ?? request.requestNo,
+                sourceType: 'WITHDRAWAL',
+                sourceDate: request.salesOrder?.orderDate ?? request.requestDate,
+                customer: request.customer,
+                accountantEmployee: request.customer.accountingOwnerEmp,
+                ...this.summarizeUnissuedLines(request.lines.flatMap((line) => line.orderLine ? [{
+                    qty: line.requestedQty,
+                    unitPrice: line.orderLine.unitPrice,
+                    discountAmount: line.orderLine.discountAmount,
+                    taxRate: line.orderLine.taxRate,
+                    productCode: line.product.code,
+                }] : [])),
+            })),
+        ].sort((a, b) => b.sourceDate.getTime() - a.sourceDate.getTime())
+        return { items: items.slice((page - 1) * limit, page * limit), total: items.length, page, limit }
     }
 
     async detail(id: string) {

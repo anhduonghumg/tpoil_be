@@ -5,6 +5,7 @@ import {
     PurchaseOrderType,
     SalesOrderKind,
     SalesOrderStatus,
+    SalesOrderSupplySource,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
@@ -116,10 +117,19 @@ export class SalesOrdersService {
         const page = Math.max(query.page ?? 1, 1)
         const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
         const keyword = query.keyword?.trim()
+        // Một tab có thể gom nhiều trạng thái ("đơn đã duyệt"), nên `status` nhận danh
+        // sách ngăn bởi dấu phẩy. Tab nhập nhanh chỉ là tên trên giao diện: giá trị nào
+        // không phải trạng thái thật thì bỏ qua thay vì đẩy xuống Prisma.
+        const statuses = (query.status ?? '')
+            .split(',')
+            .map((value) => value.trim())
+            .filter((value): value is SalesOrderStatus =>
+                Object.values(SalesOrderStatus).includes(value as SalesOrderStatus),
+            )
         const where: Prisma.SalesOrderWhereInput = {
             customerPartyId: query.customerPartyId ?? undefined,
             kind: query.kind ? (query.kind as SalesOrderKind) : undefined,
-            status: query.status ? (query.status as SalesOrderStatus) : undefined,
+            status: statuses.length === 0 ? undefined : statuses.length === 1 ? statuses[0] : { in: statuses },
             ...(keyword
                 ? {
                       OR: [
@@ -141,6 +151,40 @@ export class SalesOrdersService {
             this.prisma.salesOrder.count({ where }),
         ])
         return { items: rows.map((row) => this.mapOrder(row)), total, page, limit }
+    }
+
+    /**
+     * Counts per status for the tab strip. Deliberately ignores the status filter so a
+     * tab still shows how many orders it holds while another tab is open.
+     */
+    async statusCounts(query: ListSalesOrdersQueryDto) {
+        const keyword = query.keyword?.trim()
+        const where: Prisma.SalesOrderWhereInput = {
+            customerPartyId: query.customerPartyId ?? undefined,
+            kind: query.kind ? (query.kind as SalesOrderKind) : undefined,
+            ...(keyword
+                ? {
+                      OR: [
+                          { orderNo: { contains: keyword, mode: 'insensitive' } },
+                          { customer: { name: { contains: keyword, mode: 'insensitive' } } },
+                      ],
+                  }
+                : {}),
+        }
+
+        const grouped = await this.prisma.salesOrder.groupBy({
+            by: ['status'],
+            where,
+            _count: { _all: true },
+        })
+
+        const byStatus: Record<string, number> = {}
+        let total = 0
+        for (const row of grouped) {
+            byStatus[row.status] = row._count._all
+            total += row._count._all
+        }
+        return { byStatus, total }
     }
 
     async detail(id: string) {
@@ -188,22 +232,37 @@ export class SalesOrdersService {
                     note: dto.note?.trim() || null,
                     createdById: actorId ?? null,
                     lines: {
-                        create: dto.lines.map((line, index) => ({
-                            lineNo: index + 1,
-                            productId: line.productId,
-                            receivingWarehouseId: line.receivingWarehouseId ?? null,
-                            orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
-                            orderedV15Qty:
-                                line.orderedV15Qty == null
-                                    ? null
-                                    : new Prisma.Decimal(line.orderedV15Qty),
-                            unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
-                            discountAmount: new Prisma.Decimal(line.discountAmount ?? 0),
-                            vehiclePlate: line.vehiclePlate?.trim() || null,
-                            driverName: line.driverName?.trim() || null,
-                            taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
-                            note: line.note?.trim() || null,
-                        })),
+                        create: dto.lines.map((line, index) => {
+                            const discountBaseAmount = new Prisma.Decimal(
+                                line.discountBaseAmount ?? line.discountAmount ?? 0,
+                            )
+                            const discountAdjustmentAmount = new Prisma.Decimal(
+                                line.discountAdjustmentAmount ?? 0,
+                            )
+                            const discountAmount = discountBaseAmount.plus(discountAdjustmentAmount)
+                            if (discountAmount.lessThan(0)) {
+                                throw new BadRequestException('SALES_ORDER_FINAL_DISCOUNT_NEGATIVE')
+                            }
+                            return {
+                                lineNo: index + 1,
+                                productId: line.productId,
+                                receivingWarehouseId: line.receivingWarehouseId ?? null,
+                                orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
+                                orderedV15Qty:
+                                    line.orderedV15Qty == null
+                                        ? null
+                                        : new Prisma.Decimal(line.orderedV15Qty),
+                                unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
+                                discountBaseAmount,
+                                discountAdjustmentAmount,
+                                discountAmount,
+                                supplySource: line.supplySource ?? SalesOrderSupplySource.TP,
+                                vehiclePlate: line.vehiclePlate?.trim() || null,
+                                driverName: line.driverName?.trim() || null,
+                                taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                                note: line.note?.trim() || null,
+                            }
+                        }),
                     },
                 },
                 select: { id: true, orderNo: true },

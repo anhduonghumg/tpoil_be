@@ -1,11 +1,15 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import {
+    ContractKind,
+    ContractStatus,
     MasterStatus,
     PaymentTermType,
     Prisma,
     SalesApprovalStatus,
     SalesApprovalType,
+    SalesLotInvoiceMode,
     SalesOrderKind,
+    SalesOrderSupplySource,
     SalesOrderStatus,
 } from '@prisma/client'
 import { createHash } from 'crypto'
@@ -20,6 +24,8 @@ import { SalesReservationService } from './sales-reservation.service'
 import { SalesDeliveriesService } from './sales-deliveries.service'
 import { SalesOrderStatusService } from './sales-order-status.service'
 import { SalesLotService } from './sales-lot.service'
+import { SalesDiscountService } from './sales-discount.service'
+import { PartyMerchantService } from 'src/modules/customers/party-merchant.service'
 import { CreateSalesOrderDto, UpdateSalesOrderDto } from './dto/sales-order.dto'
 import { ScopeType } from '@prisma/client'
 
@@ -30,12 +36,14 @@ export type SalesActor = {
 }
 
 export const APPROVAL_TYPE_LABELS: Record<SalesApprovalType, string> = {
+    STANDARD: 'đơn bán',
     PRICE: 'giá/chiết khấu',
     CREDIT: 'công nợ',
     EXCEPTION: 'ngoại lệ',
 }
 
 export const APPROVAL_TYPE_PERMISSIONS: Record<SalesApprovalType, string> = {
+    STANDARD: PERMISSIONS.sales.approveOrder,
     PRICE: PERMISSIONS.sales.approvePrice,
     CREDIT: PERMISSIONS.sales.approveCredit,
     EXCEPTION: PERMISSIONS.sales.approveException,
@@ -46,6 +54,8 @@ const INTERNAL_KINDS: SalesOrderKind[] = [SalesOrderKind.SINGLE, SalesOrderKind.
 /** Draft lifecycle + submit/recall/cancel for the internal SINGLE/LOT sales flow (spec v1.2 §4). */
 @Injectable()
 export class SalesOrderWorkflowService {
+    private readonly logger = new Logger(SalesOrderWorkflowService.name)
+
     constructor(
         private readonly prisma: PrismaService,
         private readonly orders: SalesOrdersService,
@@ -55,6 +65,8 @@ export class SalesOrderWorkflowService {
         private readonly deliveries: SalesDeliveriesService,
         private readonly orderStatus: SalesOrderStatusService,
         private readonly lots: SalesLotService,
+        private readonly discounts: SalesDiscountService,
+        private readonly merchants: PartyMerchantService,
         private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
@@ -67,21 +79,85 @@ export class SalesOrderWorkflowService {
         }
     }
 
+    /**
+     * A sale may only create an internal order when the customer has one valid
+     * sales contract on the order date. Quick entry has no contract picker, so
+     * the single applicable contract is attached automatically.
+     */
+    private async resolveContractForCreate(
+        customerPartyId: string,
+        orderDate: Date,
+        requestedContractId?: string | null,
+    ) {
+        const where: Prisma.ContractWhereInput = {
+            id: requestedContractId ?? undefined,
+            customerId: customerPartyId,
+            kind: ContractKind.SALES,
+            status: ContractStatus.Active,
+            deletedAt: null,
+            startDate: { lte: orderDate },
+            endDate: { gte: orderDate },
+        }
+        const contracts = await this.prisma.contract.findMany({
+            where,
+            orderBy: { startDate: 'desc' },
+            take: requestedContractId ? 1 : 2,
+            select: { id: true, code: true },
+        })
+
+        if (!contracts.length) {
+            throw new BadRequestException({
+                code: requestedContractId ? 'SALES_CONTRACT_INVALID' : 'SALES_CONTRACT_REQUIRED',
+                message: requestedContractId
+                    ? 'Hợp đồng đã chọn không hợp lệ cho khách hàng hoặc ngày lập đơn.'
+                    : 'Khách hàng chưa có hợp đồng bán đang hiệu lực. Không thể tạo đơn.',
+                detail: { customerPartyId, orderDate: orderDate.toISOString() },
+            })
+        }
+        if (!requestedContractId && contracts.length > 1) {
+            throw new BadRequestException({
+                code: 'SALES_CONTRACT_AMBIGUOUS',
+                message: 'Khách hàng có nhiều hợp đồng bán cùng hiệu lực. Cần xử lý lại dữ liệu hợp đồng trước khi tạo đơn.',
+                detail: { customerPartyId, contractCodes: contracts.map((contract) => contract.code) },
+            })
+        }
+        return contracts[0].id
+    }
+
     private linesCreateInput(dto: CreateSalesOrderDto | UpdateSalesOrderDto) {
-        return (dto.lines ?? []).map((line, index) => ({
-            lineNo: index + 1,
-            productId: line.productId,
-            issueWarehouseId: line.issueWarehouseId ?? null,
-            receivingWarehouseId: line.receivingWarehouseId ?? null,
-            orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
-            orderedV15Qty: line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
-            unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
-            discountAmount: new Prisma.Decimal(line.discountAmount ?? 0),
-            vehiclePlate: line.vehiclePlate?.trim() || null,
-            driverName: line.driverName?.trim() || null,
-            taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
-            note: line.note?.trim() || null,
-        }))
+        return (dto.lines ?? []).map((line, index) => {
+            // Các client cũ chỉ gửi discountAmount; coi đó là CK gốc để vẫn đọc được
+            // đúng nghiệp vụ sau khi tách CK/CKDC.
+            const discountBaseAmount = new Prisma.Decimal(
+                line.discountBaseAmount ?? line.discountAmount ?? 0,
+            )
+            const discountAdjustmentAmount = new Prisma.Decimal(line.discountAdjustmentAmount ?? 0)
+            const discountAmount = discountBaseAmount.plus(discountAdjustmentAmount)
+            if (discountAmount.lessThan(0)) {
+                throw new BadRequestException({
+                    code: 'SALES_ORDER_FINAL_DISCOUNT_NEGATIVE',
+                    message: 'CK cuối không được nhỏ hơn 0.',
+                })
+            }
+
+            return {
+                lineNo: index + 1,
+                productId: line.productId,
+                issueWarehouseId: line.issueWarehouseId ?? null,
+                receivingWarehouseId: line.receivingWarehouseId ?? null,
+                orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
+                orderedV15Qty: line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
+                unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
+                discountBaseAmount,
+                discountAdjustmentAmount,
+                discountAmount,
+                supplySource: line.supplySource ?? SalesOrderSupplySource.TP,
+                vehiclePlate: line.vehiclePlate?.trim() || null,
+                driverName: line.driverName?.trim() || null,
+                taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                note: line.note?.trim() || null,
+            }
+        })
     }
 
     /**
@@ -138,6 +214,11 @@ export class SalesOrderWorkflowService {
         const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
         if (!dto.lines?.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+        const contractId = await this.resolveContractForCreate(
+            dto.customerPartyId,
+            orderDate,
+            dto.contractId,
+        )
 
         const orderNo = await this.orders.generateOrderNo(dto.customerPartyId, orderDate)
 
@@ -152,7 +233,13 @@ export class SalesOrderWorkflowService {
                     orderDate,
                     currency: legalEntity.baseCurrency || 'VND',
                     note: dto.note?.trim() || null,
-                    contractId: dto.contractId ?? null,
+                    contractId,
+                    // DB CHECK: chỉ đơn lô mới có trường này, và đơn lô thì bắt buộc có.
+                    lotInvoiceMode:
+                        kind === SalesOrderKind.LOT
+                            ? ((dto.lotInvoiceMode as SalesLotInvoiceMode) ??
+                              SalesLotInvoiceMode.ON_WITHDRAWAL)
+                            : null,
                     paymentTermType: (dto.paymentTermType as PaymentTermType) ?? PaymentTermType.SAME_DAY,
                     paymentTermDays: dto.paymentTermDays ?? null,
                     createdById: actor.userId,
@@ -170,10 +257,34 @@ export class SalesOrderWorkflowService {
             })
             return order
         })
+
+        // Sales asked to drop the draft limbo: a new order goes straight to review, and
+        // submit() decides whether it needs an exception approval or can auto-confirm.
+        await this.submitQuietly(created.id, actor)
         return this.orders.detail(created.id)
     }
 
+    /**
+     * Submitting must never lose an order that was already written. If it is not yet
+     * submittable the order simply stays a draft for the author to finish.
+     */
+    private async submitQuietly(id: string, actor: SalesActor) {
+        try {
+            await this.submit(id, actor)
+        } catch (error) {
+            this.logger.warn(
+                `Đơn ${id} chưa gửi kiểm duyệt được, giữ ở nháp: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            )
+        }
+    }
+
     async updateDraft(id: string, dto: UpdateSalesOrderDto, actor: SalesActor) {
+        // An order waiting for review is still the author's to fix; editing it just
+        // starts a fresh approval cycle rather than forcing a recall first.
+        let wasPendingReview = false
+
         await this.prisma.$transaction(async (tx) => {
             const order = await tx.salesOrder.findUnique({
                 where: { id },
@@ -181,12 +292,18 @@ export class SalesOrderWorkflowService {
             })
             if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
             this.assertInternalKind(order.kind)
-            if (order.status !== SalesOrderStatus.DRAFT && order.status !== SalesOrderStatus.REJECTED) {
+            const editable: SalesOrderStatus[] = [
+                SalesOrderStatus.DRAFT,
+                SalesOrderStatus.REJECTED,
+                SalesOrderStatus.PENDING_REVIEW,
+            ]
+            if (!editable.includes(order.status)) {
                 throw new BadRequestException({
                     code: 'SALES_ORDER_NOT_EDITABLE',
-                    message: 'Chỉ sửa được đơn ở trạng thái nháp hoặc bị từ chối. Đơn đã gửi cần thu hồi trước.',
+                    message: 'Chỉ sửa được đơn khi còn nháp, đang chờ duyệt hoặc bị từ chối.',
                 })
             }
+            wasPendingReview = order.status === SalesOrderStatus.PENDING_REVIEW
 
             const data: Prisma.SalesOrderUpdateInput = {
                 status: SalesOrderStatus.DRAFT,
@@ -205,6 +322,15 @@ export class SalesOrderWorkflowService {
             }
             if (dto.paymentTermType !== undefined) data.paymentTermType = dto.paymentTermType as PaymentTermType
             if (dto.paymentTermDays !== undefined) data.paymentTermDays = dto.paymentTermDays ?? null
+            if (dto.lotInvoiceMode !== undefined) {
+                if (order.kind !== SalesOrderKind.LOT) {
+                    throw new BadRequestException({
+                        code: 'LOT_INVOICE_MODE_NOT_APPLICABLE',
+                        message: 'Chỉ đơn lô mới chọn được cách xuất hóa đơn.',
+                    })
+                }
+                data.lotInvoiceMode = dto.lotInvoiceMode as SalesLotInvoiceMode
+            }
 
             await tx.salesOrder.update({ where: { id }, data })
 
@@ -226,6 +352,10 @@ export class SalesOrderWorkflowService {
                 version: order.version + 1,
             })
         })
+
+        // The edit dropped it back to draft; put it straight back under review so the
+        // author never has to remember to resubmit.
+        if (wasPendingReview) await this.submitQuietly(id, actor)
         return this.orders.detail(id)
     }
 
@@ -303,8 +433,6 @@ export class SalesOrderWorkflowService {
             })),
             checks: {
                 orderValue: checkResult.orderValue,
-                creditExposure: checkResult.creditExposure,
-                creditLimit: checkResult.creditLimit,
                 violations: checkResult.violations.map((violation) => ({
                     approvalType: violation.approvalType,
                     code: violation.code,
@@ -327,8 +455,11 @@ export class SalesOrderWorkflowService {
             id: string
             kind: SalesOrderKind
             legalEntityId: string
+            customerPartyId: string
+            orderDate: Date
             lines: Array<{
                 lineNo: number
+                productId: string
                 issueWarehouseId: string | null
                 unitPrice: Prisma.Decimal
                 vehiclePlate: string | null
@@ -341,7 +472,7 @@ export class SalesOrderWorkflowService {
             if (!line.issueWarehouseId) {
                 throw new BadRequestException({
                     code: 'ISSUE_WAREHOUSE_REQUIRED',
-                    message: `Dòng ${line.lineNo} chưa chọn kho xuất.`,
+                    message: `Dòng ${line.lineNo} chưa chọn kho nhận.`,
                 })
             }
             if (!line.unitPrice.greaterThan(0)) {
@@ -360,7 +491,7 @@ export class SalesOrderWorkflowService {
         const warehouseIds = [...new Set(order.lines.map((line) => line.issueWarehouseId!))]
         const warehouses = await tx.warehouse.findMany({
             where: { id: { in: warehouseIds } },
-            select: { id: true, name: true, status: true, legalEntityId: true },
+            select: { id: true, name: true, status: true, legalEntityId: true, areaId: true },
         })
         const byId = new Map(warehouses.map((row) => [row.id, row]))
         for (const warehouseId of warehouseIds) {
@@ -368,7 +499,7 @@ export class SalesOrderWorkflowService {
             if (!warehouse || warehouse.status !== MasterStatus.ACTIVE) {
                 throw new BadRequestException({
                     code: 'ISSUE_WAREHOUSE_INVALID',
-                    message: 'Kho xuất không tồn tại hoặc không hoạt động.',
+                    message: 'Kho nhận không tồn tại hoặc không hoạt động.',
                 })
             }
             // Spec v1.2 §8.1 (review 8.1): one order = one invoice = one legal entity.
@@ -378,6 +509,41 @@ export class SalesOrderWorkflowService {
                     message: `Kho ${warehouse.name} không thuộc pháp nhân của đơn bán.`,
                 })
             }
+            if (!warehouse.areaId) {
+                throw new BadRequestException({
+                    code: 'RECEIVING_WAREHOUSE_AREA_REQUIRED',
+                    message: `Kho nhận ${warehouse.name} chưa được gán khu vực.`,
+                    detail: { warehouseId },
+                })
+            }
+        }
+
+        // Chỉ bán cho TNPP (mua bán hai chiều) và TNDL (chỉ bán cho họ). Xét theo phân
+        // loại TẠI NGÀY ĐƠN, vì một đối tác có thể đổi loại theo thời gian.
+        await this.merchants.assertCanTrade(order.customerPartyId, 'SELL', order.orderDate, tx)
+
+        // "Phải có chiết khấu thì mới cho bán hàng" (docs/thongbaogia.md §1): kho hoặc mặt
+        // hàng chưa nằm trong bảng chiết khấu đang hiệu lực thì chặn ngay, không cho gửi.
+        //
+        // Tra theo THỜI ĐIỂM gửi duyệt, không phải orderDate: orderDate là cột DATE nên
+        // luôn là 00:00, mà chiết khấu thì đổi trong ngày (14h, 17h...). Lấy orderDate sẽ
+        // khiến bản công bố lúc 14h không bao giờ áp cho đơn cùng ngày.
+        const discounts = await this.discounts.resolveDiscounts(
+            order.lines.map((line) => ({
+                warehouseId: line.issueWarehouseId!,
+                productId: line.productId,
+            })),
+            new Date(),
+            tx,
+        )
+        for (const line of order.lines) {
+            if (discounts.has(`${line.issueWarehouseId}:${line.productId}`)) continue
+            const warehouse = byId.get(line.issueWarehouseId!)
+            throw new BadRequestException({
+                code: 'DISCOUNT_NOT_ANNOUNCED',
+                message: `Dòng ${line.lineNo}: kho ${warehouse?.name ?? ''} chưa có thông báo chiết khấu cho mặt hàng này tại thời điểm đơn — vận hành phải ra thông báo trước khi bán.`,
+                detail: { lineNo: line.lineNo, warehouseId: line.issueWarehouseId },
+            })
         }
     }
 
@@ -413,7 +579,13 @@ export class SalesOrderWorkflowService {
             const violatedTypes = [...new Set(checkResult.violations.map((row) => row.approvalType))]
             const now = new Date()
 
-            for (const type of violatedTypes) {
+            // Mọi đơn Sale nhập lên đều phải qua quản lý ký — không còn tự duyệt. Đơn
+            // không vi phạm gì vẫn sinh một yêu cầu STANDARD để có người chịu trách nhiệm.
+            const requiredTypes = violatedTypes.length
+                ? violatedTypes
+                : [SalesApprovalType.STANDARD]
+
+            for (const type of requiredTypes) {
                 await tx.salesApprovalRequest.create({
                     data: {
                         salesOrderId: id,
@@ -430,8 +602,7 @@ export class SalesOrderWorkflowService {
                 })
             }
 
-            const autoApproved = violatedTypes.length === 0
-            const nextStatus = autoApproved ? SalesOrderStatus.CONFIRMED : SalesOrderStatus.PENDING_REVIEW
+            const nextStatus = SalesOrderStatus.PENDING_REVIEW
             await tx.salesOrder.update({
                 where: { id },
                 data: {
@@ -441,7 +612,6 @@ export class SalesOrderWorkflowService {
                     submittedById: actor.userId,
                     policySnapshot,
                     rejectedReason: null,
-                    ...(autoApproved ? { approvedAt: now, approvedById: null } : {}),
                     version: { increment: 1 },
                 },
             })
@@ -460,54 +630,42 @@ export class SalesOrderWorkflowService {
                 },
             })
 
-            if (autoApproved) {
-                await this.emitOrderApproved(tx, {
-                    orderId: id,
-                    orderNo: order.orderNo,
-                    customerName: order.customer.name,
-                    recipientUserIds: [order.createdById, actor.userId].filter(
-                        (value): value is string => !!value,
-                    ),
-                    cycle,
-                })
-                await this.onApproved(tx, id, actor)
-            } else {
-                for (const type of violatedTypes) {
-                    const reasonSummary = checkResult.violations
-                        .filter((row) => row.approvalType === type)
-                        .map((row) => row.message)
-                        .join(' ')
-                    await this.notificationOutbox.emit(
-                        {
-                            eventType: SALES_NOTIFICATION_EVENTS.ORDER_REVIEW_REQUESTED,
-                            aggregateType: 'SALES_ORDER',
-                            aggregateId: id,
-                            dedupeKey: `${SALES_NOTIFICATION_EVENTS.ORDER_REVIEW_REQUESTED}:${id}:cycle${cycle}:${type}`,
-                            payload: {
-                                entityType: 'SALES_ORDER',
-                                entityId: id,
-                                workItemSourceType: 'SALES_ORDER_APPROVAL',
-                                workItemSourceId: `${id}:${type}`,
-                                actionRequired: true,
-                                orderNo: order.orderNo,
-                                customerName: order.customer.name,
-                                approvalType: type,
-                                approvalTypeLabel: APPROVAL_TYPE_LABELS[type],
-                                reasonSummary,
-                                cycle,
-                                recipientPermissionCodes: [APPROVAL_TYPE_PERMISSIONS[type]],
-                                excludeUserIds: actor.userId ? [actor.userId] : [],
-                            },
+            for (const type of requiredTypes) {
+                const reasonSummary = checkResult.violations
+                    .filter((row) => row.approvalType === type)
+                    .map((row) => row.message)
+                    .join(' ')
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: SALES_NOTIFICATION_EVENTS.ORDER_REVIEW_REQUESTED,
+                        aggregateType: 'SALES_ORDER',
+                        aggregateId: id,
+                        dedupeKey: `${SALES_NOTIFICATION_EVENTS.ORDER_REVIEW_REQUESTED}:${id}:cycle${cycle}:${type}`,
+                        payload: {
+                            entityType: 'SALES_ORDER',
+                            entityId: id,
+                            workItemSourceType: 'SALES_ORDER_APPROVAL',
+                            workItemSourceId: `${id}:${type}`,
+                            actionRequired: true,
+                            orderNo: order.orderNo,
+                            customerName: order.customer.name,
+                            approvalType: type,
+                            approvalTypeLabel: APPROVAL_TYPE_LABELS[type],
+                            reasonSummary,
+                            cycle,
+                            recipientPermissionCodes: [APPROVAL_TYPE_PERMISSIONS[type]],
+                            excludeUserIds: actor.userId ? [actor.userId] : [],
                         },
-                        tx,
-                    )
-                }
+                    },
+                    tx,
+                )
             }
-            return { autoApproved, checkResult }
+            return { checkResult }
         })
 
         const detail = await this.orders.detail(id)
-        return { ...detail, submitResult: result.checkResult, autoApproved: result.autoApproved }
+        // autoApproved giữ lại cho client cũ, nhưng nay luôn false: không còn tự duyệt.
+        return { ...detail, submitResult: result.checkResult, autoApproved: false }
     }
 
     /** Shared by auto-approve at submit and by the last manual approval (SalesApprovalsService). */
@@ -549,11 +707,34 @@ export class SalesOrderWorkflowService {
             where: { id: orderId },
             select: { kind: true },
         })
+        // Duyệt là cam kết thực hiện đơn, nên thiếu tồn phải chặn ngay tại đây. Việc kiểm
+        // tra lại khi giữ hàng phía dưới vẫn cần thiết để chống trường hợp hai đơn duyệt sát nhau.
+        const stockWarnings = (await this.checks.run(tx, orderId)).warnings.filter(
+            (warning) => warning.code === 'INSUFFICIENT_AVAILABLE_STOCK',
+        )
+        if (stockWarnings.length) {
+            throw new BadRequestException({
+                code: 'INSUFFICIENT_AVAILABLE_STOCK',
+                message: `Không thể duyệt vì tồn kho chưa đủ: ${stockWarnings.map((warning) => warning.message).join('; ')}`,
+                details: stockWarnings,
+            })
+        }
         if (order.kind === SalesOrderKind.LOT) {
             // A lot order commits a quantity; it holds nothing until a draw is requested.
             return this.lots.openPositions(tx, orderId)
         }
-        return this.reserveAndDispatch(tx, orderId, actor)
+        const outcome = await this.reserveAndDispatch(tx, orderId, actor)
+        if (!outcome.fullyReserved) {
+            throw new BadRequestException({
+                code: 'INSUFFICIENT_AVAILABLE_STOCK',
+                message: `Không thể duyệt vì tồn kho chưa đủ: ${outcome.lines
+                    .filter((line) => !new Prisma.Decimal(line.shortageQty).isZero())
+                    .map((line) => `${line.productName} tại ${line.warehouseName} thiếu ${line.shortageQty}`)
+                    .join('; ')}`,
+                details: outcome.lines,
+            })
+        }
+        return outcome
     }
 
     /**
@@ -605,6 +786,86 @@ export class SalesOrderWorkflowService {
         }
         await this.orderStatus.recompute(tx, orderId)
         return outcome
+    }
+
+    /**
+     * Reopens an already-approved order for approval again. This is deliberately blocked
+     * once any warehouse issue was posted: at that point a correction document is required.
+     */
+    async returnApprovedOrderToReview(tx: Prisma.TransactionClient, orderId: string, actor: SalesActor) {
+        const order = await tx.salesOrder.findUnique({
+            where: { id: orderId },
+            select: { id: true, orderNo: true, kind: true, status: true, approvalCycle: true, version: true },
+        })
+        if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
+        this.assertInternalKind(order.kind)
+        const reopenable: SalesOrderStatus[] = [
+            SalesOrderStatus.CONFIRMED,
+            SalesOrderStatus.AWAITING_STOCK,
+            SalesOrderStatus.PARTIALLY_RESERVED,
+            SalesOrderStatus.RESERVED,
+            SalesOrderStatus.WAREHOUSE_PROCESSING,
+        ]
+        if (!reopenable.includes(order.status)) {
+            throw new BadRequestException({
+                code: 'SALES_ORDER_NOT_REOPENABLE',
+                message: `Đơn ${order.orderNo} không thể trả về chờ duyệt ở trạng thái ${order.status}.`,
+            })
+        }
+        if (await this.deliveries.hasPostedDelivery(tx, orderId)) {
+            throw new BadRequestException({
+                code: 'SALES_ORDER_HAS_POSTED_DELIVERY',
+                message: 'Đơn đã có phiếu xuất kho thành công — phải xử lý bằng chứng từ điều chỉnh.',
+            })
+        }
+        if (order.kind === SalesOrderKind.LOT) {
+            const withdrawalCount = await tx.salesLotWithdrawalRequest.count({ where: { salesOrderId: orderId } })
+            const changedPositionCount = await tx.salesLotPosition.count({
+                where: {
+                    orderLine: { salesOrderId: orderId },
+                    OR: [{ issuedQty: { gt: 0 } }, { adjustedQty: { gt: 0 } }, { adjustments: { some: {} } }],
+                },
+            })
+            if (withdrawalCount || changedPositionCount) {
+                throw new BadRequestException({
+                    code: 'SALES_LOT_HAS_WITHDRAWAL_HISTORY',
+                    message: 'Đơn lô đã phát sinh rút hàng hoặc điều chỉnh — không thể trả về chờ duyệt.',
+                })
+            }
+            await tx.salesLotPosition.deleteMany({ where: { orderLine: { salesOrderId: orderId } } })
+        }
+
+        const reason = `Trả đơn ${order.orderNo} về chờ duyệt`
+        await this.deliveries.voidOpenDeliveries(tx, orderId, actor, reason)
+        await this.reservations.releaseOrder(tx, orderId, actor, reason)
+        await tx.salesApprovalRequest.updateMany({
+            where: {
+                salesOrderId: orderId,
+                approvalCycle: order.approvalCycle,
+                status: SalesApprovalStatus.APPROVED,
+            },
+            data: { status: SalesApprovalStatus.PENDING, decidedById: null, decidedAt: null, decisionNote: null },
+        })
+        await tx.salesOrder.update({
+            where: { id: orderId },
+            data: {
+                status: SalesOrderStatus.PENDING_REVIEW,
+                approvedAt: null,
+                approvedById: null,
+                version: { increment: 1 },
+            },
+        })
+        await this.events.record(tx, {
+            entityType: 'SALES_ORDER',
+            entityId: orderId,
+            eventType: 'RETURN_TO_REVIEW',
+            fromStatus: order.status,
+            toStatus: SalesOrderStatus.PENDING_REVIEW,
+            actorId: actor.userId,
+            reason,
+            cycle: order.approvalCycle,
+            version: order.version + 1,
+        })
     }
 
     /** Manual retry for an order parked at AWAITING_STOCK/PARTIALLY_RESERVED. */
@@ -708,6 +969,12 @@ export class SalesOrderWorkflowService {
     }
 
     async cancel(id: string, reason: string | undefined, actor: SalesActor) {
+        if (!reason?.trim()) {
+            throw new BadRequestException({
+                code: 'CANCEL_REASON_REQUIRED',
+                message: 'Hủy đơn bắt buộc phải nhập lý do.',
+            })
+        }
         const cancellableStatuses: SalesOrderStatus[] = [
             SalesOrderStatus.DRAFT,
             SalesOrderStatus.PENDING_REVIEW,
@@ -741,7 +1008,7 @@ export class SalesOrderWorkflowService {
                     message: 'Đơn đã có lệnh xuất kho thành công — phải xử lý bằng chứng từ điều chỉnh.',
                 })
             }
-            const cancelReason = reason?.trim() || `Hủy đơn bán ${order.orderNo}`
+            const cancelReason = reason.trim()
             await this.deliveries.voidOpenDeliveries(tx, id, actor, cancelReason)
             await this.reservations.releaseOrder(tx, id, actor, cancelReason)
             await tx.salesApprovalRequest.updateMany({

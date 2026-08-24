@@ -1,6 +1,6 @@
 // src/modules/purchases/purchase-orders/dto/purchase-order.dto.ts
 import { ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator'
-import { PaymentMode, PurchaseOrderType } from '@prisma/client'
+import { PaymentMode, PurchaseOrderType, SalesOrderSupplySource } from '@prisma/client'
 import { Type } from 'class-transformer'
 
 export enum PaymentTermType {
@@ -138,6 +138,9 @@ export class CreatePurchaseOrderDto {
 
     @IsEnum(PaymentMode)
     paymentMode!: PaymentMode
+
+    @IsEnum(SalesOrderSupplySource)
+    releaseCode!: SalesOrderSupplySource
 
     @IsEnum(PaymentTermType)
     paymentTermType!: PaymentTermType

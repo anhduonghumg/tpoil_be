@@ -1,5 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common'
-import type { Request } from 'express'
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common'
+import type { Request, Response } from 'express'
 import { SalesOrderKind } from '@prisma/client'
 import { LoggedInGuard } from 'src/modules/auth/guards/logged-in.guard'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
@@ -7,11 +7,13 @@ import { RequirePermissions } from 'src/common/auth/permissions.decorator'
 import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import { SalesOrdersService } from './sales-orders.service'
 import { SalesOrderWorkflowService, SalesActor } from './sales-order-workflow.service'
+import { SalesOrderPrintService } from './sales-order-print.service'
 import {
     CancelSalesOrderDto,
     CreateSalesOrderDto,
     CreateSalesOrderFromPurchaseDto,
     ListSalesOrdersQueryDto,
+    PrintSalesOrdersDto,
     UpdateSalesOrderDto,
 } from './dto/sales-order.dto'
 
@@ -30,11 +32,17 @@ export class SalesOrdersController {
     constructor(
         private readonly service: SalesOrdersService,
         private readonly workflow: SalesOrderWorkflowService,
+        private readonly print$: SalesOrderPrintService,
     ) {}
 
     @Get()
     list(@Query() query: ListSalesOrdersQueryDto) {
         return this.service.list(query)
+    }
+
+    @Get('status-counts')
+    statusCounts(@Query() query: ListSalesOrdersQueryDto) {
+        return this.service.statusCounts(query)
     }
 
     @Get(':id')
@@ -69,6 +77,29 @@ export class SalesOrdersController {
     @RequirePermissions(PERMISSIONS.sales.view)
     checks(@Param('id') id: string) {
         return this.workflow.previewChecks(id)
+    }
+
+    /**
+     * In nhiều đơn thành một file. Đặt trước `:id/print` không quan trọng vì khác method,
+     * nhưng để cạnh nhau cho dễ đọc.
+     */
+    @Post('print-batch')
+    @RequirePermissions(PERMISSIONS.sales.view)
+    async printBatch(@Body() dto: PrintSalesOrdersDto, @Res() res: Response) {
+        const { buffer, count } = await this.print$.renderBatchPdf(dto)
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `inline; filename="don-dat-hang-${count}.pdf"`)
+        res.end(buffer)
+    }
+
+    /** Đơn đặt hàng để gửi khách ký: mẫu chọn theo loại đơn và cách xuất hóa đơn. */
+    @Get(':id/print')
+    @RequirePermissions(PERMISSIONS.sales.view)
+    async print(@Param('id') id: string, @Res() res: Response) {
+        const { buffer, orderNo } = await this.print$.renderPdf(id)
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `inline; filename="${orderNo}.pdf"`)
+        res.end(buffer)
     }
 
     @Post(':id/submit')

@@ -10,11 +10,19 @@ import { CustomerAddressesController } from './customer-addresses.controller'
 import { CustomerAddressesService } from './customer-addresses.service'
 import { CustomerGroupsController } from './customer-groups.controller'
 import { CustomerGroupsService } from './customer-groups.service'
+import { PartyMerchantService } from './party-merchant.service'
 
 @Module({
     imports: [PrismaModule, AuditModule, ContractsModule],
     controllers: [CustomersController, CustomerAddressesController, CustomerGroupsController],
-    providers: [CustomersService, CustomerOverviewService, CustomerAddressesService, CustomerGroupsService, PrismaService],
-    exports: [CustomersService],
+    providers: [
+        CustomersService,
+        CustomerOverviewService,
+        CustomerAddressesService,
+        CustomerGroupsService,
+        PartyMerchantService,
+        PrismaService,
+    ],
+    exports: [CustomersService, PartyMerchantService],
 })
 export class CustomersModule {}

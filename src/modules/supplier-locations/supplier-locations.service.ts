@@ -36,12 +36,17 @@ export class SupplierLocationsService {
         }
     }
 
-    private async assertValidSuppliers(supplierIds: string[]) {
+    private async assertValidOperatingParties(supplierIds: string[]) {
         const suppliers = await this.prisma.party.findMany({
             where: {
                 id: { in: supplierIds },
                 deletedAt: null,
-                roles: { some: { role: PartyRoleType.SUPPLIER, validTo: null } },
+                roles: {
+                    some: {
+                        role: { in: [PartyRoleType.SUPPLIER, PartyRoleType.CUSTOMER] },
+                        validTo: null,
+                    },
+                },
             },
             select: { id: true },
         })
@@ -218,7 +223,7 @@ export class SupplierLocationsService {
 
     async create(dto: CreateSupplierLocationDto) {
         const supplierIds = [...new Set((dto.supplierCustomerIds ?? []).filter(Boolean))]
-        if (supplierIds.length) await this.assertValidSuppliers(supplierIds)
+        if (supplierIds.length) await this.assertValidOperatingParties(supplierIds)
         await this.assertArea(dto.areaId)
 
         return this.prisma.$transaction(async (tx) => {
@@ -285,7 +290,7 @@ export class SupplierLocationsService {
     async batchUpdate(id: string, dto: UpdateSupplierLocationDto) {
         const hasSupplierUpdate = dto.supplierCustomerIds !== undefined
         const supplierIds = [...new Set((dto.supplierCustomerIds ?? []).filter(Boolean))]
-        if (hasSupplierUpdate && supplierIds.length) await this.assertValidSuppliers(supplierIds)
+        if (hasSupplierUpdate && supplierIds.length) await this.assertValidOperatingParties(supplierIds)
         if (dto.areaId) await this.assertArea(dto.areaId)
 
         return this.prisma.$transaction(async (tx) => {

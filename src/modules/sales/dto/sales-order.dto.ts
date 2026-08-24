@@ -14,7 +14,14 @@ import {
     Min,
     ValidateNested,
 } from 'class-validator'
-import { PaymentTermType, SalesApprovalStatus, SalesApprovalType, SalesOrderKind } from '@prisma/client'
+import {
+    PaymentTermType,
+    SalesApprovalStatus,
+    SalesApprovalType,
+    SalesLotInvoiceMode,
+    SalesOrderKind,
+    SalesOrderSupplySource,
+} from '@prisma/client'
 
 export class SalesOrderLineDto {
     @IsUUID()
@@ -50,6 +57,23 @@ export class SalesOrderLineDto {
     @IsNumber()
     @Min(0)
     discountAmount?: number
+
+    /** CK gốc theo đơn vị. Nếu không gửi thì dùng discountAmount cũ để tương thích dữ liệu cũ. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    discountBaseAmount?: number
+
+    /** CK điều chỉnh theo đơn vị; được phép âm. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    discountAdjustmentAmount?: number
+
+    @IsOptional()
+    @IsEnum(SalesOrderSupplySource)
+    supplySource?: SalesOrderSupplySource
 
     @IsOptional()
     @IsString()
@@ -113,6 +137,11 @@ export class CreateSalesOrderDto {
     @IsUUID()
     contractId?: string
 
+    /** Bắt buộc cho đơn LOT; mặc định ON_WITHDRAWAL nếu không truyền. */
+    @IsOptional()
+    @IsEnum(SalesLotInvoiceMode)
+    lotInvoiceMode?: SalesLotInvoiceMode
+
     @IsOptional()
     @IsEnum(PaymentTermType)
     paymentTermType?: PaymentTermType
@@ -145,6 +174,10 @@ export class UpdateSalesOrderDto {
     contractId?: string | null
 
     @IsOptional()
+    @IsEnum(SalesLotInvoiceMode)
+    lotInvoiceMode?: SalesLotInvoiceMode
+
+    @IsOptional()
     @IsEnum(PaymentTermType)
     paymentTermType?: PaymentTermType
 
@@ -168,6 +201,33 @@ export class UpdateSalesOrderDto {
     @ValidateNested({ each: true })
     @Type(() => SalesOrderLineDto)
     lines?: SalesOrderLineDto[]
+}
+
+/**
+ * In hàng loạt: chọn tay từng đơn, hoặc lọc theo khách + khoảng ngày (kế toán thường
+ * in cả tháng của một đối tác).
+ */
+export class PrintSalesOrdersDto {
+    @IsOptional()
+    @IsArray()
+    @IsUUID(undefined, { each: true })
+    ids?: string[]
+
+    @IsOptional()
+    @IsUUID()
+    customerPartyId?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateFrom?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateTo?: string
+
+    @IsOptional()
+    @IsEnum(SalesOrderKind)
+    kind?: SalesOrderKind
 }
 
 export class CancelSalesOrderDto {
@@ -206,6 +266,28 @@ export class ListSalesApprovalsQueryDto {
     @Transform(({ value }) => (value === 'true' ? true : value === 'false' ? false : value))
     @IsBoolean()
     mine?: boolean
+
+    /** Tìm nhanh theo số đơn / số phiếu / mã / tên khách. */
+    @IsOptional()
+    @IsString()
+    keyword?: string
+
+    @IsOptional()
+    @IsUUID()
+    customerPartyId?: string
+
+    @IsOptional()
+    @IsEnum(SalesOrderKind)
+    kind?: SalesOrderKind
+
+    /** Lọc theo ngày chứng từ: ngày đơn bán, hoặc ngày phiếu rút lô. */
+    @IsOptional()
+    @IsDateString()
+    dateFrom?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateTo?: string
 
     @IsOptional()
     @Type(() => Number)
@@ -248,4 +330,32 @@ export class ListSalesOrdersQueryDto {
     @IsInt()
     @Min(1)
     limit?: number
+}
+
+/** Duyệt/từ chối nhiều yêu cầu một lượt từ hàng đợi. */
+export class DecideManySalesApprovalsDto {
+    @IsArray()
+    @ArrayMinSize(1)
+    @IsUUID(undefined, { each: true })
+    ids!: string[]
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(1000)
+    note?: string
+}
+
+/** Người duyệt sửa CK điều chỉnh trên một dòng đơn đang chờ duyệt. */
+export class AdjustLineDiscountDto {
+    /** Được phép âm để giảm bớt chiết khấu gốc. */
+    @Type(() => Number)
+    @IsNumber()
+    discountAdjustmentAmount!: number
+}
+
+/** Null/không truyền = quay về để hệ thống tự chọn Mã NCC theo FIFO. */
+export class AdjustLineSupplierDto {
+    @IsOptional()
+    @IsUUID()
+    supplierPartyId?: string | null
 }

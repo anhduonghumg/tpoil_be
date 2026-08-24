@@ -4,6 +4,7 @@ import {
     InventoryPostingKind,
     Prisma,
     RestrictionEventType,
+    SalesOrderSupplySource,
 } from '@prisma/client'
 import { InventoryCoreService } from './inventory-core.service'
 
@@ -33,13 +34,36 @@ export class GoodsReceiptPostingService {
         effectiveAt: Date
         actorId?: string | null
         ownerPartyId?: string | null
+        supplierPartyId?: string | null
+        releaseCode?: SalesOrderSupplySource | null
     }) {
         const ownerPartyId =
             args.ownerPartyId ?? (await this.internalOwnerPartyId(args.tx, args.warehouseId))
         const receipt = await args.tx.goodsReceipt.findUniqueOrThrow({
             where: { id: args.goodsReceiptId },
-            select: { receiptNo: true },
+            select: {
+                receiptNo: true,
+                purchaseOrder: { select: { supplierCustomerId: true, releaseCode: true } },
+            },
         })
+        const purchaseSource = args.purchaseOrderLineId
+            ? await args.tx.purchaseOrderLine.findUnique({
+                  where: { id: args.purchaseOrderLineId },
+                  select: {
+                      purchaseOrder: { select: { supplierCustomerId: true, releaseCode: true } },
+                  },
+              })
+            : null
+        const supplierPartyId =
+            args.supplierPartyId ??
+            purchaseSource?.purchaseOrder.supplierCustomerId ??
+            receipt.purchaseOrder?.supplierCustomerId ??
+            null
+        const releaseCode =
+            args.releaseCode ??
+            purchaseSource?.purchaseOrder.releaseCode ??
+            receipt.purchaseOrder?.releaseCode ??
+            null
         const line = await args.tx.goodsReceiptLine.upsert({
             where: { goodsReceiptId_lineNo: { goodsReceiptId: args.goodsReceiptId, lineNo: 1 } },
             create: {
@@ -62,11 +86,16 @@ export class GoodsReceiptPostingService {
                 receiptLineId: line.id,
                 productId: line.productId,
                 originOwnerPartyId: line.ownerPartyId,
+                supplierPartyId,
                 receivedActualQty: line.actualQty,
                 receivedV15Qty: line.v15Qty,
                 receivedAt: args.effectiveAt,
+                releaseCode,
             },
-            update: {},
+            update: {
+                ...(supplierPartyId ? { supplierPartyId } : {}),
+                ...(releaseCode ? { releaseCode } : {}),
+            },
         })
 
         const posting = await this.inventory.post(args.tx, {

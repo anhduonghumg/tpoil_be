@@ -1,6 +1,6 @@
-import { Type } from 'class-transformer'
-import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
-import { CustomerRole, CustomerStatus, CustomerType, OperationalPartyRole, PartyType, TaxSource } from '@prisma/client'
+import { Transform, Type } from 'class-transformer'
+import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
+import { CustomerRole, CustomerStatus, CustomerType, OperationalPartyRole, PartyRoleType, PartyType, TaxSource } from '@prisma/client'
 
 export class CreateCustomerDto {
     @IsOptional()
@@ -30,9 +30,13 @@ export class CreateCustomerDto {
     @IsDate()
     taxSyncedAt?: Date
 
+    // Backward compatible with clients that submit a single selected role.
+    // The database and service layer always receive an array.
+    @Transform(({ value }) => (value == null || Array.isArray(value) ? value : [value]))
+    @IsOptional()
     @IsArray()
     @IsEnum(CustomerRole, { each: true })
-    roles!: CustomerRole[]
+    roles?: CustomerRole[]
 
     @IsOptional()
     @IsArray()
@@ -112,6 +116,14 @@ export class CreateCustomerDto {
     @IsOptional()
     @IsEnum(PartyType)
     partyType?: PartyType
+
+    /**
+     * Loại thương nhân xăng dầu. Khi có, hệ thống tự sinh CUSTOMER/SUPPLIER tương ứng
+     * nên không cần tick tay isCustomer/isSupplier nữa.
+     */
+    @IsOptional()
+    @IsIn([PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] as string[])
+    merchantRole?: 'TNPP' | 'TNDM' | 'TNDL' | null
 
     @IsOptional()
     @IsBoolean()

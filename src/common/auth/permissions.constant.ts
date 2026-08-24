@@ -81,6 +81,8 @@ export const PERMISSIONS = {
         submit: 'sales.submit',
         recall: 'sales.recall',
         cancel: 'sales.cancel',
+        /** Duyệt thường lệ: mọi đơn Sale nhập lên đều phải qua quản lý ký, kể cả đơn sạch. */
+        approveOrder: 'sales.approve_order',
         approvePrice: 'sales.approve_price',
         approveCredit: 'sales.approve_credit',
         approveException: 'sales.approve_exception',
@@ -93,6 +95,8 @@ export const PERMISSIONS = {
         withdrawCreate: 'sales.withdraw.create',
         receivableView: 'sales.receivable.view',
         receivableAllocate: 'sales.receivable.allocate',
+        creditManage: 'sales.credit.manage',
+        discountManage: 'sales.discount.manage',
         profitabilityView: 'sales.profitability.view',
         quickEntryUse: 'sales.quickentry.use',
         aliasManage: 'sales.alias.manage',

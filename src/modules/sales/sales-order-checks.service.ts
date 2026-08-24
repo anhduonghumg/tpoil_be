@@ -4,7 +4,6 @@ import {
     ContractStatus,
     CustomerStatus,
     MasterStatus,
-    PaymentTermType,
     Prisma,
     RiskLevel,
     SalesApprovalType,
@@ -31,8 +30,6 @@ export type SalesOrderCheckResult = {
     violations: SalesCheckViolation[]
     warnings: SalesCheckWarning[]
     orderValue: string
-    creditExposure: string
-    creditLimit: string | null
 }
 
 type TxOrPrisma = Prisma.TransactionClient | PrismaService
@@ -45,6 +42,8 @@ const EXPOSURE_STATUSES: SalesOrderStatus[] = [
     SalesOrderStatus.RESERVED,
     SalesOrderStatus.WAREHOUSE_PROCESSING,
     SalesOrderStatus.PARTIALLY_DELIVERED,
+
+    
     SalesOrderStatus.DELIVERED,
     SalesOrderStatus.AWAITING_RECONCILIATION,
     SalesOrderStatus.AWAITING_INVOICE,
@@ -71,13 +70,80 @@ export class SalesOrderChecksService {
         discountAmount: Prisma.Decimal
         taxRate: Prisma.Decimal | null
     }) {
-        const net = line.orderedActualQty.mul(line.unitPrice).minus(line.discountAmount)
+        // Chiết khấu tính trên mỗi đơn vị: thành tiền = SL × (giá − chiết khấu).
+        const net = line.orderedActualQty.mul(line.unitPrice.minus(line.discountAmount))
         if (line.taxRate == null) return net
         return net.plus(net.mul(line.taxRate))
     }
 
     orderValue(lines: Parameters<SalesOrderChecksService['lineValue']>[0][]) {
         return lines.reduce((sum, line) => sum.plus(this.lineValue(line)), new Prisma.Decimal(0))
+    }
+
+    /**
+     * Tình hình công nợ của một khách: đã dùng bao nhiêu, hạn mức bao nhiêu, quá hạn bao nhiêu.
+     *
+     * Đứng riêng vì hai nơi cùng cần và không được lệch nhau: đơn bán chỉ *hiện* con số
+     * (không chặn), còn phát hành hóa đơn thì *chặn* — đó mới là lúc phát sinh công nợ thật.
+     *
+     * `excludeOrderId` để đơn đang xét không bị đếm hai lần khi nó đã nằm trong exposure.
+     */
+    async creditStatus(
+        db: TxOrPrisma,
+        customerPartyId: string,
+        options: { excludeOrderId?: string; extraExposure?: Prisma.Decimal } = {},
+    ) {
+        const [customer, otherOrders, receivables] = await Promise.all([
+            db.party.findUniqueOrThrow({
+                where: { id: customerPartyId },
+                select: { creditLimit: true, tempLimit: true, tempFrom: true, tempTo: true },
+            }),
+            db.salesOrder.findMany({
+                where: {
+                    customerPartyId,
+                    ...(options.excludeOrderId ? { id: { not: options.excludeOrderId } } : {}),
+                    kind: { in: ['SINGLE', 'LOT'] },
+                    status: { in: EXPOSURE_STATUSES },
+                },
+                select: {
+                    lines: {
+                        select: {
+                            orderedActualQty: true,
+                            unitPrice: true,
+                            discountAmount: true,
+                            taxRate: true,
+                        },
+                    },
+                },
+            }),
+            db.receivableOpenItem.findMany({
+                where: { customerPartyId, status: { in: ['OPEN', 'PARTIALLY_SETTLED'] } },
+                select: { outstandingAmount: true, dueDate: true },
+            }),
+        ])
+
+        const receivableOutstanding = receivables.reduce(
+            (sum, item) => sum.plus(item.outstandingAmount),
+            new Prisma.Decimal(0),
+        )
+        // dueDate là DATE: hóa đơn đến hạn hôm nay thì chưa phải quá hạn.
+        const now = startOfToday()
+        const overdueAmount = receivables
+            .filter((item) => item.dueDate && item.dueDate < now)
+            .reduce((sum, item) => sum.plus(item.outstandingAmount), new Prisma.Decimal(0))
+
+        const exposure = otherOrders
+            .reduce((sum, row) => sum.plus(this.orderValue(row.lines)), new Prisma.Decimal(0))
+            .plus(options.extraExposure ?? new Prisma.Decimal(0))
+            .plus(receivableOutstanding)
+
+        const tempLimitActive =
+            customer.tempLimit != null &&
+            (customer.tempFrom == null || customer.tempFrom <= now) &&
+            (customer.tempTo == null || customer.tempTo >= now)
+        const limit = (tempLimitActive ? customer.tempLimit : null) ?? customer.creditLimit
+
+        return { exposure, overdueAmount, receivableOutstanding, limit }
     }
 
     async run(db: TxOrPrisma, orderId: string): Promise<SalesOrderCheckResult> {
@@ -157,9 +223,16 @@ export class SalesOrderChecksService {
                 })
             }
         } else {
-            warnings.push({
+            // Không có hợp đồng là ngoại lệ nghiệp vụ: đơn vẫn được lưu/gửi duyệt,
+            // nhưng không được tự động duyệt hay giữ tồn cho tới khi quản lý xác nhận.
+            violations.push({
+                approvalType: SalesApprovalType.EXCEPTION,
                 code: 'NO_SALES_CONTRACT',
-                message: 'Đơn không gắn hợp đồng bán — bỏ qua kiểm tra giá sàn theo hợp đồng.',
+                message: 'Đơn chưa gắn hợp đồng bán. Cần quản lý xác nhận trước khi duyệt đơn.',
+                detail: {
+                    customerPartyId: order.customerPartyId,
+                    orderDate: orderDate.toISOString(),
+                },
             })
         }
 
@@ -232,7 +305,7 @@ export class SalesOrderChecksService {
                 })
                 continue
             }
-            const netRevenue = line.orderedActualQty.mul(line.unitPrice).minus(line.discountAmount)
+            const netRevenue = line.orderedActualQty.mul(line.unitPrice.minus(line.discountAmount))
             if (!netRevenue.greaterThan(0)) continue
             const marginPercent = netRevenue.minus(estimate.cost).div(netRevenue).mul(100)
             if (marginPercent.lessThan(minMarginPercent)) {
@@ -252,94 +325,9 @@ export class SalesOrderChecksService {
             }
         }
 
-        // ===== 3) Công nợ (D3) =====
-        const orderValue = this.orderValue(order.lines)
-        const otherOrders = await db.salesOrder.findMany({
-            where: {
-                customerPartyId: order.customerPartyId,
-                id: { not: order.id },
-                kind: { in: ['SINGLE', 'LOT'] },
-                status: { in: EXPOSURE_STATUSES },
-            },
-            select: {
-                lines: {
-                    select: {
-                        orderedActualQty: true,
-                        unitPrice: true,
-                        discountAmount: true,
-                        taxRate: true,
-                    },
-                },
-            },
-        })
-        // Exposure = dư nợ hóa đơn chưa thu + đơn đã duyệt chưa lập hóa đơn + đơn đang xét (D3).
-        const receivables = await db.receivableOpenItem.findMany({
-            where: {
-                customerPartyId: order.customerPartyId,
-                status: { in: ['OPEN', 'PARTIALLY_SETTLED'] },
-            },
-            select: { outstandingAmount: true, dueDate: true },
-        })
-        const receivableOutstanding = receivables.reduce(
-            (sum, item) => sum.plus(item.outstandingAmount),
-            new Prisma.Decimal(0),
-        )
-        // dueDate is a DATE: an invoice due today is not yet overdue.
-        const now = startOfToday()
-        const overdueAmount = receivables
-            .filter((item) => item.dueDate && item.dueDate < now)
-            .reduce((sum, item) => sum.plus(item.outstandingAmount), new Prisma.Decimal(0))
-
-        const exposure = otherOrders
-            .reduce((sum, row) => sum.plus(this.orderValue(row.lines)), new Prisma.Decimal(0))
-            .plus(orderValue)
-            .plus(receivableOutstanding)
-
-        if (overdueAmount.greaterThan(0)) {
-            // Overdue debt blocks the order; only an exception approval opens it (D3).
-            violations.push({
-                approvalType: SalesApprovalType.CREDIT,
-                code: 'CUSTOMER_HAS_OVERDUE_DEBT',
-                message: `Khách hàng đang có công nợ quá hạn ${overdueAmount.toFixed(0)}.`,
-                detail: { overdueAmount: overdueAmount.toString() },
-            })
-        }
-
-        const tempLimitActive =
-            order.customer.tempLimit != null &&
-            (order.customer.tempFrom == null || order.customer.tempFrom <= now) &&
-            (order.customer.tempTo == null || order.customer.tempTo >= now)
-        const effectiveLimit =
-            order.contract?.creditLimitOverride ??
-            (tempLimitActive ? order.customer.tempLimit : null) ??
-            order.customer.creditLimit
-
-        if (order.paymentTermType === PaymentTermType.NET_DAYS && process.env.SALES_CREDIT_REVIEW_DEFERRED !== '0') {
-            violations.push({
-                approvalType: SalesApprovalType.CREDIT,
-                code: 'DEFERRED_PAYMENT_REVIEW',
-                message: `Đơn bán trả sau (${order.paymentTermDays ?? '?'} ngày) cần kế toán công nợ duyệt.`,
-                detail: { paymentTermDays: order.paymentTermDays },
-            })
-        }
-        if (effectiveLimit != null && exposure.greaterThan(new Prisma.Decimal(effectiveLimit))) {
-            violations.push({
-                approvalType: SalesApprovalType.CREDIT,
-                code: 'CREDIT_LIMIT_EXCEEDED',
-                message: `Tổng mức sử dụng tín dụng ${exposure.toFixed(0)} vượt hạn mức ${new Prisma.Decimal(effectiveLimit).toFixed(0)}.`,
-                detail: {
-                    exposure: exposure.toString(),
-                    creditLimit: String(effectiveLimit),
-                    orderValue: orderValue.toString(),
-                },
-            })
-        }
-        if (effectiveLimit == null && order.paymentTermType === PaymentTermType.NET_DAYS) {
-            warnings.push({
-                code: 'NO_CREDIT_LIMIT',
-                message: 'Khách trả sau nhưng chưa cấu hình hạn mức công nợ.',
-            })
-        }
+        // Công nợ KHÔNG thuộc luồng đơn bán. Kế toán công nợ xử lý ở màn xuất hóa đơn
+        // (SalesInvoicesService.issue) — đó mới là lúc khoản phải thu ra đời. Ở đây không
+        // kiểm, không cảnh báo, và cũng không truy vấn dư nợ để khỏi tốn 3 query mỗi lần.
 
         // ===== 4) Tồn khả dụng (chỉ cảnh báo — chặn thật ở bước giữ hàng, D2 owner pháp nhân) =====
         for (const line of order.lines) {
@@ -348,7 +336,7 @@ export class SalesOrderChecksService {
                 violations.push({
                     approvalType: SalesApprovalType.EXCEPTION,
                     code: 'ISSUE_WAREHOUSE_INACTIVE',
-                    message: `Kho xuất ${line.issueWarehouse.name} không còn hoạt động.`,
+                    message: `Kho nhận ${line.issueWarehouse.name} không còn hoạt động.`,
                     detail: { lineNo: line.lineNo, warehouseId: line.issueWarehouse.id },
                 })
                 continue
@@ -385,9 +373,7 @@ export class SalesOrderChecksService {
         return {
             violations,
             warnings,
-            orderValue: orderValue.toString(),
-            creditExposure: exposure.toString(),
-            creditLimit: effectiveLimit == null ? null : String(effectiveLimit),
+            orderValue: this.orderValue(order.lines).toString(),
         }
     }
 }

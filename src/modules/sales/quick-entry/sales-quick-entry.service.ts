@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common'
-import { Prisma, SalesAliasEntityType, SalesOrderKind } from '@prisma/client'
+import { ContractKind, ContractStatus, Prisma, SalesAliasEntityType, SalesOrderKind } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { DeepSeekClientService } from 'src/infra/deepseek/deepseek-client.service'
 import { SalesAliasService, AliasCandidate } from '../sales-alias.service'
@@ -13,6 +13,7 @@ import { ConfirmQuickEntryDto, ParseQuickEntryDto } from '../dto/sales-quick-ent
 type ResolvedField = {
     rawText: string | null
     entityId: string | null
+    entityCode: string | null
     entityName: string | null
     confidence: number
     matchedBy: string | null
@@ -42,6 +43,7 @@ export class SalesQuickEntryService {
         return {
             rawText,
             entityId: null,
+            entityCode: null,
             entityName: null,
             confidence: 0,
             matchedBy: null,
@@ -50,15 +52,38 @@ export class SalesQuickEntryService {
         }
     }
 
+    /** Quick entry must never create a sales order or withdrawal for a customer without a valid sales contract. */
+    private async assertActiveSalesContract(customerPartyId: string, orderDate: Date) {
+        const contract = await this.prisma.contract.findFirst({
+            where: {
+                customerId: customerPartyId,
+                kind: ContractKind.SALES,
+                status: ContractStatus.Active,
+                deletedAt: null,
+                startDate: { lte: orderDate },
+                endDate: { gte: orderDate },
+            },
+            select: { id: true },
+        })
+        if (!contract) {
+            throw new BadRequestException({
+                code: 'SALES_CONTRACT_REQUIRED',
+                message: 'Khách hàng chưa có hợp đồng bán đang hiệu lực. Không thể tạo đơn.',
+                detail: { customerPartyId, orderDate: orderDate.toISOString() },
+            })
+        }
+    }
+
     private async resolve(entityType: SalesAliasEntityType, rawText: string | null): Promise<ResolvedField> {
         if (!rawText?.trim()) return this.empty(rawText)
         const match = await this.aliases.match(entityType, rawText)
         if (match.ok) {
-            const name = await this.entityName(entityType, match.entityId)
+            const entity = await this.entityLabel(entityType, match.entityId)
             return {
                 rawText,
                 entityId: match.entityId,
-                entityName: name,
+                entityCode: entity?.code ?? null,
+                entityName: entity?.name ?? null,
                 confidence: match.confidence,
                 matchedBy: match.matchedBy,
                 candidates: [],
@@ -69,6 +94,7 @@ export class SalesQuickEntryService {
         return {
             rawText,
             entityId: null,
+            entityCode: null,
             entityName: null,
             confidence: 0,
             matchedBy: match.reason,
@@ -77,19 +103,23 @@ export class SalesQuickEntryService {
         }
     }
 
-    private async entityName(entityType: SalesAliasEntityType, id: string) {
+    /** Screens show the code, so hand back both rather than making them look it up. */
+    private async entityLabel(entityType: SalesAliasEntityType, id: string) {
+        const select = { code: true, name: true }
         if (entityType === SalesAliasEntityType.PARTY) {
-            return (await this.prisma.party.findUnique({ where: { id }, select: { name: true } }))?.name ?? null
+            return this.prisma.party.findUnique({ where: { id }, select })
         }
         if (entityType === SalesAliasEntityType.WAREHOUSE) {
-            return (await this.prisma.warehouse.findUnique({ where: { id }, select: { name: true } }))?.name ?? null
+            return this.prisma.warehouse.findUnique({ where: { id }, select })
         }
-        return (await this.prisma.product.findUnique({ where: { id }, select: { name: true } }))?.name ?? null
+        return this.prisma.product.findUnique({ where: { id }, select })
     }
 
-    private orderKindOf(kind: ParsedOrderKind | null) {
+    /** Đối ứng không đọc được từ tin nhắn nên Sale tự chọn; ba loại còn lại từ mẫu. */
+    private orderKindOf(kind: ParsedOrderKind | 'DAY_TRADE' | null) {
         if (kind === 'SINGLE') return SalesOrderKind.SINGLE
         if (kind === 'LOT') return SalesOrderKind.LOT
+        if (kind === 'DAY_TRADE') return SalesOrderKind.DAY_TRADE
         return null
     }
 
@@ -101,12 +131,13 @@ export class SalesQuickEntryService {
         let parsed = parseQuickEntry(rawText)
         let usedAi = false
 
-        // Regex first; AI only fills genuine gaps (spec v1.2 nguyên tắc 12).
+        // Regex first; AI only fills genuine gaps (spec v1.2 nguyên tắc 12), and only
+        // when the caller asked for it so the screen stays in control of the cost.
         const incomplete =
             !parsed.customerText ||
             !parsed.lines.length ||
             parsed.lines.some((line) => !line.productText || line.quantity == null)
-        if (incomplete && this.deepSeek.isEnabled) {
+        if (dto.useAi && incomplete && this.deepSeek.isEnabled) {
             const ai = await this.deepSeek.normalize(rawText)
             if (ai) {
                 usedAi = true
@@ -122,9 +153,10 @@ export class SalesQuickEntryService {
                               .filter((line) => line.product?.trim())
                               .map((line) => ({
                                   productText: line.product!.trim(),
-                                  quantity: parseLocalizedNumber(line.quantity ?? ''),
-                                  quantityText: line.quantity ?? '',
-                                  warehouseText: line.warehouse?.trim() || null,
+                                   quantity: parseLocalizedNumber(line.quantity ?? ''),
+                                   quantityText: line.quantity ?? '',
+                                   warehouseText: line.warehouse?.trim() || null,
+                                   orderKind: null,
                               })),
                 }
             }
@@ -137,6 +169,7 @@ export class SalesQuickEntryService {
                 warehouse: await this.resolve(SalesAliasEntityType.WAREHOUSE, line.warehouseText),
                 quantity: line.quantity,
                 quantityText: line.quantityText,
+                orderKind: line.orderKind ?? parsed.orderKind,
                 needsAttention: line.quantity == null,
             })),
         )
@@ -164,7 +197,7 @@ export class SalesQuickEntryService {
             warnings.push(`Không hiểu được: ${parsed.leftovers.join(' | ')}`)
         }
 
-        const orderDate = this.suggestOrderDate()
+        const orderDate = this.orderDateFrom(parsed.dateText)
         const duplicate = await this.findDuplicate(customer.entityId, parsed.plateText, lines, orderDate)
         if (duplicate) {
             warnings.push(`Có thể trùng với đơn ${duplicate} cùng ngày (cùng khách, xe, hàng và số lượng).`)
@@ -212,6 +245,36 @@ export class SalesQuickEntryService {
         return now.toISOString().slice(0, 10)
     }
 
+    /**
+     * Customers write "14/7" far more often than a full date, so a missing year means
+     * this year and a missing date altogether falls back to the suggested one.
+     */
+    private orderDateFrom(dateText: string | null) {
+        const raw = dateText?.trim()
+        if (!raw) return this.suggestOrderDate()
+
+        const match = raw.match(/^(\d{1,2})\s*[/\-.]\s*(\d{1,2})(?:\s*[/\-.]\s*(\d{2}|\d{4}))?$/)
+        if (!match) return this.suggestOrderDate()
+
+        const day = Number(match[1])
+        const month = Number(match[2])
+        if (day < 1 || day > 31 || month < 1 || month > 12) return this.suggestOrderDate()
+
+        const currentYear = new Date().getFullYear()
+        let year = currentYear
+        if (match[3]) {
+            const parsedYear = Number(match[3])
+            year = match[3].length === 2 ? 2000 + parsedYear : parsedYear
+        }
+
+        const candidate = new Date(Date.UTC(year, month - 1, day))
+        // Reject impossible days such as 31/02 rather than letting them roll over.
+        if (candidate.getUTCMonth() !== month - 1 || candidate.getUTCDate() !== day) {
+            return this.suggestOrderDate()
+        }
+        return candidate.toISOString().slice(0, 10)
+    }
+
     /** Same customer, plate, product and quantity on the same day is usually a re-paste. */
     private async findDuplicate(
         customerPartyId: string | null,
@@ -247,10 +310,13 @@ export class SalesQuickEntryService {
      */
     async confirm(dto: ConfirmQuickEntryDto, actor: ScopedActor) {
         if (!dto.lines?.length) throw new BadRequestException('QUICK_ENTRY_LINES_REQUIRED')
+        const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
+        if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
+        await this.assertActiveSalesContract(dto.customerPartyId, orderDate)
 
-        if (dto.learnAliases !== false) {
-            await this.learnFrom(dto, actor)
-        }
+        // Chỉ những cách viết Sale đã tick mới gửi kèm rawText, nên gửi rawText chính là
+        // đồng ý ghi nhớ. learnAliases=false vẫn là công tắc tổng để tắt hết.
+        const learnedAliases = dto.learnAliases === false ? [] : await this.learnFrom(dto, actor)
 
         const created =
             dto.orderKind === 'WITHDRAWAL'
@@ -273,11 +339,17 @@ export class SalesQuickEntryService {
                           customerPartyId: dto.customerPartyId,
                           kind: this.orderKindOf(dto.orderKind as ParsedOrderKind)!,
                           orderDate: dto.orderDate,
+                          lotInvoiceMode: dto.lotInvoiceMode,
+                          paymentTermType: dto.paymentTermType,
+                          paymentTermDays: dto.paymentTermDays,
                           lines: dto.lines.map((line) => ({
                               productId: line.productId,
                               issueWarehouseId: line.warehouseId,
                               orderedActualQty: line.quantity,
                               unitPrice: line.unitPrice ?? 0,
+                              discountBaseAmount: line.discountBaseAmount ?? line.discountAmount ?? 0,
+                              discountAdjustmentAmount: line.discountAdjustmentAmount ?? 0,
+                              supplySource: line.supplySource,
                               vehiclePlate: dto.vehiclePlate,
                               driverName: dto.driverName,
                           })),
@@ -285,13 +357,28 @@ export class SalesQuickEntryService {
                       actor,
                   )
 
+        // Lịch thanh toán chỉ có nghĩa với đơn bán trả chậm; phiếu rút lô không có.
+        if (dto.orderKind !== 'WITHDRAWAL' && dto.paymentPlans?.length && created?.id) {
+            await this.prisma.salesOrderPaymentPlan.createMany({
+                data: dto.paymentPlans.map((plan, index) => ({
+                    salesOrderId: created.id,
+                    dueDays: plan.dueDays,
+                    percent: plan.percent == null ? null : new Prisma.Decimal(plan.percent),
+                    amount: plan.amount == null ? null : new Prisma.Decimal(plan.amount),
+                    note: plan.note?.trim() || null,
+                    sortOrder: index,
+                })),
+            })
+        }
+
         if (dto.logId) {
             await this.prisma.salesQuickEntryLog.update({
                 where: { id: dto.logId },
                 data: { confirmed: dto as unknown as Prisma.InputJsonObject },
             })
         }
-        return created
+        // Trả về cả những cách viết vừa nhớ, để màn hình nói được đã học thêm gì.
+        return { ...created, learnedAliases }
     }
 
     /**

@@ -358,7 +358,7 @@ export class GoodsReceiptsService {
                 include: {
                     lines: { orderBy: { lineNo: 'asc' } },
                     warehouse: { select: { code: true, name: true } },
-                    purchaseOrder: { select: { id: true, orderNo: true, status: true, createdById: true } },
+                    purchaseOrder: { select: { id: true, orderNo: true, status: true, createdById: true, supplierCustomerId: true, releaseCode: true } },
                 },
             })
             if (!receipt) throw new BadRequestException('GOODS_RECEIPT_NOT_DRAFT')
@@ -378,6 +378,8 @@ export class GoodsReceiptsService {
                 effectiveAt: receipt.receiptDate,
                 actorId,
                 ownerPartyId: line.ownerPartyId,
+                supplierPartyId: receipt.purchaseOrder?.supplierCustomerId,
+                releaseCode: receipt.purchaseOrder?.releaseCode,
             })
 
             await tx.goodsReceipt.update({

@@ -2,17 +2,21 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { CustomerListQueryDto } from './dto/customer-list-query.dto'
 import { CreateCustomerDto } from './dto/create-customer.dto'
 import { UpdateCustomerDto } from './dto/update-customer.dto'
-import { OperationalPartyRole, PartyRoleType, Prisma } from '@prisma/client'
+import { CustomerRole, OperationalPartyRole, PartyRoleType, Prisma } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import dayjs from 'dayjs'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
 import { CustomerListRole } from './dto/customer-list-query.dto'
 import { CustomerSelectRole } from './dto/customer-select-query.dto'
 import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
+import { MERCHANT_DERIVED_ROLES, MerchantRole, PartyMerchantService } from './party-merchant.service'
 
 @Injectable()
 export class CustomersService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly merchants: PartyMerchantService,
+    ) {}
 
     private readonly shipPartnerRoles = new Set<PartyRoleType>([
         PartyRoleType.SHIP_OWNER,
@@ -54,6 +58,11 @@ export class CustomersService {
             isCustomer: roleSet.has(PartyRoleType.CUSTOMER),
             isSupplier: roleSet.has(PartyRoleType.SUPPLIER),
             isInternal: roleSet.has(PartyRoleType.INTERNAL_COMPANY),
+            /** Loại thương nhân đang áp dụng; null = đối tác dịch vụ. */
+            merchantRole:
+                ([PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] as PartyRoleType[]).find(
+                    (role) => roleSet.has(role),
+                ) ?? null,
             partyType: roleSet.has(PartyRoleType.INTERNAL_COMPANY)
                 ? 'INTERNAL'
                 : roleSet.has(PartyRoleType.SUPPLIER)
@@ -169,23 +178,43 @@ export class CustomersService {
         const keyword = query.keyword?.trim()
         const partyType = query.partyType
         const role = query.role
+        const effectiveAt = query.effectiveAt ? new Date(`${query.effectiveAt}T00:00:00`) : new Date()
 
         const where: Prisma.PartyWhereInput = { deletedAt: null }
-        const requestedRole = role
-            ? role === CustomerSelectRole.INTERNAL
-                ? PartyRoleType.INTERNAL_COMPANY
-                : (role as unknown as PartyRoleType)
-            : partyType
-              ? partyType === 'INTERNAL'
-                  ? PartyRoleType.INTERNAL_COMPANY
-                  : (partyType as unknown as PartyRoleType)
-              : null
-        if (requestedRole === PartyRoleType.SHIP_OWNER) {
+
+        // Lọc theo chiều giao dịch xăng dầu: chỉ hiện đối tác đặt được chứng từ.
+        if (role === CustomerSelectRole.PARTNER) {
             where.roles = {
-                some: { role: { in: [PartyRoleType.SHIP_OWNER, PartyRoleType.SEA_CARRIER] }, validTo: null },
+                some: {
+                    role: { in: [PartyRoleType.CUSTOMER, PartyRoleType.SUPPLIER] },
+                    validTo: null,
+                },
             }
-        } else if (requestedRole) {
-            where.roles = { some: { role: requestedRole, validTo: null } }
+        } else if (role === CustomerSelectRole.SELLABLE || role === CustomerSelectRole.PURCHASABLE) {
+            Object.assign(
+                where,
+                this.merchants.tradableWhere(
+                    role === CustomerSelectRole.SELLABLE ? 'SELL' : 'BUY',
+                    effectiveAt,
+                ),
+            )
+        } else {
+            const requestedRole = role
+                ? role === CustomerSelectRole.INTERNAL
+                    ? PartyRoleType.INTERNAL_COMPANY
+                    : (role as unknown as PartyRoleType)
+                : partyType
+                  ? partyType === 'INTERNAL'
+                      ? PartyRoleType.INTERNAL_COMPANY
+                      : (partyType as unknown as PartyRoleType)
+                  : null
+            if (requestedRole === PartyRoleType.SHIP_OWNER) {
+                where.roles = {
+                    some: { role: { in: [PartyRoleType.SHIP_OWNER, PartyRoleType.SEA_CARRIER] }, validTo: null },
+                }
+            } else if (requestedRole) {
+                where.roles = { some: { role: requestedRole, validTo: null } }
+            }
         }
 
         if (keyword) {
@@ -202,12 +231,35 @@ export class CustomersService {
                 orderBy: { name: 'asc' },
                 skip: (page - 1) * pageSize,
                 take: pageSize,
-                select: { id: true, code: true, name: true, taxCode: true },
+                select: {
+                    id: true,
+                    code: true,
+                    name: true,
+                    taxCode: true,
+                    roles: {
+                        where: {
+                            role: { in: [PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] },
+                            validFrom: { lte: effectiveAt },
+                            OR: [{ validTo: null }, { validTo: { gte: effectiveAt } }],
+                        },
+                        select: { role: true },
+                        orderBy: { validFrom: 'desc' },
+                        take: 1,
+                    },
+                },
             }),
             this.prisma.party.count({ where }),
         ])
 
-        return { items, total, page, pageSize }
+        return {
+            items: items.map(({ roles, ...item }) => ({
+                ...item,
+                merchantRole: roles[0]?.role ?? null,
+            })),
+            total,
+            page,
+            pageSize,
+        }
     }
 
     async generateCode() {
@@ -247,11 +299,28 @@ export class CustomersService {
         const isSupplier = dto.isSupplier ?? inferred === 'SUPPLIER'
         const isInternal = dto.isInternal ?? inferred === 'INTERNAL'
         const partnerRoles = [...new Set(dto.partnerRoles ?? [])]
+        const customerRoles =
+            dto.roles ??
+            (partnerRoles.some(
+                (role) => role === OperationalPartyRole.SHIP_OWNER || role === OperationalPartyRole.SEA_CARRIER,
+            )
+                ? [CustomerRole.Other]
+                : [CustomerRole.Retail])
+
+        // Chọn loại thương nhân là đủ — CUSTOMER/SUPPLIER suy ra từ đó, khỏi tick tay.
+        const merchantRole = (dto.merchantRole ?? null) as MerchantRole | null
+        const derivedFromMerchant: PartyRoleType[] = merchantRole
+            ? [merchantRole, ...MERCHANT_DERIVED_ROLES[merchantRole]]
+            : []
+
         const assignedRoles: PartyRoleType[] = [
-            ...(isCustomer ? [PartyRoleType.CUSTOMER] : []),
-            ...(isSupplier ? [PartyRoleType.SUPPLIER] : []),
-            ...(isInternal ? [PartyRoleType.INTERNAL_COMPANY] : []),
-            ...partnerRoles.map((role) => this.toPartyRole(role)),
+            ...new Set([
+                ...derivedFromMerchant,
+                ...(isCustomer && !merchantRole ? [PartyRoleType.CUSTOMER] : []),
+                ...(isSupplier && !merchantRole ? [PartyRoleType.SUPPLIER] : []),
+                ...(isInternal ? [PartyRoleType.INTERNAL_COMPANY] : []),
+                ...partnerRoles.map((role) => this.toPartyRole(role)),
+            ]),
         ]
 
         if (!assignedRoles.length) {
@@ -265,7 +334,7 @@ export class CustomersService {
             taxVerified: dto.taxVerified ?? false,
             taxSource: dto.taxSource,
             taxSyncedAt: dto.taxSyncedAt,
-            customerRoles: dto.roles,
+            customerRoles,
             type: dto.type,
             ...(dto.groupId && { group: { connect: { id: dto.groupId } } }),
             ...(dto.documentOwnerEmpId && { documentOwnerEmp: { connect: { id: dto.documentOwnerEmpId } } }),
@@ -336,9 +405,17 @@ export class CustomersService {
             .map((item) => this.toOperationalRole(item.role))
             .filter((role): role is OperationalPartyRole => role != null)
         const nextPartnerRoles = dto.partnerRoles ?? currentPartnerRoles
+        const currentMerchantRole = ([PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] as MerchantRole[]).find(
+            (role) => activeRoleSet.has(role),
+        ) ?? null
+        const merchantRole = dto.merchantRole !== undefined ? (dto.merchantRole as MerchantRole | null) : currentMerchantRole
+        const derivedFromMerchant: PartyRoleType[] = merchantRole
+            ? [merchantRole, ...MERCHANT_DERIVED_ROLES[merchantRole]]
+            : []
         const assignedRoles: PartyRoleType[] = [
-            ...(nextIsCustomer ? [PartyRoleType.CUSTOMER] : []),
-            ...(nextIsSupplier ? [PartyRoleType.SUPPLIER] : []),
+            ...derivedFromMerchant,
+            ...(nextIsCustomer && !merchantRole ? [PartyRoleType.CUSTOMER] : []),
+            ...(nextIsSupplier && !merchantRole ? [PartyRoleType.SUPPLIER] : []),
             ...(nextIsInternal ? [PartyRoleType.INTERNAL_COMPANY] : []),
             ...nextPartnerRoles.map((role) => this.toPartyRole(role)),
         ]

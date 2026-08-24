@@ -7,9 +7,10 @@ import { PurchaseOrdersWorker } from './purchase-orders.worker.listener'
 import { BackgroundJobsModule } from 'src/modules/background-jobs/background-jobs.module'
 import { JobArtifactsModule } from 'src/modules/job-artifacts/job-artifacts.module'
 import { ContractCheckService } from './contract-check.service'
+import { PartyMerchantService } from 'src/modules/customers/party-merchant.service'
 
 @Module({
     imports: [PrismaModule, BackgroundJobsModule, JobArtifactsModule, QueueModule],
-    providers: [PurchaseOrdersService, PurchaseOrderPrintProcessor, PurchaseOrdersWorker, ContractCheckService],
+    providers: [PurchaseOrdersService, PurchaseOrderPrintProcessor, PurchaseOrdersWorker, ContractCheckService, PartyMerchantService],
 })
 export class PurchaseOrdersWorkerModule {}

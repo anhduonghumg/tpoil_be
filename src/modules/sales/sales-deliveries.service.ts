@@ -51,7 +51,8 @@ const deliveryDetailInclude = Prisma.validator<Prisma.SalesDeliveryInclude>()({
                 select: {
                     id: true,
                     lineNo: true,
-                    productId: true,
+                     productId: true,
+                     supplySource: true,
                     orderedActualQty: true,
                     note: true,
                     product: { select: { id: true, code: true, name: true, uom: true } },
@@ -269,6 +270,13 @@ export class SalesDeliveriesService {
             status: query.status ? (query.status as SalesDeliveryStatus) : undefined,
             warehouseId: query.warehouseId ?? (allowed === null ? undefined : { in: allowed }),
             salesOrderId: query.salesOrderId ?? undefined,
+            plannedAt:
+                query.dateFrom || query.dateTo
+                    ? {
+                          gte: query.dateFrom ? new Date(query.dateFrom) : undefined,
+                          lte: query.dateTo ? new Date(query.dateTo) : undefined,
+                      }
+                    : undefined,
         }
         const [rows, total] = await this.prisma.$transaction([
             this.prisma.salesDelivery.findMany({
@@ -449,8 +457,10 @@ export class SalesDeliveriesService {
                     const result = await this.issuePosting.suggestAllocations(tx, {
                         warehouseId: delivery.warehouseId,
                         productId: line.orderLine.productId,
-                        ownerPartyId: line.ownerPartyId,
-                        actualQty: plannedQty,
+                         ownerPartyId: line.ownerPartyId,
+                         salesOrderLineId: line.orderLine.id,
+                         supplySource: line.orderLine.supplySource,
+                         actualQty: plannedQty,
                     })
                     return {
                         salesDeliveryLineId: line.id,
@@ -475,6 +485,20 @@ export class SalesDeliveriesService {
         if (Number.isNaN(effectiveAt.getTime())) throw new BadRequestException('ISSUED_AT_INVALID')
 
         await this.prisma.$transaction(async (tx) => {
+            // Chỉ một người được bước vào luồng xác nhận của cùng một lệnh. Dùng try-lock để
+            // người bấm sau nhận 409 ngay, không phải chờ transaction của người đầu tiên.
+            const lockKey = `sales-delivery-confirm:${id}`
+            const [deliveryLock] = await tx.$queryRaw<Array<{ acquired: boolean }>>`
+                SELECT pg_try_advisory_xact_lock(hashtext(${lockKey})) AS acquired
+            `
+            if (!deliveryLock?.acquired) {
+                throw new ConflictException({
+                    code: 'SALES_DELIVERY_CONFIRM_IN_PROGRESS',
+                    message: 'Lệnh xuất đang được người khác xác nhận. Vui lòng tải lại trạng thái lệnh.',
+                })
+            }
+
+            // Phải đọc trạng thái sau khi đã giữ khóa; dữ liệu đọc trước khóa có thể đã cũ.
             const delivery = await tx.salesDelivery.findUnique({
                 where: { id },
                 include: {
@@ -494,6 +518,12 @@ export class SalesDeliveriesService {
             })
             if (!delivery) throw new NotFoundException('SALES_DELIVERY_NOT_FOUND')
             this.scope.assertCanAct(actor, delivery.warehouseId)
+            if (delivery.status === SalesDeliveryStatus.POSTED) {
+                throw new ConflictException({
+                    code: 'SALES_DELIVERY_ALREADY_CONFIRMED',
+                    message: 'Lệnh xuất đã được người khác xác nhận trước đó.',
+                })
+            }
             if (delivery.status !== SalesDeliveryStatus.READY) {
                 throw new BadRequestException({
                     code: 'SALES_DELIVERY_NOT_READY',
@@ -516,6 +546,7 @@ export class SalesDeliveriesService {
                         })
                     }
                 }
+                await this.reservations.reallocateSingleDelivery(tx, id, dto.lines, actor)
             }
 
             await this.issuePosting.post(tx, {
@@ -538,8 +569,12 @@ export class SalesDeliveriesService {
             })
 
             const nextVersion = delivery.version + 1
-            await tx.salesDelivery.update({
-                where: { id },
+            const posted = await tx.salesDelivery.updateMany({
+                where: {
+                    id,
+                    status: SalesDeliveryStatus.READY,
+                    version: delivery.version,
+                },
                 data: {
                     status: SalesDeliveryStatus.POSTED,
                     issueDocNo: dto.issueDocNo?.trim() || null,
@@ -551,6 +586,12 @@ export class SalesDeliveriesService {
                     version: { increment: 1 },
                 },
             })
+            if (posted.count !== 1) {
+                throw new ConflictException({
+                    code: 'SALES_DELIVERY_CONFIRM_CONFLICT',
+                    message: 'Trạng thái lệnh xuất vừa thay đổi bởi người khác. Vui lòng tải lại.',
+                })
+            }
             await this.events.record(tx, {
                 entityType: 'SALES_DELIVERY',
                 entityId: id,

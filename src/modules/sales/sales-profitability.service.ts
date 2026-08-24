@@ -1,6 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
-import { CostLayerEntryType, Prisma, SalesDeliveryStatus } from '@prisma/client'
+import {
+    CostLayerEntryType,
+    Prisma,
+    SalesDeliveryStatus,
+    SalesLotInvoiceMode,
+    SalesOrderKind,
+} from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
 
 export type CostStatus = 'FINAL' | 'PROVISIONAL' | 'NO_COST_BASIS'
 
@@ -24,7 +31,10 @@ type SaleSlice = {
  */
 @Injectable()
 export class SalesProfitabilityService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly costLayers: PurchaseTermCostLayerService,
+    ) {}
 
     private decimal(value: Prisma.Decimal | number | string | null | undefined) {
         return new Prisma.Decimal(value ?? 0)
@@ -69,14 +79,10 @@ export class SalesProfitabilityService {
         )
         if (invoiced.greaterThan(0)) return invoiced
 
-        // Not invoiced yet: value it at the order price, with the discount pro-rated to what
-        // actually shipped.
+        // Not invoiced yet: value it at the order price. discountAmount là chiết khấu trên
+        // mỗi đơn vị, nên nhân thẳng với lượng đã xuất.
         const qty = this.decimal(line.actualQty)
-        const gross = qty.mul(line.orderLine.unitPrice)
-        const discount = this.decimal(line.orderLine.discountAmount)
-            .mul(qty)
-            .div(this.decimal(line.orderLine.orderedActualQty).isZero() ? 1 : line.orderLine.orderedActualQty)
-        return gross.minus(discount)
+        return qty.mul(this.decimal(line.orderLine.unitPrice).minus(this.decimal(line.orderLine.discountAmount)))
     }
 
     /**
@@ -413,6 +419,23 @@ export class SalesProfitabilityService {
             }
         }
 
+        // Đơn lô đã xuất hóa đơn cả lô: doanh thu ghi nhận hết ngay, kể cả phần khách
+        // chưa rút. Phần chưa rút chưa gắn được lô hàng nào nên giá vốn phải ước tính,
+        // và sẽ được thay bằng giá vốn thật khi kho xuất.
+        let hasEstimatedCost = false
+        if (
+            order.kind === SalesOrderKind.LOT &&
+            order.lotInvoiceMode === SalesLotInvoiceMode.ON_CONFIRMATION
+        ) {
+            const undrawnRows = await this.undrawnLotRows(order.id)
+            for (const row of undrawnRows) {
+                hasEstimatedCost = true
+                totalRevenue = totalRevenue.plus(row.revenueDecimal)
+                totalCost = totalCost.plus(row.costDecimal)
+                rows.push(row.display)
+            }
+        }
+
         const totalProfit = totalRevenue.minus(totalCost)
         return {
             salesOrder: {
@@ -432,10 +455,86 @@ export class SalesProfitabilityService {
             },
             costStatus: (rows.length === 0
                 ? 'NO_COST_BASIS'
-                : hasProvisional
+                : hasProvisional || hasEstimatedCost
                   ? 'PROVISIONAL'
                   : 'FINAL') as CostStatus,
+            /** Có phần giá vốn còn là ước tính vì khách chưa rút hết lô. */
+            hasEstimatedCost,
             sources: rows,
         }
+    }
+
+    /**
+     * Phần lô khách chưa rút: doanh thu đã nằm trên hóa đơn nên tính đủ, còn giá vốn
+     * ước theo FIFO của tồn hiện có tại chính kho xuất của dòng đơn.
+     */
+    private async undrawnLotRows(salesOrderId: string) {
+        const orderLines = await this.prisma.salesOrderLine.findMany({
+            where: { salesOrderId },
+            include: {
+                product: { select: { id: true, code: true, name: true } },
+                issueWarehouse: {
+                    select: { id: true, name: true, legalEntity: { select: { partyId: true } } },
+                },
+                deliveryLines: {
+                    where: { delivery: { status: SalesDeliveryStatus.POSTED } },
+                    select: { actualQty: true },
+                },
+            },
+            orderBy: { lineNo: 'asc' },
+        })
+
+        const result: Array<{
+            revenueDecimal: Prisma.Decimal
+            costDecimal: Prisma.Decimal
+            display: Record<string, unknown>
+        }> = []
+
+        for (const line of orderLines) {
+            const drawn = line.deliveryLines.reduce(
+                (sum, row) => sum.plus(this.decimal(row.actualQty)),
+                new Prisma.Decimal(0),
+            )
+            const undrawn = this.decimal(line.orderedActualQty).minus(drawn)
+            if (!undrawn.greaterThan(0)) continue
+
+            const revenue = undrawn.mul(
+                this.decimal(line.unitPrice).minus(this.decimal(line.discountAmount)),
+            )
+            let cost = new Prisma.Decimal(0)
+            if (line.issueWarehouse) {
+                const estimate = await this.costLayers.estimateFifoCostInTx(this.prisma, {
+                    warehouseId: line.issueWarehouse.id,
+                    productId: line.productId,
+                    ownerPartyId: line.issueWarehouse.legalEntity.partyId,
+                    qty: undrawn,
+                })
+                if (estimate) cost = estimate.cost
+            }
+
+            result.push({
+                revenueDecimal: revenue,
+                costDecimal: cost,
+                display: {
+                    deliveryNo: null,
+                    lineNo: line.lineNo,
+                    product: line.product,
+                    inventoryLotId: null,
+                    lotNo: null,
+                    purchaseOrderId: null,
+                    purchaseOrderNo: null,
+                    purchaseBizType: null,
+                    purchaseOrderType: null,
+                    supplier: null,
+                    qty: undrawn.toString(),
+                    revenue: revenue.toString(),
+                    cost: cost.toString(),
+                    profit: revenue.minus(cost).toString(),
+                    /** Dòng chưa rút: giá vốn là ước tính, chưa gắn lô mua nào. */
+                    isEstimated: true,
+                },
+            })
+        }
+        return result
     }
 }

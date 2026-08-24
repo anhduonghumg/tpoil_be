@@ -14,6 +14,8 @@ export type ParsedLine = {
     quantity: number | null
     quantityText: string
     warehouseText: string | null
+    /** A note on a goods line (for example "rút tồn") overrides the order header. */
+    orderKind: ParsedOrderKind | null
 }
 
 export type ParsedOrder = {
@@ -85,7 +87,7 @@ export function parseLocalizedNumber(raw: string): number | null {
  */
 export function normalizePlate(raw: string): string | null {
     if (!raw) return null
-    let text = raw.replace(/\s*-\s*(?:LX|LXE|LAI XE|TAI XE)\s*:?.*$/i, '')
+    let text = raw.replace(/\s*-\s*(?:LXE|LX|LAI XE|TAI XE)\s*:?.*$/i, '')
     text = stripDiacritics(text).toUpperCase().replace(/[^A-Z0-9]/g, '')
     if (text.length < 6) return null
     const match = text.match(/^(\d{2}[A-Z]{1,2})(\d{3,6})$/)
@@ -152,6 +154,9 @@ function fieldForKey(key: string): keyof ParsedOrder | null {
  *   "12.292 E10"
  */
 function parseDetail(line: string): ParsedLine | null {
+    const orderKind = detectOrderKind(line)
+    // Notes such as "(rút tồn)" describe the transaction kind, not the depot name.
+    const cleanWarehouse = (value: string) => value.replace(/\s*\([^)]*\)\s*$/, '').trim()
     const parts = line
         .split(/\s*[-–—|]\s*|\s*:\s*/)
         .map((part) => part.trim())
@@ -175,7 +180,8 @@ function parseDetail(line: string): ParsedLine | null {
                 productText: rest[0],
                 quantity,
                 quantityText,
-                warehouseText: rest.length > 1 ? rest.slice(1).join(' ') : null,
+                warehouseText: rest.length > 1 ? cleanWarehouse(rest.slice(1).join(' ')) || null : null,
+                orderKind,
             }
         }
         return null
@@ -186,14 +192,14 @@ function parseDetail(line: string): ParsedLine | null {
     if (inline) {
         const quantity = parseLocalizedNumber(inline[1])
         if (quantity != null) {
-            return { productText: inline[2].trim(), quantity, quantityText: inline[1], warehouseText: null }
+            return { productText: inline[2].trim(), quantity, quantityText: inline[1], warehouseText: null, orderKind }
         }
     }
     const trailing = line.match(/^(.+?)\s+([\d.,]+)\s*(?:L|LIT|LÍT)?$/i)
     if (trailing) {
         const quantity = parseLocalizedNumber(trailing[2])
         if (quantity != null) {
-            return { productText: trailing[1].trim(), quantity, quantityText: trailing[2], warehouseText: null }
+            return { productText: trailing[1].trim(), quantity, quantityText: trailing[2], warehouseText: null, orderKind }
         }
     }
     return null
@@ -204,6 +210,14 @@ function warehouseOnly(line: string): string | null {
     const key = labelKey(line)
     if (/^KHO\b/.test(key) && !/\d{3,}/.test(key)) return line.replace(/^\s*[Kk]ho\s*:?\s*/, '').trim()
     return null
+}
+
+/** Dates are often written as prose: "Thứ 3, ngày 18/8/2026". */
+function findDateText(line: string): string | null {
+    const date = '(\\d{1,2})\\s*[/.-]\\s*(\\d{1,2})(?:\\s*[/.-]\\s*(\\d{2}|\\d{4}))?'
+    const trimmed = line.trim()
+    const match = new RegExp(`^(?:${date})$`).exec(trimmed) ?? new RegExp(`\\bngày\\s*${date}\\b`, 'i').exec(line)
+    return match ? `${match[1]}/${match[2]}${match[3] ? `/${match[3]}` : ''}` : null
 }
 
 export function parseQuickEntry(input: string): ParsedOrder {
@@ -241,7 +255,9 @@ export function parseQuickEntry(input: string): ParsedOrder {
             if (field) {
                 // "BKS: 34C-118.23 - Lx: Cường" carries the driver too.
                 if (field === 'plateText') {
-                    const driverInside = labelled.value.match(/-\s*(?:Lx|Lxe|Lái xe|Lai xe)\s*:?\s*(.+)$/i)
+                    // Keep longer abbreviations first: `Lx` would otherwise consume the
+                    // start of `Lxe` and leave `e: Tên lái xe` in the captured name.
+                    const driverInside = labelled.value.match(/-\s*(?:Lxe|Lx|Lái xe|Lai xe)\s*:?\s*(.+)$/i)
                     if (driverInside && !result.driverText) result.driverText = driverInside[1].trim()
                     result.plateText = normalizePlate(labelled.value)
                 } else if (field === 'orderKindText') {
@@ -250,6 +266,14 @@ export function parseQuickEntry(input: string): ParsedOrder {
                 } else {
                     ;(result as Record<string, unknown>)[field] = labelled.value
                 }
+                continue
+            }
+        }
+
+        if (!result.dateText) {
+            const date = findDateText(line)
+            if (date) {
+                result.dateText = date
                 continue
             }
         }

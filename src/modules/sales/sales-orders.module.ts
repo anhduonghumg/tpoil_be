@@ -20,6 +20,13 @@ import { SalesLotService } from './sales-lot.service'
 import { SalesWithdrawalsService } from './sales-withdrawals.service'
 import { ReceivablesController } from './receivables.controller'
 import { ReceivablesService } from './receivables.service'
+import { SalesCreditController } from './sales-credit.controller'
+import { SalesCreditService } from './sales-credit.service'
+import { SalesOrderPrintService } from './sales-order-print.service'
+import { SalesDiscountController } from './sales-discount.controller'
+import { SalesDiscountService } from './sales-discount.service'
+import { MailService } from 'src/mail/mail.service'
+import { PartyMerchantService } from 'src/modules/customers/party-merchant.service'
 import { SalesInvoicesController } from './sales-invoices.controller'
 import { SalesInvoicesService } from './sales-invoices.service'
 import { SalesProfitabilityController } from './sales-profitability.controller'
@@ -51,6 +58,8 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
         SalesAliasController,
         SalesQuickEntryController,
         ReceivablesController,
+        SalesCreditController,
+        SalesDiscountController,
     ],
     providers: [
         PrismaService,
@@ -58,6 +67,7 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
         PurchaseTermCostLayerService,
         SalesIssuePostingService,
         SalesOrdersService,
+        SalesOrderPrintService,
         SalesOrderChecksService,
         SalesOrderStatusService,
         SalesOrderWorkflowService,
@@ -68,6 +78,10 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
         SalesLotService,
         SalesWithdrawalsService,
         ReceivablesService,
+        SalesCreditService,
+        SalesDiscountService,
+        PartyMerchantService,
+        MailService,
         MisaClientService,
         SalesInvoicesService,
         SalesProfitabilityService,

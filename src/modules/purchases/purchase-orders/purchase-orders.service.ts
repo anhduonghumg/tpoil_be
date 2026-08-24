@@ -6,6 +6,7 @@ import {
     MasterStatus,
     Prisma,
     PurchaseOrderStatus,
+    SalesOrderSupplySource,
     SupplierInvoiceStatus,
     WarehousePartyRole,
 } from '@prisma/client'
@@ -28,6 +29,7 @@ import { Browser } from 'puppeteer-core'
 import { PaymentRequestPrintData, renderPaymentRequestPrintHtml } from './templates/payment-request-print.template'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
 import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import { PartyMerchantService } from 'src/modules/customers/party-merchant.service'
 
 @Injectable()
 export class PurchaseOrdersService {
@@ -37,6 +39,7 @@ export class PurchaseOrdersService {
         private readonly backgroundJobsService: BackgroundJobsService,
         private readonly jobArtifactsService: JobArtifactsService,
         private readonly notificationOutbox: NotificationOutboxService,
+        private readonly merchants: PartyMerchantService,
     ) {}
 
     private async renderMergedPdfFromHtmls(htmls: string[]): Promise<Buffer> {
@@ -492,6 +495,7 @@ export class PurchaseOrdersService {
         supplierLocationId?: string
         orderType: any
         paymentMode: any
+        releaseCode: SalesOrderSupplySource
         paymentTermType: PaymentTermType
         paymentTermDays?: number
         allowPartialPayment?: boolean
@@ -517,6 +521,13 @@ export class PurchaseOrdersService {
     }, actorId?: string | null) {
         const orderDate = this.toDateOrThrow(dto.orderDate, 'ORDER_DATE_INVALID')
         const expectedDate = dto.expectedDate ? this.toDateOrThrow(dto.expectedDate, 'EXPECTED_DATE_INVALID') : null
+
+        if (!Object.values(SalesOrderSupplySource).includes(dto.releaseCode)) {
+            throw new BadRequestException({
+                code: 'PURCHASE_RELEASE_CODE_REQUIRED',
+                message: 'Đơn mua thương mại phải chọn mã rút TP hoặc NCC.',
+            })
+        }
 
         const paymentTermType = dto.paymentTermType ?? PaymentTermType.SAME_DAY
         const allowPartialPayment = dto.allowPartialPayment ?? true
@@ -646,6 +657,7 @@ export class PurchaseOrdersService {
                 allowPartialPayment,
                 orderType: dto.orderType,
                 paymentMode: dto.paymentMode,
+                releaseCode: dto.releaseCode,
                 orderDate,
                 expectedDate,
                 note: dto.note?.trim() || null,
@@ -724,6 +736,12 @@ export class PurchaseOrdersService {
 
         const orderDate = this.toDateOrThrow(dto.orderDate, 'ORDER_DATE_INVALID')
         const expectedDate = dto.expectedDate ? this.toDateOrThrow(dto.expectedDate, 'EXPECTED_DATE_INVALID') : null
+        if (!Object.values(SalesOrderSupplySource).includes(dto.releaseCode)) {
+            throw new BadRequestException({
+                code: 'PURCHASE_RELEASE_CODE_REQUIRED',
+                message: 'Đơn mua thương mại phải chọn mã rút TP hoặc NCC.',
+            })
+        }
         const lines = (dto.lines ?? []).map((line: any) => ({
             productId: line.productId,
             orderedQty: Number(line.orderedQty) || 0,
@@ -751,6 +769,7 @@ export class PurchaseOrdersService {
                 orderNo,
                 supplierCustomerId: dto.supplierCustomerId, legalEntityId, contractId: contract.id, contractNo: contract.code,
                 paymentMode: dto.paymentMode, paymentTermType: dto.paymentTermType ?? PaymentTermType.SAME_DAY,
+                releaseCode: dto.releaseCode,
                 paymentTermDays: dto.paymentMode === 'POSTPAID' ? Number(dto.paymentTermDays) || null : null,
                 orderDate, expectedDate, note: dto.note?.trim() || null,
                 paymentPlans: { create: plans },
@@ -834,6 +853,16 @@ export class PurchaseOrdersService {
         })
         if (!po) throw new NotFoundException('PO_NOT_FOUND')
         if (po.status !== PurchaseOrderStatus.DRAFT) throw new BadRequestException('PO_NOT_DRAFT')
+        if (po.bizType === 'COMMERCIAL' && !po.releaseCode) {
+            throw new BadRequestException({
+                code: 'PURCHASE_RELEASE_CODE_REQUIRED',
+                message: 'Đơn mua thương mại phải chọn mã rút TP hoặc NCC trước khi duyệt.',
+            })
+        }
+
+        // Chỉ mua của TNPP (mua bán hai chiều) và TNDM (chỉ mua của họ). Xét theo phân
+        // loại tại ngày đơn vì đối tác có thể đổi loại theo thời gian.
+        await this.merchants.assertCanTrade(po.supplierCustomerId, 'BUY', po.orderDate)
 
         const contract = await this.contractCheck.requireActivePurchaseContract({
             supplierCustomerId: po.supplierCustomerId,

@@ -336,10 +336,34 @@ enum SalesOrderKind {
   LOT
 }
 
+/// Nguồn hàng cho một dòng đơn bán: thương phẩm nội bộ hoặc nhà cung cấp.
+enum SalesOrderSupplySource {
+  TP
+  NCC
+}
+
+/// Đơn lô xuất hóa đơn thế nào (theo hai mẫu đơn đặt hàng lô của kinh doanh):
+/// ON_CONFIRMATION = một hóa đơn cho cả lô, ngay sau khi xác nhận đơn hàng.
+/// ON_WITHDRAWAL   = xuất hóa đơn nhiều lần, theo tiến độ khách rút hàng.
+enum SalesLotInvoiceMode {
+  ON_CONFIRMATION
+  ON_WITHDRAWAL
+}
+
+/// DRAFT đang soạn, PUBLISHED đã phát hành và có hiệu lực từ effectiveFrom.
+/// Không có trạng thái "hết hiệu lực": bản sau ra đời là bản trước tự hết vai trò.
+enum SalesDiscountBoardStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
 enum SalesApprovalType {
   PRICE
   CREDIT
   EXCEPTION
+  /// Duyệt thường lệ: đơn không vi phạm gì nhưng quản lý vẫn phải ký.
+  STANDARD
 }
 
 enum SalesApprovalStatus {
@@ -713,6 +737,13 @@ enum PartyKind {
 }
 
 enum PartyRoleType {
+  /// Ba loại thương nhân xăng dầu — quyết định CHIỀU được phép giao dịch.
+  /// TNPP mua và bán, TNDM chỉ mua của họ, TNDL chỉ bán cho họ.
+  /// CUSTOMER/SUPPLIER dưới đây được suy ra từ ba loại này, không nhập tay.
+  TNPP
+  TNDM
+  TNDL
+
   CUSTOMER
   SUPPLIER
   INTERNAL_COMPANY
@@ -1228,10 +1259,11 @@ model Employee {
   memberships  EmployeeDepartment[]
   managerRoles DepartmentManager[]
 
-  customersSalesOwner      Party[] @relation("customer_sales_owner_emp")
-  customersAccountingOwner Party[] @relation("customer_accounting_owner_emp")
-  customersLegalOwner      Party[] @relation("customer_legal_owner_emp")
-  customersDocumentOwner   Party[] @relation("customer_document_owner_emp")
+  customersSalesOwner      Party[]        @relation("customer_sales_owner_emp")
+  customersAccountingOwner Party[]        @relation("customer_accounting_owner_emp")
+  customersLegalOwner      Party[]        @relation("customer_legal_owner_emp")
+  customersDocumentOwner   Party[]        @relation("customer_document_owner_emp")
+  salesInvoicesAccountant  SalesInvoice[] @relation("SalesInvoiceAccountant")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1694,6 +1726,7 @@ model Product {
   salesWithdrawalLines          SalesLotWithdrawalRequestLine[]
   salesInvoiceLines             SalesInvoiceLine[]
   salesAliases                  SalesEntityAlias[]              @relation("SalesAliasProduct")
+  salesDiscountLines            SalesDiscountBoardLine[]
   commercialLotPositions        CommercialLotPosition[]
 
   @@index([name])
@@ -1732,11 +1765,13 @@ model PurchaseOrder {
   priceRegionId String?      @db.Uuid
   priceRegion   PriceRegion? @relation(fields: [priceRegionId], references: [id], onDelete: SetNull)
 
-  bizType     PurchaseBizType     @default(COMMERCIAL)
+  bizType     PurchaseBizType         @default(COMMERCIAL)
   orderType   PurchaseOrderType
-  status      PurchaseOrderStatus @default(DRAFT)
+  status      PurchaseOrderStatus     @default(DRAFT)
   paymentMode PaymentMode
-  currency    String              @default("VND") @db.Char(3)
+  /// Mã phát lệnh rút đã chốt cho toàn bộ đơn mua thương mại.
+  releaseCode SalesOrderSupplySource?
+  currency    String                  @default("VND") @db.Char(3)
 
   paymentTermType     PaymentTermType @default(SAME_DAY)
   paymentTermDays     Int?
@@ -1790,6 +1825,7 @@ model PurchaseOrder {
   @@index([bizType])
   @@index([contractId])
   @@index([salesOrderId])
+  @@index([releaseCode])
 }
 
 model TermPurchaseProfile {
@@ -1854,6 +1890,7 @@ model CommercialLotPosition {
   withdrawnQty        Decimal                 @default(0) @db.Decimal(24, 6)
   accountingValue     Decimal                 @default(0) @db.Decimal(24, 4)
   stockState          CommercialLotStockState @default(EXPORTABLE)
+  releaseCode         SalesOrderSupplySource?
   version             Int                     @default(1)
   createdAt           DateTime                @default(now()) @db.Timestamptz(6)
   updatedAt           DateTime                @updatedAt @db.Timestamptz(6)
@@ -1868,6 +1905,7 @@ model CommercialLotPosition {
   @@index([supplierCustomerId, productId])
   @@index([plannedWarehouseId, productId])
   @@index([stockState])
+  @@index([releaseCode])
 }
 
 model CommercialLotInvoiceAllocation {
@@ -2305,6 +2343,13 @@ model SalesOrder {
   paymentTermType PaymentTermType @default(SAME_DAY)
   paymentTermDays Int?
 
+  /// Chỉ đơn LOT: xuất một hóa đơn cho cả lô ngay sau khi xác nhận, hay xuất nhiều
+  /// lần theo tiến độ khách rút hàng. Quyết định cả mẫu in lẫn cách lập hóa đơn.
+  lotInvoiceMode SalesLotInvoiceMode?
+
+  /// Các mốc phải trả của đơn trả chậm: 50% sau N ngày, 100% sau M ngày, hoặc số tiền tự đặt.
+  paymentPlans SalesOrderPaymentPlan[]
+
   // Approval workflow (SINGLE/LOT). approvalCycle increments on each resubmission;
   // approvedById stays null when every internal check passed and no manual approval was needed.
   approvalCycle  Int       @default(0)
@@ -2341,17 +2386,48 @@ model SalesOrder {
   @@index([contractId])
 }
 
+/// Lịch thanh toán của đơn bán trả chậm. Ghi theo số ngày kể từ ngày đơn, vì lúc đặt
+/// điều khoản thường chưa chốt được ngày cụ thể. percent và amount loại trừ nhau:
+/// percent cho mốc theo tỷ lệ (50%, 100%), amount cho mốc khách chốt bằng số tiền.
+model SalesOrderPaymentPlan {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  salesOrderId String     @db.Uuid
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  dueDays Int
+  percent Decimal? @db.Decimal(6, 3)
+  amount  Decimal? @db.Decimal(18, 2)
+  note    String?
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([salesOrderId, sortOrder])
+}
+
 model SalesOrderLine {
-  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  salesOrderId     String   @db.Uuid
-  lineNo           Int
-  productId        String   @db.Uuid
-  orderedActualQty Decimal  @db.Decimal(24, 6)
-  orderedV15Qty    Decimal? @db.Decimal(24, 6)
-  unitPrice        Decimal  @db.Decimal(24, 8)
-  discountAmount   Decimal  @default(0) @db.Decimal(24, 8)
-  taxRate          Decimal? @db.Decimal(9, 6)
-  note             String?
+  id                       String                 @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesOrderId             String                 @db.Uuid
+  lineNo                   Int
+  productId                String                 @db.Uuid
+  orderedActualQty         Decimal                @db.Decimal(24, 6)
+  orderedV15Qty            Decimal?               @db.Decimal(24, 6)
+  unitPrice                Decimal                @db.Decimal(24, 8)
+  /// CK gốc theo đơn vị, lấy từ bảng chiết khấu công bố.
+  discountBaseAmount       Decimal                @default(0) @db.Decimal(24, 8)
+  /// CK điều chỉnh theo đơn vị; có thể âm để giảm CK gốc.
+  discountAdjustmentAmount Decimal                @default(0) @db.Decimal(24, 8)
+  /// CK cuối theo đơn vị, luôn bằng CK gốc + CK điều chỉnh.
+  discountAmount           Decimal                @default(0) @db.Decimal(24, 8)
+  /// Nguồn hàng do Sale khai báo: thương phẩm hoặc nhà cung cấp.
+  supplySource             SalesOrderSupplySource @default(TP)
+  /// Mã NCC do quản lý ưu tiên khi duyệt. Null = hệ thống tự chọn theo FIFO.
+  preferredSupplierPartyId String?                @db.Uuid
+  taxRate                  Decimal?               @db.Decimal(9, 6)
+  note                     String?
 
   // Warehouse the customer wants the goods delivered to; purchasing reuses it on the purchase order.
   // Keeps its DAY_TRADE meaning only — SINGLE/LOT use issueWarehouseId instead (spec v1.2 D9).
@@ -2373,6 +2449,7 @@ model SalesOrderLine {
   product             Product                         @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   receivingWarehouse  Warehouse?                      @relation("SalesOrderLineWarehouse", fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   issueWarehouse      Warehouse?                      @relation("SalesOrderLineIssueWarehouse", fields: [issueWarehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  preferredSupplier   Party?                          @relation("SalesOrderLinePreferredSupplier", fields: [preferredSupplierPartyId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   deliveryLines       SalesDeliveryLine[]
   reconciliationLines SalesReconciliationLine[]
   lotPosition         SalesLotPosition?
@@ -2386,6 +2463,7 @@ model SalesOrderLine {
   @@index([productId])
   @@index([receivingWarehouseId])
   @@index([issueWarehouseId])
+  @@index([preferredSupplierPartyId])
 }
 
 /// Parallel per-department approval request for a sales order (spec v1.2 §3.5).
@@ -2595,6 +2673,73 @@ model SalesReconciliationLine {
 /// How the outside world writes the name of a customer, warehouse or product.
 ///
 /// Real data drove this table: "Kho Nghi Sơn" is written as NGHISON, NSon, ns, apns — but
+/// Thông báo chiết khấu theo kho × mặt hàng, có mốc hiệu lực tới từng giờ.
+///
+/// Mỗi bản là ẢNH CHỤP TRỌN VẸN của toàn bộ bảng chiết khấu tại thời điểm đó, không phải
+/// bản ghi phần thay đổi. Lý do: bản in gửi khách liệt kê mọi kho, và tra "chiết khấu lúc
+/// 15h ngày 7/8 là bao nhiêu" chỉ cần tìm đúng một bản — không phải ghép nhiều lần sửa.
+/// Tạo bản mới thì hệ thống chép bản đang chạy để vận hành chỉ sửa ô nào đổi.
+model SalesDiscountBoard {
+  id String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+
+  status        SalesDiscountBoardStatus @default(DRAFT)
+  /// Chiết khấu áp dụng cho đơn có thời điểm >= mốc này.
+  effectiveFrom DateTime                 @db.Timestamptz(6)
+
+  /// Tên đơn vị đứng ra thông báo, in ở đầu bản copy gửi khách.
+  announcerName String?
+  note          String?
+
+  publishedAt   DateTime? @db.Timestamptz(6)
+  publishedById String?   @db.Uuid
+  createdById   String?   @db.Uuid
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  lines      SalesDiscountBoardLine[]
+  recipients SalesDiscountBoardRecipient[]
+
+  @@index([status, effectiveFrom])
+}
+
+model SalesDiscountBoardLine {
+  id          String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  boardId     String @db.Uuid
+  warehouseId String @db.Uuid
+  productId   String @db.Uuid
+
+  /// Đồng trên mỗi lít — cùng đơn vị với SalesOrderLine.discountAmount.
+  discountPerUnit Decimal @db.Decimal(18, 4)
+  note            String?
+
+  board     SalesDiscountBoard @relation(fields: [boardId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  warehouse Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  product   Product            @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([boardId, warehouseId, productId])
+  @@index([warehouseId, productId])
+}
+
+/// Đã gửi thông báo cho ai, lúc nào, thành công hay không — gửi email ra ngoài thì phải
+/// có vết, không thể chỉ "chắc là đã gửi".
+model SalesDiscountBoardRecipient {
+  id              String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  boardId         String @db.Uuid
+  customerPartyId String @db.Uuid
+
+  email        String
+  sentAt       DateTime? @db.Timestamptz(6)
+  errorMessage String?
+
+  board    SalesDiscountBoard @relation(fields: [boardId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  customer Party              @relation("SalesDiscountRecipient", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([boardId, customerPartyId])
+  @@index([boardId])
+}
+
 /// also as "Anh Phát", "AP", "Quảng Hưng", "PV Oil Nghi Sơn", the operators of that depot.
 /// No fuzzy algorithm can derive those, so an explicit mapping is the primary lookup and
 /// fuzzy matching only ever proposes candidates.
@@ -2674,8 +2819,10 @@ model SalesInvoice {
   originalInvoiceId String?                  @db.Uuid
   status            SalesInvoiceStatus       @default(DRAFT)
 
-  legalEntityId   String @db.Uuid
-  customerPartyId String @db.Uuid
+  legalEntityId        String  @db.Uuid
+  customerPartyId      String  @db.Uuid
+  /// Snapshot from Party.accountingOwnerEmpId when the draft is created.
+  accountantEmployeeId String? @db.Uuid
 
   // Buyer details frozen at issue time — later master-data edits must not rewrite history.
   buyerName    String
@@ -2708,17 +2855,19 @@ model SalesInvoice {
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
 
-  salesOrder        SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  withdrawalRequest SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  legalEntity       LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  customer          Party                      @relation("SalesInvoiceCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  originalInvoice   SalesInvoice?              @relation("SalesInvoiceCorrection", fields: [originalInvoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  corrections       SalesInvoice[]             @relation("SalesInvoiceCorrection")
-  lines             SalesInvoiceLine[]
-  issuances         SalesInvoiceIssuance[]
-  receivableItem    ReceivableOpenItem?
+  salesOrder         SalesOrder?                @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  withdrawalRequest  SalesLotWithdrawalRequest? @relation(fields: [withdrawalRequestId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity        LegalEntity                @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer           Party                      @relation("SalesInvoiceCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  accountantEmployee Employee?                  @relation("SalesInvoiceAccountant", fields: [accountantEmployeeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  originalInvoice    SalesInvoice?              @relation("SalesInvoiceCorrection", fields: [originalInvoiceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  corrections        SalesInvoice[]             @relation("SalesInvoiceCorrection")
+  lines              SalesInvoiceLine[]
+  issuances          SalesInvoiceIssuance[]
+  receivableItem     ReceivableOpenItem?
 
   @@index([customerPartyId, status, invoiceDate])
+  @@index([accountantEmployeeId, status, invoiceDate])
   @@index([salesOrderId])
   @@index([withdrawalRequestId])
   @@index([originalInvoiceId])
@@ -4306,7 +4455,9 @@ model Party {
   legalEntities                 LegalEntity[]
   warehouseAssignments          WarehousePartyAssignment[]
   receiptLinesOwned             GoodsReceiptLine[]
-  inventoryLotsOriginOwned      InventoryLot[]
+  inventoryLotsOriginOwned      InventoryLot[]                 @relation("InventoryLotOriginOwner")
+  inventoryLotsSupplied         InventoryLot[]                 @relation("InventoryLotSupplier")
+  salesOrderLinesPreferred      SalesOrderLine[]               @relation("SalesOrderLinePreferredSupplier")
   inventoryLedgerEntriesOwned   InventoryLedgerEntry[]
   stockBalancesOwned            StockBalance[]
   reservations                  InventoryReservation[]         @relation("InventoryReservationCustomer")
@@ -4333,6 +4484,7 @@ model Party {
   receivableOpenItems           ReceivableOpenItem[]           @relation("ReceivableCustomer")
   salesInvoicesCustomer         SalesInvoice[]                 @relation("SalesInvoiceCustomer")
   salesAliases                  SalesEntityAlias[]             @relation("SalesAliasParty")
+  salesDiscountNotices          SalesDiscountBoardRecipient[]  @relation("SalesDiscountRecipient")
   salesDeliveryLinesOwned       SalesDeliveryLine[]            @relation("SalesDeliveryLineOwner")
   salesDeliveryLotAllocations   SalesDeliveryLotAllocation[]   @relation("SalesDeliveryLotAllocationOwner")
   commercialLotPositions        CommercialLotPosition[]        @relation("CommercialLotPositionSupplier")
@@ -4447,6 +4599,7 @@ model Warehouse {
   salesOrderIssueLines         SalesOrderLine[]                @relation("SalesOrderLineIssueWarehouse")
   salesWithdrawalLines         SalesLotWithdrawalRequestLine[]
   salesAliases                 SalesEntityAlias[]
+  salesDiscountLines           SalesDiscountBoardLine[]
   commercialLotPositions       CommercialLotPosition[]         @relation("CommercialLotPlannedWarehouse")
   commercialLotWithdrawals     CommercialLotWithdrawal[]       @relation("CommercialLotDestinationWarehouse")
 
@@ -4502,19 +4655,23 @@ model GoodsReceiptLine {
 }
 
 model InventoryLot {
-  id                 String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  lotNo              String   @unique
-  receiptLineId      String?  @unique @db.Uuid
-  productId          String   @db.Uuid
-  originOwnerPartyId String   @db.Uuid
-  receivedActualQty  Decimal  @db.Decimal(24, 6)
-  receivedV15Qty     Decimal? @db.Decimal(24, 6)
-  receivedAt         DateTime @db.Timestamptz(6)
-  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+  id                 String                  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  lotNo              String                  @unique
+  receiptLineId      String?                 @unique @db.Uuid
+  productId          String                  @db.Uuid
+  originOwnerPartyId String                  @db.Uuid
+  /// Nhà cung cấp gốc của lô; dùng để tự chọn mã NCC và phân bổ FIFO cho đơn bán.
+  supplierPartyId    String?                 @db.Uuid
+  receivedActualQty  Decimal                 @db.Decimal(24, 6)
+  receivedV15Qty     Decimal?                @db.Decimal(24, 6)
+  receivedAt         DateTime                @db.Timestamptz(6)
+  releaseCode        SalesOrderSupplySource?
+  createdAt          DateTime                @default(now()) @db.Timestamptz(6)
 
   receiptLine                 GoodsReceiptLine?            @relation(fields: [receiptLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   product                     Product                      @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  originOwner                 Party                        @relation(fields: [originOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  originOwner                 Party                        @relation("InventoryLotOriginOwner", fields: [originOwnerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  supplier                    Party?                       @relation("InventoryLotSupplier", fields: [supplierPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   ledgerEntries               InventoryLedgerEntry[]
   stockBalances               StockBalance[]
   reservationLines            InventoryReservationLine[]
@@ -4529,6 +4686,8 @@ model InventoryLot {
 
   @@index([productId, receivedAt])
   @@index([originOwnerPartyId, productId])
+  @@index([supplierPartyId, productId, releaseCode, receivedAt])
+  @@index([releaseCode])
 }
 
 model InventoryPosting {

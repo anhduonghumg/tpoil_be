@@ -109,6 +109,22 @@ E10: 12.292 L - Kho Hải Linh HP`)
         expect(result.lines[0]).toMatchObject({ productText: 'E10', quantity: 12292 })
     })
 
+    it('keeps mixed withdrawal and new-purchase lines separate by their line note', () => {
+        const result = parseQuickEntry(`Thứ 3, ngày 18/8/2026
+Loại đơn: rút tồn + mua mới
+DO: 12.820 lít - HLHP (rút tồn)
+E10: 5.080 lít - HLHP (mua mới)`)
+
+        expect(result.dateText).toBe('18/8/2026')
+        expect(result.orderKind).toBe('WITHDRAWAL')
+        expect(result.lines[0]).toMatchObject({
+            productText: 'DO', quantity: 12820, warehouseText: 'HLHP', orderKind: 'WITHDRAWAL',
+        })
+        expect(result.lines[1]).toMatchObject({
+            productText: 'E10', quantity: 5080, warehouseText: 'HLHP', orderKind: 'SINGLE',
+        })
+    })
+
     it('reads the terse free-form version of the same withdrawal', () => {
         // No labels, different order, no diacritics on the plate.
         const result = parseQuickEntry(`Rút lô APP
@@ -145,6 +161,12 @@ xe 88c05508`)
         const result = parseQuickEntry(`BKS: 34C-118.23 - Lx: Nguyễn Đình Cường\nE10: 1.000`)
         expect(result.plateText).toBe('34C-11823')
         expect(result.driverText).toBe('Nguyễn Đình Cường')
+    })
+
+    it('reads the full driver name when the plate line uses the Lxe abbreviation', () => {
+        const result = parseQuickEntry(`BKS: 29H-074.68 - Lxe: Tạ Văn Thanh\nDO: 11.220 lít - Nam Vinh`)
+        expect(result.plateText).toBe('29H-07468')
+        expect(result.driverText).toBe('Tạ Văn Thanh')
     })
 
     it('keeps what it could not place instead of discarding it', () => {

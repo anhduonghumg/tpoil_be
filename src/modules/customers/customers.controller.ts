@@ -14,6 +14,8 @@ import { AssignContractsToCustomerDto } from './dto/assign-contracts.dto'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
 import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
+import { PartyMerchantService } from './party-merchant.service'
+import { SetMerchantRoleDto } from './dto/party-merchant.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
@@ -27,6 +29,7 @@ export class CustomersController {
         private readonly customersService: CustomersService,
         private readonly customerOverviewService: CustomerOverviewService,
         private readonly contractsService: ContractsService,
+        private readonly merchants: PartyMerchantService,
     ) {}
     @Get()
     async list(@Req() req: Request, @Query() q: CustomerListQueryDto) {
@@ -92,6 +95,34 @@ export class CustomersController {
     async unassignContracts(@Param('id') id: string, @Body() dto: { contractIds: string[] }, @Req() req: Request) {
         const rs = await this.contractsService.unassignContractsFromCustomer(id, dto.contractIds)
         return success(rs, 'Created', 200, getReqId(req))
+    }
+
+    // ---- Loại thương nhân xăng dầu ----
+
+    /** Lịch sử phân loại: loại nào áp dụng từ khi nào đến khi nào. */
+    @Get(':id/merchant-role')
+    async merchantHistory(@Param('id') id: string, @Req() req: Request) {
+        const rs = await this.merchants.merchantHistory(id)
+        return success(rs, 'success', 200, getReqId(req))
+    }
+
+    /**
+     * Đặt loại thương nhân từ một ngày. CUSTOMER/SUPPLIER được hệ thống tự đóng/mở kỳ
+     * theo loại mới, nên không ai phải khai hai lần nữa.
+     */
+    @Patch(':id/merchant-role')
+    async setMerchantRole(
+        @Param('id') id: string,
+        @Body() dto: SetMerchantRoleDto,
+        @Req() req: Request,
+    ) {
+        await this.merchants.setMerchantRole(
+            id,
+            dto.merchantRole ?? null,
+            dto.effectiveFrom ? new Date(dto.effectiveFrom) : new Date(),
+        )
+        const rs = await this.merchants.merchantHistory(id)
+        return success(rs, 'Đã cập nhật loại thương nhân', 200, getReqId(req))
     }
 
     // ---- Overview ----

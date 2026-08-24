@@ -10,6 +10,7 @@ import {
     CancelSalesInvoiceDto,
     InvoiceSourceDto,
     ListSalesInvoicesQueryDto,
+    ListUnissuedSalesInvoicesQueryDto,
 } from './dto/sales-invoice.dto'
 
 function actorFrom(req: Request): ScopedActor {
@@ -30,6 +31,12 @@ export class SalesInvoicesController {
     @RequirePermissions(PERMISSIONS.sales.invoiceView, PERMISSIONS.sales.invoiceIssue)
     list(@Query() query: ListSalesInvoicesQueryDto) {
         return this.service.list(query)
+    }
+
+    @Get('unissued')
+    @RequirePermissions(PERMISSIONS.sales.invoiceView, PERMISSIONS.sales.invoiceIssue)
+    unissued(@Query() query: ListUnissuedSalesInvoicesQueryDto) {
+        return this.service.listUnissued(query)
     }
 
     /** What the invoice would contain — reads what actually shipped, writes nothing. */

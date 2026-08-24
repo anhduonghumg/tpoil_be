@@ -29,6 +29,15 @@ export class ListSalesDeliveriesQueryDto {
     @IsUUID()
     salesOrderId?: string
 
+    /** Ngày kế hoạch xuất của lệnh kho. */
+    @IsOptional()
+    @IsDateString()
+    dateFrom?: string
+
+    @IsOptional()
+    @IsDateString()
+    dateTo?: string
+
     @IsOptional()
     @Type(() => Number)
     @IsInt()
