@@ -13,6 +13,8 @@ import { SalesActor } from './sales-order-workflow.service'
 export type ReserveLotOutcome = {
     inventoryLotId: string
     lotNo: string
+    warehouseId: string
+    warehouseName: string
     supplierPartyId: string
     supplierCode: string
     supplierName: string
@@ -43,6 +45,7 @@ export type SupplierChoiceOption = {
     supplierPartyId: string
     supplierCode: string
     supplierName: string
+    supplySource: SalesOrderSupplySource
     availableQty: string
 }
 
@@ -76,7 +79,8 @@ export class SalesReservationService {
     private async fifoLots(
         tx: Prisma.TransactionClient,
         key: {
-            warehouseId: string
+            warehouseId?: string
+            warehouseAreaId?: string
             productId: string
             ownerPartyId: string
             supplySource: SalesOrderSupplySource
@@ -84,9 +88,14 @@ export class SalesReservationService {
         },
         lock = true,
     ) {
+        if (Boolean(key.warehouseId) === Boolean(key.warehouseAreaId)) {
+            throw new BadRequestException('FIFO_LOCATION_SCOPE_INVALID')
+        }
         const stock = await tx.stockBalance.findMany({
             where: {
-                warehouseId: key.warehouseId,
+                ...(key.warehouseId
+                    ? { warehouseId: key.warehouseId }
+                    : { warehouse: { areaId: key.warehouseAreaId } }),
                 productId: key.productId,
                 ownerPartyId: key.ownerPartyId,
                 actualQty: { gt: 0 },
@@ -96,6 +105,7 @@ export class SalesReservationService {
                 },
             },
             include: {
+                warehouse: { select: { id: true, name: true } },
                 lot: {
                     select: {
                         id: true,
@@ -107,7 +117,11 @@ export class SalesReservationService {
                     },
                 },
             },
-            orderBy: [{ lot: { receivedAt: 'asc' } }, { lot: { lotNo: 'asc' } }],
+            orderBy: [
+                { lot: { receivedAt: 'asc' } },
+                { lot: { lotNo: 'asc' } },
+                { warehouse: { code: 'asc' } },
+            ],
         })
         if (!stock.length) return []
 
@@ -177,26 +191,46 @@ export class SalesReservationService {
     async previewSupplierChoices(
         tx: Prisma.TransactionClient,
         key: {
-            warehouseId: string
+            warehouseId?: string
+            warehouseAreaId?: string
             productId: string
             ownerPartyId: string
             supplySource: SalesOrderSupplySource
         },
         requestedQtyInput: Prisma.Decimal.Value,
     ): Promise<SupplierChoicePreview> {
+        // FIFO mặc định vẫn theo nguồn Sale đã chọn. Danh sách chọn thủ công phải nhìn
+        // được cả TP và NCC tại cùng kho/khu vực để quản lý có thể đổi nguồn cấp hàng.
         const candidates = await this.fifoLots(tx, key, false)
+        const alternateSource =
+            key.supplySource === SalesOrderSupplySource.TP
+                ? SalesOrderSupplySource.NCC
+                : SalesOrderSupplySource.TP
+        const alternateCandidates = await this.fifoLots(
+            tx,
+            { ...key, supplySource: alternateSource },
+            false,
+        )
         const supplierTotals = new Map<string, SupplierChoiceOption & { qty: Prisma.Decimal }>()
-        for (const candidate of candidates) {
-            if (!candidate.lot.supplier || !candidate.availableQty.greaterThan(0)) continue
-            const current = supplierTotals.get(candidate.lot.supplier.id)
+        for (const candidate of [...candidates, ...alternateCandidates]) {
+            if (
+                !candidate.lot.supplier ||
+                !candidate.lot.releaseCode ||
+                !candidate.availableQty.greaterThan(0)
+            ) {
+                continue
+            }
+            const optionKey = `${candidate.lot.supplier.id}:${candidate.lot.releaseCode}`
+            const current = supplierTotals.get(optionKey)
             if (current) {
                 current.qty = current.qty.plus(candidate.availableQty)
                 current.availableQty = current.qty.toString()
             } else {
-                supplierTotals.set(candidate.lot.supplier.id, {
+                supplierTotals.set(optionKey, {
                     supplierPartyId: candidate.lot.supplier.id,
                     supplierCode: candidate.lot.supplier.code,
                     supplierName: candidate.lot.supplier.name,
+                    supplySource: candidate.lot.releaseCode,
                     availableQty: candidate.availableQty.toString(),
                     qty: candidate.availableQty,
                 })
@@ -213,6 +247,8 @@ export class SalesReservationService {
             fifoAllocations.push({
                 inventoryLotId: candidate.inventoryLotId,
                 lotNo: candidate.lot.lotNo,
+                warehouseId: candidate.warehouseId,
+                warehouseName: candidate.warehouse.name,
                 supplierPartyId: candidate.lot.supplier.id,
                 supplierCode: candidate.lot.supplier.code,
                 supplierName: candidate.lot.supplier.name,
@@ -230,6 +266,89 @@ export class SalesReservationService {
         }
     }
 
+    /** Giữ chi tiết theo lô cho một dòng rút sau khi lượng giữ của đơn lô đã được nhả. */
+    async reserveWithdrawalLine(
+        tx: Prisma.TransactionClient,
+        args: {
+            reservationId: string
+            startLineNo: number
+            warehouseId: string
+            productId: string
+            ownerPartyId: string
+            salesOrderLineId: string
+            withdrawalRequestLineId: string
+            requestedQty: Prisma.Decimal.Value
+            requestedV15Qty?: Prisma.Decimal.Value | null
+            supplySource: SalesOrderSupplySource
+            supplierPartyId?: string | null
+            actorId?: string | null
+            idempotencyPrefix: string
+        },
+    ) {
+        const requestedQty = new Prisma.Decimal(args.requestedQty)
+        let missing = requestedQty
+        let lineNo = args.startLineNo
+        const allocations: ReserveLotOutcome[] = []
+        const candidates = await this.fifoLots(tx, {
+            warehouseId: args.warehouseId,
+            productId: args.productId,
+            ownerPartyId: args.ownerPartyId,
+            supplySource: args.supplySource,
+            supplierPartyId: args.supplierPartyId ?? undefined,
+        })
+        for (const candidate of candidates) {
+            if (!missing.greaterThan(0)) break
+            if (
+                !candidate.availableQty.greaterThan(0) ||
+                !candidate.lot.supplier ||
+                !candidate.lot.releaseCode
+            ) {
+                continue
+            }
+            const takeQty = Prisma.Decimal.min(missing, candidate.availableQty)
+            const requestedV15Qty =
+                args.requestedV15Qty == null
+                    ? null
+                    : new Prisma.Decimal(args.requestedV15Qty).mul(takeQty).div(requestedQty)
+            const reservationLine = await tx.inventoryReservationLine.create({
+                data: {
+                    reservationId: args.reservationId,
+                    lineNo: ++lineNo,
+                    warehouseId: candidate.warehouseId,
+                    productId: candidate.productId,
+                    ownerPartyId: candidate.ownerPartyId,
+                    salesOrderLineId: args.salesOrderLineId,
+                    withdrawalRequestLineId: args.withdrawalRequestLineId,
+                    inventoryLotId: candidate.inventoryLotId,
+                    requestedActualQty: takeQty,
+                    requestedV15Qty,
+                },
+            })
+            await this.inventory.activateReservationLine(tx, {
+                reservationLineId: reservationLine.id,
+                actualQty: takeQty,
+                v15Qty: requestedV15Qty,
+                idempotencyKey: `${args.idempotencyPrefix}:${reservationLine.id}`,
+                occurredAt: new Date(),
+                actorId: args.actorId,
+                reason: `Giữ FIFO lô ${candidate.lot.lotNo} cho phiếu rút`,
+            })
+            allocations.push({
+                inventoryLotId: candidate.inventoryLotId,
+                lotNo: candidate.lot.lotNo,
+                warehouseId: candidate.warehouseId,
+                warehouseName: candidate.warehouse.name,
+                supplierPartyId: candidate.lot.supplier.id,
+                supplierCode: candidate.lot.supplier.code,
+                supplierName: candidate.lot.supplier.name,
+                releaseCode: candidate.lot.releaseCode,
+                actualQty: takeQty.toString(),
+            })
+            missing = missing.minus(takeQty)
+        }
+        return { lineNo, allocations, shortageQty: Prisma.Decimal.max(missing, 0) }
+    }
+
     async reserveOrder(
         tx: Prisma.TransactionClient,
         orderId: string,
@@ -238,6 +357,7 @@ export class SalesReservationService {
         const order = await tx.salesOrder.findUniqueOrThrow({
             where: { id: orderId },
             include: {
+                legalEntity: { select: { partyId: true } },
                 lines: {
                     orderBy: { lineNo: 'asc' },
                     include: {
@@ -250,15 +370,13 @@ export class SalesReservationService {
                                 legalEntity: { select: { partyId: true } },
                             },
                         },
+                        receivingWarehouseArea: {
+                            select: { id: true, name: true },
+                        },
                     },
                 },
             },
         })
-
-        // Đơn lô chỉ giữ tồn khi khách tạo yêu cầu rút hàng.
-        if (order.kind !== SalesOrderKind.SINGLE) {
-            return { reservationId: null, fullyReserved: true, lines: [] }
-        }
 
         const openReservations = await tx.inventoryReservation.findMany({
             where: {
@@ -268,6 +386,7 @@ export class SalesReservationService {
             include: {
                 lines: {
                     include: {
+                        warehouse: { select: { id: true, name: true } },
                         lot: {
                             select: {
                                 id: true,
@@ -296,6 +415,8 @@ export class SalesReservationService {
                 allocations.push({
                     inventoryLotId: line.lot.id,
                     lotNo: line.lot.lotNo,
+                    warehouseId: line.warehouse.id,
+                    warehouseName: line.warehouse.name,
                     supplierPartyId: line.lot.supplier.id,
                     supplierCode: line.lot.supplier.code,
                     supplierName: line.lot.supplier.name,
@@ -312,7 +433,7 @@ export class SalesReservationService {
         const outcomes: ReserveLineOutcome[] = []
 
         for (const orderLine of order.lines) {
-            if (!orderLine.issueWarehouse) continue
+            if (!orderLine.issueWarehouse && !orderLine.receivingWarehouseArea) continue
             const orderedQty = new Prisma.Decimal(orderLine.orderedActualQty)
             let reservedNow = alreadyHeld.get(orderLine.id) ?? new Prisma.Decimal(0)
             let missing = Prisma.Decimal.max(orderedQty.minus(reservedNow), 0)
@@ -320,9 +441,10 @@ export class SalesReservationService {
 
             if (missing.greaterThan(0)) {
                 const candidates = await this.fifoLots(tx, {
-                    warehouseId: orderLine.issueWarehouse.id,
+                    warehouseId: orderLine.issueWarehouse?.id,
+                    warehouseAreaId: orderLine.receivingWarehouseArea?.id,
                     productId: orderLine.productId,
-                    ownerPartyId: orderLine.issueWarehouse.legalEntity.partyId,
+                    ownerPartyId: order.legalEntity.partyId,
                     supplySource: orderLine.supplySource,
                     supplierPartyId: orderLine.preferredSupplierPartyId ?? undefined,
                 })
@@ -375,6 +497,8 @@ export class SalesReservationService {
                     allocations.push({
                         inventoryLotId: candidate.inventoryLotId,
                         lotNo: candidate.lot.lotNo,
+                        warehouseId: candidate.warehouseId,
+                        warehouseName: candidate.warehouse.name,
                         supplierPartyId: candidate.lot.supplier.id,
                         supplierCode: candidate.lot.supplier.code,
                         supplierName: candidate.lot.supplier.name,
@@ -391,8 +515,10 @@ export class SalesReservationService {
                 lineNo: orderLine.lineNo,
                 productId: orderLine.productId,
                 productName: orderLine.product.name,
-                warehouseId: orderLine.issueWarehouse.id,
-                warehouseName: orderLine.issueWarehouse.name,
+                warehouseId:
+                    orderLine.issueWarehouse?.id ?? orderLine.receivingWarehouseArea!.id,
+                warehouseName:
+                    orderLine.issueWarehouse?.name ?? orderLine.receivingWarehouseArea!.name,
                 requestedQty: orderedQty.toString(),
                 reservedQty: reservedNow.toString(),
                 shortageQty: Prisma.Decimal.max(orderedQty.minus(reservedNow), 0).toString(),
@@ -704,5 +830,49 @@ export class SalesReservationService {
             })
         }
         return reservations.length
+    }
+
+    /** Shrinks an approved order-line hold without rebuilding FIFO allocations from scratch. */
+    async resizeOrderLine(
+        tx: Prisma.TransactionClient,
+        args: {
+            salesOrderLineId: string
+            targetQty: Prisma.Decimal
+            adjustmentId: string
+            actor: SalesActor
+        },
+    ) {
+        const lines = await tx.inventoryReservationLine.findMany({
+            where: {
+                salesOrderLineId: args.salesOrderLineId,
+                activeActualQty: { gt: 0 },
+                reservation: { status: { in: [ReservationStatus.DRAFT, ReservationStatus.ACTIVE] } },
+            },
+            include: { lot: { select: { receivedAt: true } } },
+            orderBy: [{ lot: { receivedAt: 'desc' } }, { lineNo: 'desc' }],
+        })
+        const held = lines.reduce(
+            (sum, line) => sum.plus(line.activeActualQty),
+            new Prisma.Decimal(0),
+        )
+        let excess = Prisma.Decimal.max(held.minus(args.targetQty), 0)
+        for (const line of lines) {
+            if (!excess.greaterThan(0)) break
+            const releaseQty = Prisma.Decimal.min(excess, line.activeActualQty)
+            const releaseV15 = line.activeV15Qty
+                ? new Prisma.Decimal(line.activeV15Qty).mul(releaseQty).div(line.activeActualQty)
+                : null
+            await this.inventory.releaseReservationLine(tx, {
+                reservationLineId: line.id,
+                actualQty: releaseQty,
+                v15Qty: releaseV15,
+                idempotencyKey: `sales-adjustment:${args.adjustmentId}:release:${line.id}`,
+                occurredAt: new Date(),
+                actorId: args.actor.userId,
+                reason: 'Giảm lượng giữ theo đơn điều chỉnh đã duyệt',
+            })
+            excess = excess.minus(releaseQty)
+        }
+        return { heldBefore: held, releasedQty: Prisma.Decimal.max(held.minus(args.targetQty), 0) }
     }
 }

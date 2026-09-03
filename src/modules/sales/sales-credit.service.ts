@@ -159,7 +159,11 @@ export class SalesCreditService {
         const now = startOfToday()
         const [receivables, orders] = await Promise.all([
             this.prisma.receivableOpenItem.findMany({
-                where: { customerPartyId: { in: customerIds }, status: { in: openStatuses } },
+                where: {
+                    customerPartyId: { in: customerIds },
+                    status: { in: openStatuses },
+                    settlementType: 'RECEIVABLE',
+                },
                 select: { customerPartyId: true, outstandingAmount: true, dueDate: true },
             }),
             this.prisma.salesOrder.findMany({

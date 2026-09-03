@@ -5,6 +5,8 @@ import {
     SalesApprovalType,
     SalesOrderKind,
     SalesOrderStatus,
+    SalesOrderSupplySource,
+    SalesWithdrawalStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
@@ -18,6 +20,7 @@ import {
 } from './sales-order-workflow.service'
 import { ListSalesApprovalsQueryDto } from './dto/sales-order.dto'
 import { SalesReservationService } from './sales-reservation.service'
+import { SalesWithdrawalsService } from './sales-withdrawals.service'
 
 /**
  * Khoảng ngày cho cột @db.Date: giá trị lưu là 00:00 UTC nên cả hai đầu đều lấy
@@ -44,6 +47,7 @@ export class SalesApprovalsService {
         private readonly events: SalesWorkflowEventsService,
         private readonly notificationOutbox: NotificationOutboxService,
         private readonly reservations: SalesReservationService,
+        private readonly withdrawals: SalesWithdrawalsService,
     ) {}
 
     async list(query: ListSalesApprovalsQueryDto, actor: SalesActor) {
@@ -127,6 +131,7 @@ export class SalesApprovalsService {
                             status: true,
                             orderDate: true,
                             approvalCycle: true,
+                            legalEntity: { select: { partyId: true } },
                             customer: { select: { id: true, code: true, name: true } },
                             lines: {
                                 orderBy: { lineNo: 'asc' },
@@ -135,6 +140,7 @@ export class SalesApprovalsService {
                                     lineNo: true,
                                     productId: true,
                                     issueWarehouseId: true,
+                                    receivingWarehouseAreaId: true,
                                     supplySource: true,
                                     preferredSupplierPartyId: true,
                                     orderedActualQty: true,
@@ -150,6 +156,9 @@ export class SalesApprovalsService {
                                             name: true,
                                             legalEntity: { select: { partyId: true } },
                                         },
+                                    },
+                                    receivingWarehouseArea: {
+                                        select: { id: true, name: true },
                                     },
                                     preferredSupplier: { select: { id: true, code: true, name: true } },
                                 },
@@ -201,18 +210,22 @@ export class SalesApprovalsService {
                 productId: string
                 supplySource: 'TP' | 'NCC'
                 orderedActualQty: Prisma.Decimal
-                issueWarehouse: { id: string; legalEntity: { partyId: string } }
+                warehouseId?: string
+                warehouseAreaId?: string
+                ownerPartyId: string
             }
         >()
         for (const row of rows) {
-            if (row.salesOrder?.kind !== SalesOrderKind.SINGLE) continue
+            if (!row.salesOrder) continue
             for (const line of row.salesOrder.lines) {
-                if (!line.issueWarehouse) continue
+                if (!line.issueWarehouse && !line.receivingWarehouseArea) continue
                 previewLines.set(line.id, {
                     productId: line.productId,
                     supplySource: line.supplySource,
                     orderedActualQty: line.orderedActualQty,
-                    issueWarehouse: line.issueWarehouse,
+                    warehouseId: line.issueWarehouse?.id,
+                    warehouseAreaId: line.receivingWarehouseArea?.id,
+                    ownerPartyId: row.salesOrder.legalEntity.partyId,
                 })
             }
         }
@@ -225,9 +238,10 @@ export class SalesApprovalsService {
                         await this.reservations.previewSupplierChoices(
                             tx,
                             {
-                                warehouseId: line.issueWarehouse.id,
+                                warehouseId: line.warehouseId,
+                                warehouseAreaId: line.warehouseAreaId,
                                 productId: line.productId,
-                                ownerPartyId: line.issueWarehouse.legalEntity.partyId,
+                                ownerPartyId: line.ownerPartyId,
                                 supplySource: line.supplySource,
                             },
                             line.orderedActualQty,
@@ -376,20 +390,35 @@ export class SalesApprovalsService {
     }
 
     /** Chọn một mã NCC cụ thể hoặc trả về AUTO FIFO khi đơn còn ở hàng đợi duyệt. */
-    async adjustLineSupplier(lineId: string, supplierPartyId: string | null | undefined, actor: SalesActor) {
+    async adjustLineSupplier(
+        lineId: string,
+        supplierPartyId: string | null | undefined,
+        supplySource: SalesOrderSupplySource | undefined,
+        actor: SalesActor,
+    ) {
         return this.prisma.$transaction(async (tx) => {
             const line = await tx.salesOrderLine.findUnique({
                 where: { id: lineId },
                 include: {
-                    salesOrder: { select: { id: true, orderNo: true, kind: true, status: true } },
+                    salesOrder: {
+                        select: {
+                            id: true,
+                            orderNo: true,
+                            kind: true,
+                            status: true,
+                            legalEntity: { select: { partyId: true } },
+                        },
+                    },
                     issueWarehouse: {
                         select: { id: true, legalEntity: { select: { partyId: true } } },
                     },
+                    receivingWarehouseArea: { select: { id: true } },
                 },
             })
             if (!line) throw new NotFoundException('SALES_ORDER_LINE_NOT_FOUND')
             if (
-                line.salesOrder.kind !== SalesOrderKind.SINGLE ||
+                (line.salesOrder.kind !== SalesOrderKind.SINGLE &&
+                    line.salesOrder.kind !== SalesOrderKind.LOT) ||
                 line.salesOrder.status !== SalesOrderStatus.PENDING_REVIEW
             ) {
                 throw new BadRequestException({
@@ -397,23 +426,29 @@ export class SalesApprovalsService {
                     message: `Đơn ${line.salesOrder.orderNo} không còn ở trạng thái chờ duyệt nên không đổi được Mã NCC.`,
                 })
             }
-            if (!line.issueWarehouse) {
+            if (!line.issueWarehouse && !line.receivingWarehouseArea) {
                 throw new BadRequestException({ code: 'RECEIVING_WAREHOUSE_REQUIRED', message: 'Dòng đơn chưa có Kho nhận.' })
             }
 
             const selectedSupplierId = supplierPartyId || null
+            const selectedSupplySource = supplySource ?? line.supplySource
             if (selectedSupplierId) {
                 const preview = await this.reservations.previewSupplierChoices(
                     tx,
                     {
-                        warehouseId: line.issueWarehouse.id,
+                        warehouseId: line.issueWarehouse?.id,
+                        warehouseAreaId: line.receivingWarehouseArea?.id,
                         productId: line.productId,
-                        ownerPartyId: line.issueWarehouse.legalEntity.partyId,
-                        supplySource: line.supplySource,
+                        ownerPartyId: line.salesOrder.legalEntity.partyId,
+                        supplySource: selectedSupplySource,
                     },
                     line.orderedActualQty,
                 )
-                const option = preview.supplierOptions.find((row) => row.supplierPartyId === selectedSupplierId)
+                const option = preview.supplierOptions.find(
+                    (row) =>
+                        row.supplierPartyId === selectedSupplierId &&
+                        row.supplySource === selectedSupplySource,
+                )
                 if (!option) {
                     throw new BadRequestException({
                         code: 'SUPPLIER_STOCK_NOT_AVAILABLE',
@@ -430,9 +465,13 @@ export class SalesApprovalsService {
 
             const updated = await tx.salesOrderLine.update({
                 where: { id: line.id },
-                data: { preferredSupplierPartyId: selectedSupplierId },
+                data: {
+                    preferredSupplierPartyId: selectedSupplierId,
+                    ...(selectedSupplierId ? { supplySource: selectedSupplySource } : {}),
+                },
                 select: {
                     id: true,
+                    supplySource: true,
                     preferredSupplierPartyId: true,
                     preferredSupplier: { select: { id: true, code: true, name: true } },
                 },
@@ -442,7 +481,12 @@ export class SalesApprovalsService {
                 entityId: line.salesOrder.id,
                 eventType: 'SELECT_FIFO_SUPPLIER',
                 actorId: actor.userId,
-                metadata: { salesOrderLineId: line.id, supplierPartyId: selectedSupplierId, mode: selectedSupplierId ? 'MANUAL' : 'FIFO' },
+                metadata: {
+                    salesOrderLineId: line.id,
+                    supplierPartyId: selectedSupplierId,
+                    supplySource: selectedSupplierId ? selectedSupplySource : line.supplySource,
+                    mode: selectedSupplierId ? 'MANUAL' : 'FIFO',
+                },
             })
             return updated
         })
@@ -486,6 +530,86 @@ export class SalesApprovalsService {
         return { salesOrderId, status: SalesOrderStatus.PENDING_REVIEW }
     }
 
+    /**
+     * Phiếu rút lô đi cùng hàng đợi duyệt với đơn bán, nhưng vòng đời riêng: duyệt xong
+     * mới giữ tồn và đẩy việc sang kho, từ chối thì trả phiếu về cho Sale sửa.
+     *
+     * Một phiếu chỉ sinh đúng một yêu cầu STANDARD mỗi vòng nên không phải đếm yêu cầu
+     * còn treo như bên đơn bán.
+     */
+    private async decideWithdrawal(
+        tx: Prisma.TransactionClient,
+        requestId: string,
+        request: { withdrawalRequestId: string | null; approvalCycle: number; type: SalesApprovalType },
+        decision: 'APPROVED' | 'REJECTED',
+        note: string | undefined,
+        actor: SalesActor,
+    ) {
+        const withdrawalId = request.withdrawalRequestId!
+        const withdrawal = await tx.salesLotWithdrawalRequest.findUnique({
+            where: { id: withdrawalId },
+            select: {
+                id: true,
+                status: true,
+                approvalCycle: true,
+                createdById: true,
+                submittedById: true,
+            },
+        })
+        if (!withdrawal) throw new NotFoundException('SALES_WITHDRAWAL_NOT_FOUND')
+        if (
+            withdrawal.status !== SalesWithdrawalStatus.PENDING_REVIEW ||
+            request.approvalCycle !== withdrawal.approvalCycle
+        ) {
+            throw new BadRequestException({
+                code: 'SALES_APPROVAL_NOT_PENDING',
+                message: 'Yêu cầu duyệt không còn hiệu lực (đã xử lý hoặc phiếu đã thay đổi).',
+            })
+        }
+        const isSystemAdmin = new Set(actor.permissions ?? []).has('system.rbac.admin')
+        if (
+            process.env.SALES_MAKER_CHECKER !== '0' &&
+            !isSystemAdmin &&
+            actor.userId &&
+            (actor.userId === withdrawal.createdById || actor.userId === withdrawal.submittedById)
+        ) {
+            throw new ForbiddenException({
+                code: 'SALES_APPROVAL_MAKER_CHECKER',
+                message: 'Người tạo/gửi phiếu không được tự duyệt phiếu của mình.',
+            })
+        }
+
+        await tx.salesApprovalRequest.update({
+            where: { id: requestId },
+            data: {
+                status:
+                    decision === 'APPROVED'
+                        ? SalesApprovalStatus.APPROVED
+                        : SalesApprovalStatus.REJECTED,
+                decidedById: actor.userId,
+                decidedAt: new Date(),
+                decisionNote: note?.trim() || null,
+            },
+        })
+        await this.events.record(tx, {
+            entityType: 'SALES_APPROVAL',
+            entityId: requestId,
+            eventType: decision,
+            fromStatus: SalesApprovalStatus.PENDING,
+            toStatus: decision,
+            actorId: actor.userId,
+            reason: note?.trim() || null,
+            cycle: request.approvalCycle,
+            metadata: { withdrawalRequestId: withdrawalId, type: request.type },
+        })
+
+        if (decision === 'REJECTED') {
+            await this.withdrawals.onRejected(tx, withdrawalId, actor, note!.trim())
+            return
+        }
+        await this.withdrawals.onApproved(tx, withdrawalId, actor)
+    }
+
     async decide(
         requestId: string,
         decision: 'APPROVED' | 'REJECTED',
@@ -513,11 +637,14 @@ export class SalesApprovalsService {
 
             const order = request.salesOrder
             if (!order) {
-                // Withdrawal-targeted approvals belong to the lot draw flow (GĐ 5).
-                throw new BadRequestException({
-                    code: 'SALES_APPROVAL_NOT_ORDER_TARGET',
-                    message: 'Yêu cầu duyệt này thuộc yêu cầu rút lô, không xử lý ở luồng đơn bán.',
-                })
+                if (!request.withdrawalRequestId) {
+                    throw new BadRequestException({
+                        code: 'SALES_APPROVAL_NO_TARGET',
+                        message: 'Yêu cầu duyệt không gắn với chứng từ nào.',
+                    })
+                }
+                await this.decideWithdrawal(tx, requestId, request, decision, note, actor)
+                return null
             }
             if (
                 request.status !== SalesApprovalStatus.PENDING ||

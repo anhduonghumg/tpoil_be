@@ -36,6 +36,11 @@ export class GoodsReceiptPostingService {
         ownerPartyId?: string | null
         supplierPartyId?: string | null
         releaseCode?: SalesOrderSupplySource | null
+        /**
+         * Mặc định hàng vừa nhập bị giữ tới khi có hóa đơn NCC. Rút lô thương mại chỉ
+         * được phép trên phần đã có hóa đơn nên không giữ lại lần nữa.
+         */
+        awaitingSupplierInvoice?: boolean
     }) {
         const ownerPartyId =
             args.ownerPartyId ?? (await this.internalOwnerPartyId(args.tx, args.warehouseId))
@@ -117,10 +122,13 @@ export class GoodsReceiptPostingService {
             ],
         })
 
-        let pending = await args.tx.inventoryPendingRelease.findFirst({
-            where: { goodsReceiptLineId: line.id, status: { notIn: ['RELEASED', 'CANCELLED'] } },
-        })
-        if (!pending) {
+        const awaitingSupplierInvoice = args.awaitingSupplierInvoice ?? true
+        let pending = awaitingSupplierInvoice
+            ? await args.tx.inventoryPendingRelease.findFirst({
+                  where: { goodsReceiptLineId: line.id, status: { notIn: ['RELEASED', 'CANCELLED'] } },
+              })
+            : null
+        if (awaitingSupplierInvoice && !pending) {
             pending = await args.tx.inventoryPendingRelease.create({
                 data: {
                     pendingNo: `GR-PENDING-${line.id}`,

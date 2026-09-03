@@ -18,11 +18,13 @@ import {
 
 const detailInclude = Prisma.validator<Prisma.SalesOrderInclude>()({
     customer: { select: { id: true, code: true, name: true, taxCode: true } },
+    paymentPlans: { orderBy: [{ dueDate: 'asc' }, { sortOrder: 'asc' }] },
     lines: {
         orderBy: { lineNo: 'asc' },
         include: {
             product: { select: { id: true, code: true, name: true, uom: true } },
             receivingWarehouse: { select: { id: true, code: true, name: true } },
+            receivingWarehouseArea: { select: { id: true, code: true, name: true } },
             issueWarehouse: { select: { id: true, code: true, name: true } },
         },
     },
@@ -44,6 +46,64 @@ const detailInclude = Prisma.validator<Prisma.SalesOrderInclude>()({
                     product: { select: { id: true, code: true, name: true, uom: true } },
                 },
             },
+        },
+    },
+    deliveries: {
+        select: {
+            id: true,
+            status: true,
+            lines: { select: { actualQty: true } },
+        },
+    },
+    invoices: {
+        select: {
+            id: true,
+            status: true,
+            documentType: true,
+            lines: { select: { qty: true } },
+            receivableItems: {
+                select: { originalAmount: true, outstandingAmount: true, status: true, dueDate: true },
+            },
+        },
+    },
+    withdrawals: {
+        select: {
+            id: true,
+            status: true,
+            deliveries: {
+                select: { id: true, status: true, lines: { select: { actualQty: true } } },
+            },
+            invoices: {
+                select: {
+                    id: true,
+                    status: true,
+                    documentType: true,
+                    lines: { select: { qty: true } },
+                    receivableItems: {
+                        select: {
+                            originalAmount: true,
+                            outstandingAmount: true,
+                            status: true,
+                            dueDate: true,
+                        },
+                    },
+                },
+            },
+        },
+    },
+    warehouseTransfers: {
+        orderBy: { createdAt: 'desc' },
+        select: {
+            id: true,
+            movementNo: true,
+            status: true,
+            transferReason: true,
+            transferFee: true,
+            chargeCustomer: true,
+            plannedAt: true,
+            actualArrivalAt: true,
+            fromWarehouse: { select: { id: true, code: true, name: true } },
+            toWarehouse: { select: { id: true, code: true, name: true } },
         },
     },
 })
@@ -109,8 +169,105 @@ export class SalesOrdersService {
         }))
     }
 
+    private workflowAxes(order: any) {
+        const deliveries = [
+            ...(order.deliveries ?? []),
+            ...(order.withdrawals ?? []).flatMap((withdrawal: any) => withdrawal.deliveries ?? []),
+        ]
+        const invoices = [
+            ...(order.invoices ?? []),
+            ...(order.withdrawals ?? []).flatMap((withdrawal: any) => withdrawal.invoices ?? []),
+        ]
+        const effectiveInvoices = invoices.filter(
+            (invoice: any) => invoice.status !== 'CANCELLED' && invoice.documentType === 'ORIGINAL',
+        )
+        const issuedInvoices = effectiveInvoices.filter((invoice: any) => invoice.status === 'ISSUED')
+        const totalQty = (order.lines ?? []).reduce(
+            (sum: Prisma.Decimal, line: any) => sum.plus(line.orderedActualQty ?? 0),
+            new Prisma.Decimal(0),
+        )
+        const issuedQty = deliveries
+            .filter((delivery: any) => delivery.status === 'POSTED')
+            .flatMap((delivery: any) => delivery.lines ?? [])
+            .reduce(
+                (sum: Prisma.Decimal, line: any) => sum.plus(line.actualQty ?? 0),
+                new Prisma.Decimal(0),
+            )
+        const invoicedQty = issuedInvoices
+            .flatMap((invoice: any) => invoice.lines ?? [])
+            .reduce(
+                (sum: Prisma.Decimal, line: any) => sum.plus(line.qty ?? 0),
+                new Prisma.Decimal(0),
+            )
+
+        const approval =
+            order.status === 'CANCELLED'
+                ? 'CANCELLED'
+                : order.status === 'REJECTED'
+                  ? 'REJECTED'
+                  : order.approvedAt
+                    ? 'APPROVED'
+                    : order.status === 'PENDING_REVIEW'
+                      ? 'PENDING'
+                      : 'DRAFT'
+        const warehouse =
+            order.status === 'CANCELLED'
+                ? 'CANCELLED'
+                : issuedQty.greaterThanOrEqualTo(totalQty) && totalQty.greaterThan(0)
+                  ? 'ISSUED'
+                  : issuedQty.greaterThan(0)
+                    ? 'PARTIALLY_ISSUED'
+                    : deliveries.some((delivery: any) => ['DRAFT', 'READY', 'RETURNED'].includes(delivery.status))
+                      ? 'PROCESSING'
+                      : order.approvedAt
+                        ? 'READY'
+                        : 'NOT_STARTED'
+        const invoicing =
+            issuedInvoices.length && invoicedQty.greaterThanOrEqualTo(totalQty) && totalQty.greaterThan(0)
+                ? 'INVOICED'
+                : issuedInvoices.length
+                  ? 'PARTIALLY_INVOICED'
+                  : effectiveInvoices.some((invoice: any) => invoice.status === 'ISSUE_FAILED')
+                    ? 'ISSUE_FAILED'
+                    : effectiveInvoices.length
+                      ? 'DRAFT'
+                      : invoices.length
+                        ? 'CANCELLED'
+                        : 'NOT_INVOICED'
+
+        const openItems = issuedInvoices.flatMap((invoice: any) => invoice.receivableItems ?? [])
+        const originalReceivable = openItems.reduce(
+            (sum: Prisma.Decimal, item: any) => sum.plus(item.originalAmount ?? 0),
+            new Prisma.Decimal(0),
+        )
+        const outstandingReceivable = openItems.reduce(
+            (sum: Prisma.Decimal, item: any) => sum.plus(item.outstandingAmount ?? 0),
+            new Prisma.Decimal(0),
+        )
+        const receivable = !openItems.length
+            ? 'NOT_OPEN'
+            : outstandingReceivable.lessThanOrEqualTo(0)
+              ? 'SETTLED'
+              : outstandingReceivable.lessThan(originalReceivable)
+                ? 'PARTIALLY_SETTLED'
+                : 'OPEN'
+
+        return {
+            approval,
+            warehouse,
+            invoicing,
+            receivable,
+            totalQty: totalQty.toString(),
+            issuedQty: issuedQty.toString(),
+            invoicedQty: invoicedQty.toString(),
+            receivableAmount: originalReceivable.toString(),
+            outstandingAmount: outstandingReceivable.toString(),
+            canCancelOrder: issuedQty.isZero() && effectiveInvoices.length === 0,
+        }
+    }
+
     private mapOrder(order: any) {
-        return { ...order, comparison: this.comparison(order) }
+        return { ...order, comparison: this.comparison(order), workflow: this.workflowAxes(order) }
     }
 
     async list(query: ListSalesOrdersQueryDto) {
@@ -260,6 +417,7 @@ export class SalesOrdersService {
                                 vehiclePlate: line.vehiclePlate?.trim() || null,
                                 driverName: line.driverName?.trim() || null,
                                 taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                                vatRateId: line.vatRateId ?? null,
                                 note: line.note?.trim() || null,
                             }
                         }),
@@ -330,6 +488,7 @@ export class SalesOrdersService {
                       line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
                   unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
                   taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
+                  vatRateId: line.vatRateId ?? null,
                   note: line.note?.trim() || null,
               }))
             : purchaseOrder.lines.map((line) => ({
@@ -339,6 +498,8 @@ export class SalesOrdersService {
                   // Selling price belongs to sales; purchasing only records what was ordered.
                   unitPrice: new Prisma.Decimal(0),
                   taxRate: line.taxRate,
+                  // Đơn mua không gắn dòng thuế của bán; để trống, kế toán chọn khi sửa đơn.
+                  vatRateId: null,
                   note: null,
               }))
         if (!sourceLines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
@@ -364,6 +525,7 @@ export class SalesOrdersService {
                             orderedV15Qty: line.orderedV15Qty,
                             unitPrice: line.unitPrice,
                             taxRate: line.taxRate,
+                            vatRateId: line.vatRateId,
                             note: line.note,
                         })),
                     },

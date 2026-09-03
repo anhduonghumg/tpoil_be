@@ -90,7 +90,11 @@ export class CustomerOverviewService {
 
         // Real receivable position instead of the previous placeholder zeros.
         const receivables = await this.prisma.receivableOpenItem.findMany({
-            where: { customerPartyId: customer.id, status: { not: 'VOIDED' } },
+            where: {
+                customerPartyId: customer.id,
+                status: { not: 'VOIDED' },
+                settlementType: 'RECEIVABLE',
+            },
             select: {
                 originalAmount: true,
                 outstandingAmount: true,

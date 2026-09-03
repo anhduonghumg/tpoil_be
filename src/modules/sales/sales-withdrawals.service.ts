@@ -1,9 +1,15 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
+import {
+    BadRequestException,
+    HttpException,
+    Injectable,
+    Logger,
+    NotFoundException,
+} from '@nestjs/common'
 import {
     Prisma,
-    ReservationEventType,
     ReservationStatus,
     SalesApprovalStatus,
+    SalesApprovalType,
     SalesDeliveryStatus,
     SalesOrderKind,
     SalesOrderStatus,
@@ -17,6 +23,7 @@ import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
 import { SalesLotService } from './sales-lot.service'
 import { SalesWarehouseScopeService, ScopedActor } from './sales-warehouse-scope.service'
+import { SalesReservationService } from './sales-reservation.service'
 import {
     CancelWithdrawalDto,
     CreateWithdrawalDto,
@@ -49,12 +56,15 @@ const detailInclude = Prisma.validator<Prisma.SalesLotWithdrawalRequestInclude>(
  */
 @Injectable()
 export class SalesWithdrawalsService {
+    private readonly logger = new Logger(SalesWithdrawalsService.name)
+
     constructor(
         private readonly prisma: PrismaService,
         private readonly lots: SalesLotService,
         private readonly inventory: InventoryCoreService,
         private readonly events: SalesWorkflowEventsService,
         private readonly scope: SalesWarehouseScopeService,
+        private readonly reservations: SalesReservationService,
         private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
@@ -76,10 +86,27 @@ export class SalesWithdrawalsService {
      * "Đơn 1/2/3" numbering are explicitly NOT selection criteria (spec §6).
      */
     async sourceCandidates(query: WithdrawalSourceQueryDto) {
+        const selectedWarehouse = query.warehouseId
+            ? await this.prisma.warehouse.findUnique({
+                  where: { id: query.warehouseId },
+                  select: { id: true, code: true, name: true },
+              })
+            : null
         const lines = await this.prisma.salesOrderLine.findMany({
             where: {
                 productId: query.productId,
-                issueWarehouseId: query.warehouseId ?? undefined,
+                ...(query.warehouseId
+                    ? {
+                          OR: [
+                              { issueWarehouseId: query.warehouseId },
+                              {
+                                  receivingWarehouseArea: {
+                                      warehouses: { some: { id: query.warehouseId } },
+                                  },
+                              },
+                          ],
+                      }
+                    : {}),
                 lotPosition: { isNot: null },
                 salesOrder: {
                     kind: SalesOrderKind.LOT,
@@ -122,7 +149,7 @@ export class SalesWithdrawalsService {
                 orderDate: line.salesOrder.orderDate,
                 salesOrderLineId: line.id,
                 product: line.product,
-                warehouse: line.issueWarehouse,
+                warehouse: line.issueWarehouse ?? selectedWarehouse,
                 totalQty: balance.totalQty,
                 issuedQty: balance.issuedQty,
                 heldQty: balance.heldQty,
@@ -131,8 +158,10 @@ export class SalesWithdrawalsService {
         }
         return {
             candidates,
-            // The UI must force a choice when more than one lot fits.
-            mustChoose: candidates.length > 1,
+            // Hệ thống tự lấy lô cũ nhất theo FIFO nên không còn bắt Sale phải chọn; cờ này
+            // giữ lại để màn hình biết có nhiều lô mà nói rõ mặc định đang là lô nào.
+            mustChoose: false,
+            hasMultiple: candidates.length > 1,
             suggestedSalesOrderId: candidates.length ? candidates[0].salesOrderId : null,
         }
     }
@@ -184,11 +213,36 @@ export class SalesWithdrawalsService {
             return request.id
         })
 
-        // Try to attach the source straight away; if sales picked one, honour it.
+        // Gắn lô nguồn ngay; Sale chọn sẵn thì tôn trọng, không thì lấy lô cũ nhất.
         if (dto.salesOrderId) {
-            return this.selectSource(id, { salesOrderId: dto.salesOrderId }, actor)
+            await this.selectSource(id, { salesOrderId: dto.salesOrderId }, actor)
+        } else {
+            await this.autoResolveSource(id, actor)
         }
-        return this.autoResolveSource(id, actor)
+        // Lưu xong là đi thẳng vào chờ duyệt như đơn bán, không bắt bấm gửi thêm lần nữa.
+        // Phiếu chưa gắn được lô nguồn thì submit từ chối và phiếu nằm lại NEED_SOURCE —
+        // trả kèm lý do để màn hình nói được vì sao chưa gửi đi.
+        return this.submitQuietly(id, actor)
+    }
+
+    /**
+     * Gửi duyệt nhưng không để mất phiếu vừa lưu. Lý do hỏng trả về theo phiếu thay vì
+     * chỉ ghi log — im lặng ở đây là Sale tưởng xong mà phiếu vẫn nằm nháp.
+     */
+    private async submitQuietly(id: string, actor: ScopedActor) {
+        try {
+            return await this.submit(id, actor)
+        } catch (error) {
+            const payload = error instanceof HttpException ? error.getResponse() : null
+            const message =
+                payload && typeof payload === 'object' && typeof (payload as any).message === 'string'
+                    ? ((payload as any).message as string)
+                    : error instanceof Error
+                      ? error.message
+                      : 'Chưa gửi duyệt được.'
+            this.logger.warn(`Phiếu rút ${id} chưa gửi duyệt được: ${message}`)
+            return { ...(await this.detail(id)), submitBlockedReason: message }
+        }
     }
 
     /** Proposes a source when exactly one lot fits; otherwise waits for sales to choose. */
@@ -214,7 +268,10 @@ export class SalesWithdrawalsService {
             ? [...orderIdSets[0]].filter((orderId) => orderIdSets.every((set) => set.has(orderId)))
             : []
 
-        if (common.length === 1) {
+        // Nhiều lô cùng phục vụ được thì lấy lô vào trước (FIFO). `candidates` đã sắp theo
+        // ngày đơn tăng dần, và `common` giữ nguyên thứ tự đó, nên phần tử đầu chính là lô
+        // cũ nhất phục vụ được MỌI dòng của phiếu.
+        if (common.length >= 1) {
             return this.selectSource(id, { salesOrderId: common[0] }, actor)
         }
 
@@ -254,7 +311,7 @@ export class SalesWithdrawalsService {
                 )
             })
         }
-        // Several matches: leave it in DRAFT so sales must pick explicitly.
+        // Chỉ còn đường này khi không có lô nào khớp — phiếu vừa được chuyển NEED_SOURCE.
         return this.detail(id)
     }
 
@@ -262,16 +319,25 @@ export class SalesWithdrawalsService {
         await this.prisma.$transaction(async (tx) => {
             const request = await tx.salesLotWithdrawalRequest.findUnique({
                 where: { id },
-                include: { lines: true },
+                include: {
+                    lines: {
+                        include: { warehouse: { select: { areaId: true } } },
+                    },
+                },
             })
             if (!request) throw new NotFoundException('SALES_WITHDRAWAL_NOT_FOUND')
-            if (
-                request.status !== SalesWithdrawalStatus.DRAFT &&
-                request.status !== SalesWithdrawalStatus.NEED_SOURCE
-            ) {
+            // REJECTED nằm trong danh sách vì đổi lô nguồn thường là cách sửa đúng khi
+            // người duyệt từ chối — không có đường này thì phiếu bị từ chối là ngõ cụt.
+            const reworkable: SalesWithdrawalStatus[] = [
+                SalesWithdrawalStatus.DRAFT,
+                SalesWithdrawalStatus.NEED_SOURCE,
+                SalesWithdrawalStatus.REJECTED,
+            ]
+            if (!reworkable.includes(request.status)) {
                 throw new BadRequestException({
                     code: 'WITHDRAWAL_SOURCE_LOCKED',
-                    message: 'Chỉ chọn được đơn lô nguồn khi yêu cầu còn ở trạng thái nháp.',
+                    message:
+                        'Chỉ chọn được đơn lô nguồn khi phiếu còn nháp, chờ chọn lô hoặc đã bị từ chối.',
                 })
             }
 
@@ -299,7 +365,9 @@ export class SalesWithdrawalsService {
                 const match = lotOrder.lines.find(
                     (orderLine) =>
                         orderLine.productId === line.productId &&
-                        orderLine.issueWarehouseId === line.warehouseId &&
+                        (orderLine.issueWarehouseId === line.warehouseId ||
+                            (orderLine.receivingWarehouseAreaId != null &&
+                                orderLine.receivingWarehouseAreaId === line.warehouse.areaId)) &&
                         orderLine.lotPosition,
                 )
                 if (!match) {
@@ -353,10 +421,15 @@ export class SalesWithdrawalsService {
                 },
             })
             if (!request) throw new NotFoundException('SALES_WITHDRAWAL_NOT_FOUND')
-            if (request.status !== SalesWithdrawalStatus.DRAFT) {
+            // Phiếu bị từ chối gửi lại được sau khi Sale sửa lô nguồn; mỗi lần gửi mở một
+            // vòng duyệt mới nên người duyệt luôn thấy đúng lần gửi gần nhất.
+            if (
+                request.status !== SalesWithdrawalStatus.DRAFT &&
+                request.status !== SalesWithdrawalStatus.REJECTED
+            ) {
                 throw new BadRequestException({
                     code: 'WITHDRAWAL_NOT_SUBMITTABLE',
-                    message: 'Chỉ gửi kiểm duyệt được yêu cầu rút ở trạng thái nháp.',
+                    message: 'Chỉ gửi duyệt được phiếu rút đang ở trạng thái nháp hoặc bị từ chối.',
                 })
             }
             if (!request.salesOrderId || request.lines.some((line) => !line.salesOrderLineId)) {
@@ -395,53 +468,178 @@ export class SalesWithdrawalsService {
                 data: { status: SalesApprovalStatus.STALE },
             })
 
-            // Price and terms were settled on the lot order, so a draw normally needs no
-            // manual approval; policy checks stay on the parent order.
+            // Lần rút cũng phải có người ký như đơn bán: sinh một yêu cầu duyệt STANDARD
+            // rồi chờ. Giá và điều khoản đã chốt ở đơn lô cha nên không có loại duyệt nào
+            // khác — chỉ cần một người chịu trách nhiệm cho lần rút này.
             await tx.salesLotWithdrawalRequest.update({
                 where: { id },
                 data: {
-                    status: SalesWithdrawalStatus.APPROVED,
+                    status: SalesWithdrawalStatus.PENDING_REVIEW,
                     approvalCycle: cycle,
                     submittedAt: new Date(),
                     submittedById: actor.userId,
-                    approvedAt: new Date(),
                     rejectedReason: null,
                     version: { increment: 1 },
+                },
+            })
+            await tx.salesApprovalRequest.create({
+                data: {
+                    withdrawalRequestId: id,
+                    approvalCycle: cycle,
+                    type: SalesApprovalType.STANDARD,
+                    status: SalesApprovalStatus.PENDING,
+                    requestedById: actor.userId,
                 },
             })
             await this.events.record(tx, {
                 entityType: 'SALES_WITHDRAWAL',
                 entityId: id,
                 eventType: 'SUBMIT',
-                fromStatus: SalesWithdrawalStatus.DRAFT,
-                toStatus: SalesWithdrawalStatus.APPROVED,
+                fromStatus: request.status,
+                toStatus: SalesWithdrawalStatus.PENDING_REVIEW,
                 actorId: actor.userId,
                 cycle,
             })
             await this.notificationOutbox.emit(
                 {
-                    eventType: SALES_NOTIFICATION_EVENTS.WITHDRAWAL_APPROVED,
+                    eventType: SALES_NOTIFICATION_EVENTS.WITHDRAWAL_REVIEW_REQUESTED,
                     aggregateType: 'SALES_WITHDRAWAL',
                     aggregateId: id,
-                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.WITHDRAWAL_APPROVED}:${id}:cycle${cycle}`,
+                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.WITHDRAWAL_REVIEW_REQUESTED}:${id}:cycle${cycle}`,
                     payload: {
                         entityType: 'SALES_WITHDRAWAL',
                         entityId: id,
+                        workItemSourceType: 'SALES_WITHDRAWAL_APPROVAL',
+                        workItemSourceId: id,
+                        actionRequired: true,
                         requestNo: request.requestNo,
                         orderNo: request.salesOrder?.orderNo ?? '',
                         customerName: request.customer.name,
                         cycle,
-                        recipientUserIds: [request.createdById, actor.userId].filter(
-                            (value): value is string => !!value,
-                        ),
+                        recipientPermissionCodes: [PERMISSIONS.sales.approveOrder],
+                        excludeUserIds: actor.userId ? [actor.userId] : [],
                     },
                 },
                 tx,
             )
-
-            await this.reserveAndDispatch(tx, id, actor)
         })
         return this.detail(id)
+    }
+
+    /**
+     * Người duyệt đã ký: giữ tồn theo lô nguồn và đẩy việc sang kho. Tách khỏi submit vì
+     * từ nay hai bước đó nằm ở hai thời điểm khác nhau.
+     */
+    async onApproved(tx: Prisma.TransactionClient, id: string, actor: ScopedActor) {
+        const request = await tx.salesLotWithdrawalRequest.findUniqueOrThrow({
+            where: { id },
+            select: {
+                requestNo: true,
+                approvalCycle: true,
+                createdById: true,
+                submittedById: true,
+                customer: { select: { name: true } },
+                salesOrder: { select: { orderNo: true } },
+            },
+        })
+        await tx.salesLotWithdrawalRequest.update({
+            where: { id },
+            data: {
+                status: SalesWithdrawalStatus.APPROVED,
+                approvedAt: new Date(),
+                rejectedReason: null,
+                version: { increment: 1 },
+            },
+        })
+        await this.events.record(tx, {
+            entityType: 'SALES_WITHDRAWAL',
+            entityId: id,
+            eventType: 'APPROVE',
+            fromStatus: SalesWithdrawalStatus.PENDING_REVIEW,
+            toStatus: SalesWithdrawalStatus.APPROVED,
+            actorId: actor.userId,
+            cycle: request.approvalCycle,
+        })
+        await this.notificationOutbox.emit(
+            {
+                eventType: SALES_NOTIFICATION_EVENTS.WITHDRAWAL_APPROVED,
+                aggregateType: 'SALES_WITHDRAWAL',
+                aggregateId: id,
+                dedupeKey: `${SALES_NOTIFICATION_EVENTS.WITHDRAWAL_APPROVED}:${id}:cycle${request.approvalCycle}`,
+                payload: {
+                    entityType: 'SALES_WITHDRAWAL',
+                    entityId: id,
+                    requestNo: request.requestNo,
+                    orderNo: request.salesOrder?.orderNo ?? '',
+                    customerName: request.customer.name,
+                    cycle: request.approvalCycle,
+                    recipientUserIds: [request.createdById, request.submittedById].filter(
+                        (value): value is string => !!value,
+                    ),
+                },
+            },
+            tx,
+        )
+        await this.reserveAndDispatch(tx, id, actor)
+    }
+
+    /** Người duyệt từ chối: phiếu quay về cho Sale sửa, không giữ tồn gì cả. */
+    async onRejected(
+        tx: Prisma.TransactionClient,
+        id: string,
+        actor: ScopedActor,
+        reason: string,
+    ) {
+        const request = await tx.salesLotWithdrawalRequest.findUniqueOrThrow({
+            where: { id },
+            select: {
+                requestNo: true,
+                approvalCycle: true,
+                createdById: true,
+                submittedById: true,
+            },
+        })
+        await tx.salesLotWithdrawalRequest.update({
+            where: { id },
+            data: {
+                status: SalesWithdrawalStatus.REJECTED,
+                rejectedReason: reason,
+                version: { increment: 1 },
+            },
+        })
+        await this.events.record(tx, {
+            entityType: 'SALES_WITHDRAWAL',
+            entityId: id,
+            eventType: 'REJECT',
+            fromStatus: SalesWithdrawalStatus.PENDING_REVIEW,
+            toStatus: SalesWithdrawalStatus.REJECTED,
+            actorId: actor.userId,
+            reason,
+            cycle: request.approvalCycle,
+        })
+        await this.notificationOutbox.emit(
+            {
+                eventType: SALES_NOTIFICATION_EVENTS.WITHDRAWAL_REJECTED,
+                aggregateType: 'SALES_WITHDRAWAL',
+                aggregateId: id,
+                dedupeKey: `${SALES_NOTIFICATION_EVENTS.WITHDRAWAL_REJECTED}:${id}:cycle${request.approvalCycle}`,
+                payload: {
+                    entityType: 'SALES_WITHDRAWAL',
+                    entityId: id,
+                    workItemSourceType: 'SALES_WITHDRAWAL',
+                    workItemSourceId: id,
+                    actionRequired: true,
+                    requestNo: request.requestNo,
+                    decisionNote: reason,
+                    cycle: request.approvalCycle,
+                    recipientUserIds: [request.createdById, request.submittedById].filter(
+                        (value): value is string => !!value,
+                    ),
+                    excludeUserIds: actor.userId ? [actor.userId] : [],
+                },
+            },
+            tx,
+        )
     }
 
     /** Holds stock for the approved draw and hands one job to each warehouse. */
@@ -453,12 +651,112 @@ export class SalesWithdrawalsService {
                     include: {
                         warehouse: { select: { id: true, name: true, legalEntity: { select: { partyId: true } } } },
                         product: { select: { name: true } },
+                        orderLine: {
+                            select: {
+                                supplySource: true,
+                                preferredSupplierPartyId: true,
+                            },
+                        },
                     },
                 },
                 salesOrder: { select: { id: true, orderNo: true, legalEntityId: true, orderDate: true } },
                 customer: { select: { name: true } },
             },
         })
+
+        // Đơn lô đã giữ toàn bộ tồn khi duyệt. Chuyển đúng lượng giữ của đơn sang phiếu
+        // rút để không giữ hai lần; nếu đổi kho trong cùng khu vực thì chỉ cho chuyển khi
+        // kho được chọn thực sự còn đủ lượng khả dụng.
+        for (const line of request.lines) {
+            const masterLines = await tx.inventoryReservationLine.findMany({
+                where: {
+                    salesOrderLineId: line.salesOrderLineId!,
+                    activeActualQty: { gt: 0 },
+                    reservation: {
+                        salesOrderId: request.salesOrderId!,
+                        withdrawalRequestId: null,
+                        status: {
+                            in: [
+                                ReservationStatus.DRAFT,
+                                ReservationStatus.ACTIVE,
+                                ReservationStatus.PARTIALLY_RELEASED,
+                            ],
+                        },
+                    },
+                },
+                orderBy: [{ warehouseId: 'asc' }, { lineNo: 'asc' }],
+            })
+            const requestedQty = new Prisma.Decimal(line.requestedQty)
+            const heldTotal = masterLines.reduce(
+                (sum, held) => sum.plus(held.activeActualQty),
+                new Prisma.Decimal(0),
+            )
+            if (heldTotal.lessThan(requestedQty)) {
+                throw new BadRequestException({
+                    code: 'LOT_MASTER_RESERVATION_INSUFFICIENT',
+                    message: `Dòng ${line.lineNo}: lượng đã giữ cho đơn lô không còn đủ để rút.`,
+                })
+            }
+
+            const balance = await tx.inventoryAvailabilityBalance.findUnique({
+                where: {
+                    warehouseId_productId_ownerPartyId: {
+                        warehouseId: line.warehouseId,
+                        productId: line.productId,
+                        ownerPartyId: line.warehouse.legalEntity.partyId,
+                    },
+                },
+            })
+            const freeAtWarehouse = balance
+                ? new Prisma.Decimal(balance.onHandActualQty)
+                      .minus(balance.reservedActualQty)
+                      .minus(balance.pendingActualQty)
+                      .minus(balance.blockedActualQty)
+                : new Prisma.Decimal(0)
+            const heldAtWarehouse = masterLines
+                .filter((held) => held.warehouseId === line.warehouseId)
+                .reduce(
+                    (sum, held) => sum.plus(held.activeActualQty),
+                    new Prisma.Decimal(0),
+                )
+            if (freeAtWarehouse.plus(heldAtWarehouse).lessThan(requestedQty)) {
+                throw new BadRequestException({
+                    code: 'WITHDRAWAL_WAREHOUSE_STOCK_INSUFFICIENT',
+                    message: `Dòng ${line.lineNo}: kho ${line.warehouse.name} không đủ lượng để rút; hãy chọn kho khác trong khu vực.`,
+                    detail: {
+                        warehouseId: line.warehouseId,
+                        availableQty: freeAtWarehouse.plus(heldAtWarehouse).toString(),
+                        requestedQty: requestedQty.toString(),
+                    },
+                })
+            }
+
+            let remaining = requestedQty
+            const orderedMasterLines = [
+                ...masterLines.filter((held) => held.warehouseId === line.warehouseId),
+                ...masterLines.filter((held) => held.warehouseId !== line.warehouseId),
+            ]
+            for (const held of orderedMasterLines) {
+                if (!remaining.greaterThan(0)) break
+                const releasedQty = Prisma.Decimal.min(remaining, held.activeActualQty)
+                const releasedV15 =
+                    held.activeV15Qty == null || new Prisma.Decimal(held.activeActualQty).isZero()
+                        ? null
+                        : new Prisma.Decimal(held.activeV15Qty)
+                              .mul(releasedQty)
+                              .div(held.activeActualQty)
+                await this.inventory.releaseReservationLine(tx, {
+                    reservationLineId: held.id,
+                    actualQty: releasedQty,
+                    v15Qty: releasedV15,
+                    idempotencyKey: `withdrawal:${id}:transfer:${held.id}`,
+                    occurredAt: new Date(),
+                    actorId: actor.userId,
+                    reason: `Chuyển lượng giữ sang phiếu rút ${request.requestNo}`,
+                })
+                remaining = remaining.minus(releasedQty)
+            }
+        }
 
         const period = `${String(request.requestDate.getUTCFullYear()).slice(-2)}${String(request.requestDate.getUTCMonth() + 1).padStart(2, '0')}`
         const sequence = await tx.documentSequence.upsert({
@@ -471,87 +769,40 @@ export class SalesWithdrawalsService {
                 reservationNo: `GH${period}${String(sequence.currentNo).padStart(4, '0')}`,
                 legalEntityId: request.salesOrder!.legalEntityId,
                 customerPartyId: request.customerPartyId,
+                salesOrderId: request.salesOrderId,
                 withdrawalRequestId: id,
                 // A lot draw has no expiry, same as the lot order itself (nguyên tắc 2).
                 expiresAt: null,
                 note: `Giữ hàng cho yêu cầu rút ${request.requestNo}`,
-                lines: {
-                    create: request.lines.map((line, index) => ({
-                        lineNo: index + 1,
-                        warehouseId: line.warehouseId,
-                        productId: line.productId,
-                        ownerPartyId: line.warehouse.legalEntity.partyId,
-                        salesOrderLineId: line.salesOrderLineId,
-                        withdrawalRequestLineId: line.id,
-                        requestedActualQty: line.requestedQty,
-                        requestedV15Qty: line.requestedV15Qty,
-                    })),
-                },
             },
-            include: { lines: true },
+            select: { id: true },
         })
 
-        let fullyReserved = true
-        for (const reservationLine of reservation.lines) {
-            const balance = await tx.inventoryAvailabilityBalance.findUnique({
-                where: {
-                    warehouseId_productId_ownerPartyId: {
-                        warehouseId: reservationLine.warehouseId,
-                        productId: reservationLine.productId,
-                        ownerPartyId: reservationLine.ownerPartyId,
-                    },
-                },
-            })
-            const available = balance
-                ? new Prisma.Decimal(balance.onHandActualQty)
-                      .minus(balance.reservedActualQty)
-                      .minus(balance.pendingActualQty)
-                      .minus(balance.blockedActualQty)
-                : new Prisma.Decimal(0)
-            const takeQty = Prisma.Decimal.min(reservationLine.requestedActualQty, available)
-            if (!takeQty.greaterThan(0)) {
-                fullyReserved = false
-                continue
-            }
-            const attempt = await tx.inventoryReservationEvent.count({
-                where: { reservationLineId: reservationLine.id, type: ReservationEventType.ACTIVATE },
-            })
-            await this.inventory.activateReservationLine(tx, {
-                reservationLineId: reservationLine.id,
-                actualQty: takeQty,
-                v15Qty: null,
-                idempotencyKey: `withdrawal:${id}:reserve:${reservationLine.id}:${attempt}`,
-                occurredAt: new Date(),
+        let reservationLineNo = 0
+        for (const line of request.lines) {
+            const result = await this.reservations.reserveWithdrawalLine(tx, {
+                reservationId: reservation.id,
+                startLineNo: reservationLineNo,
+                warehouseId: line.warehouseId,
+                productId: line.productId,
+                ownerPartyId: line.warehouse.legalEntity.partyId,
+                salesOrderLineId: line.salesOrderLineId!,
+                withdrawalRequestLineId: line.id,
+                requestedQty: line.requestedQty,
+                requestedV15Qty: line.requestedV15Qty,
+                supplySource: line.orderLine!.supplySource,
+                supplierPartyId: line.orderLine!.preferredSupplierPartyId,
                 actorId: actor.userId,
-                reason: `Giữ hàng rút lô ${request.requestNo}`,
+                idempotencyPrefix: `withdrawal:${id}:reserve`,
             })
-            if (takeQty.lessThan(reservationLine.requestedActualQty)) fullyReserved = false
-        }
-
-        if (!fullyReserved) {
-            await tx.salesLotWithdrawalRequest.update({
-                where: { id },
-                data: { status: SalesWithdrawalStatus.RESERVED, version: { increment: 1 } },
-            })
-            await this.notificationOutbox.emit(
-                {
-                    eventType: SALES_NOTIFICATION_EVENTS.ORDER_STOCK_INSUFFICIENT,
-                    aggregateType: 'SALES_WITHDRAWAL',
-                    aggregateId: id,
-                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.ORDER_STOCK_INSUFFICIENT}:${id}:v${request.version}`,
-                    payload: {
-                        entityType: 'SALES_WITHDRAWAL',
-                        entityId: id,
-                        orderNo: request.requestNo,
-                        customerName: request.customer.name,
-                        shortageSummary: 'Kho chưa đủ hàng khả dụng cho yêu cầu rút.',
-                        recipientUserIds: request.createdById ? [request.createdById] : [],
-                        recipientPermissionCodes: [PERMISSIONS.sales.deliveryConfirm],
-                    },
-                },
-                tx,
-            )
-            return
+            reservationLineNo = result.lineNo
+            if (result.shortageQty.greaterThan(0)) {
+                throw new BadRequestException({
+                    code: 'WITHDRAWAL_FIFO_STOCK_INSUFFICIENT',
+                    message: `Dòng ${line.lineNo}: kho ${line.warehouse.name} không đủ tồn đúng mã rút/Mã NCC đã chọn.`,
+                    shortageQty: result.shortageQty.toString(),
+                })
+            }
         }
 
         // One delivery job per warehouse, exactly like a SINGLE order (spec v1.2 D1).
@@ -696,6 +947,20 @@ export class SalesWithdrawalsService {
                     where: { id: reservation.id },
                     data: { status: ReservationStatus.RELEASED, version: { increment: 1 } },
                 })
+            }
+            if (request.salesOrderId) {
+                const restored = await this.reservations.reserveOrder(
+                    tx,
+                    request.salesOrderId,
+                    actor,
+                )
+                if (!restored.fullyReserved) {
+                    throw new BadRequestException({
+                        code: 'LOT_MASTER_RESERVATION_RESTORE_FAILED',
+                        message: 'Không thể hủy phiếu rút vì chưa khôi phục đủ lượng giữ cho đơn lô.',
+                        details: restored.lines,
+                    })
+                }
             }
             await tx.salesApprovalRequest.updateMany({
                 where: { withdrawalRequestId: id, status: SalesApprovalStatus.PENDING },

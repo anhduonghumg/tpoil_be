@@ -124,7 +124,10 @@ export class SalesOrderWorkflowService {
         return contracts[0].id
     }
 
-    private linesCreateInput(dto: CreateSalesOrderDto | UpdateSalesOrderDto) {
+    private linesCreateInput(
+        dto: CreateSalesOrderDto | UpdateSalesOrderDto,
+        orderKind?: SalesOrderKind,
+    ) {
         return (dto.lines ?? []).map((line, index) => {
             // Các client cũ chỉ gửi discountAmount; coi đó là CK gốc để vẫn đọc được
             // đúng nghiệp vụ sau khi tách CK/CKDC.
@@ -145,6 +148,7 @@ export class SalesOrderWorkflowService {
                 productId: line.productId,
                 issueWarehouseId: line.issueWarehouseId ?? null,
                 receivingWarehouseId: line.receivingWarehouseId ?? null,
+                receivingWarehouseAreaId: line.receivingWarehouseAreaId ?? null,
                 orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
                 orderedV15Qty: line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
                 unitPrice: new Prisma.Decimal(line.unitPrice ?? 0),
@@ -152,12 +156,143 @@ export class SalesOrderWorkflowService {
                 discountAdjustmentAmount,
                 discountAmount,
                 supplySource: line.supplySource ?? SalesOrderSupplySource.TP,
-                vehiclePlate: line.vehiclePlate?.trim() || null,
-                driverName: line.driverName?.trim() || null,
+                // Đơn đặt lô chỉ chốt hàng và điều khoản; xe/lái xe được khai ở từng phiếu rút.
+                vehiclePlate:
+                    orderKind === SalesOrderKind.LOT ? null : line.vehiclePlate?.trim() || null,
+                driverName:
+                    orderKind === SalesOrderKind.LOT ? null : line.driverName?.trim() || null,
                 taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
                 note: line.note?.trim() || null,
             }
         })
+    }
+
+    private paymentSchedule(
+        dto: CreateSalesOrderDto | UpdateSalesOrderDto,
+        orderDate: Date,
+    ) {
+        const termType = (dto.paymentTermType as PaymentTermType | undefined) ?? PaymentTermType.SAME_DAY
+        if (termType === PaymentTermType.SAME_DAY) {
+            if (dto.paymentPlans?.length) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_NOT_APPLICABLE',
+                    message: 'Thanh toán trong ngày không được khai thêm lịch thanh toán.',
+                })
+            }
+            return { paymentTermDays: null, plans: [] }
+        }
+
+        const sourcePlans = dto.paymentPlans?.length
+            ? dto.paymentPlans
+            : dto.paymentTermDays
+              ? [
+                    {
+                        dueDate: new Date(orderDate.getTime() + dto.paymentTermDays * 86_400_000)
+                            .toISOString()
+                            .slice(0, 10),
+                        percent: 100,
+                    },
+                ]
+              : []
+        if (!sourcePlans.length) {
+            throw new BadRequestException({
+                code: 'PAYMENT_PLAN_REQUIRED',
+                message: 'Thanh toán theo lịch phải có ít nhất một đợt thanh toán.',
+            })
+        }
+
+        let percentTotal = new Prisma.Decimal(0)
+        let amountTotal = new Prisma.Decimal(0)
+        let usesPercent = false
+        let usesAmount = false
+        const orderDay = new Date(`${orderDate.toISOString().slice(0, 10)}T00:00:00.000Z`)
+        const plans = sourcePlans.map((plan, index) => {
+            if (!plan.dueDate) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_DUE_DATE_REQUIRED',
+                    message: `Đợt thanh toán ${index + 1} chưa có ngày thanh toán.`,
+                })
+            }
+            const dueDate = new Date(`${plan.dueDate.slice(0, 10)}T00:00:00.000Z`)
+            if (Number.isNaN(dueDate.getTime()) || dueDate < orderDay) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_DUE_DATE_INVALID',
+                    message: `Ngày thanh toán đợt ${index + 1} không được trước ngày đặt hàng.`,
+                })
+            }
+
+            const hasPercent = plan.percent != null
+            const hasAmount = plan.amount != null
+            if (hasPercent === hasAmount) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_VALUE_INVALID',
+                    message: `Đợt thanh toán ${index + 1} phải nhập đúng một giá trị tỷ lệ hoặc số tiền.`,
+                })
+            }
+            const percent = hasPercent ? new Prisma.Decimal(plan.percent!) : null
+            const amount = hasAmount ? new Prisma.Decimal(plan.amount!) : null
+            if ((percent && !percent.greaterThan(0)) || (amount && !amount.greaterThan(0))) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_VALUE_INVALID',
+                    message: `Giá trị đợt thanh toán ${index + 1} phải lớn hơn 0.`,
+                })
+            }
+            if (percent && percent.greaterThan(100)) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_PERCENT_INVALID',
+                    message: `Tỷ lệ đợt thanh toán ${index + 1} không được lớn hơn 100%.`,
+                })
+            }
+            if (percent) {
+                usesPercent = true
+                percentTotal = percentTotal.plus(percent)
+            }
+            if (amount) {
+                usesAmount = true
+                amountTotal = amountTotal.plus(amount)
+            }
+            return {
+                dueDate,
+                percent,
+                amount,
+                note: plan.note?.trim() || null,
+                sortOrder: index,
+            }
+        })
+
+        if (usesPercent && usesAmount) {
+            throw new BadRequestException({
+                code: 'PAYMENT_PLAN_MIXED_VALUE_TYPES',
+                message: 'Một lịch thanh toán chỉ được dùng tỷ lệ hoặc số tiền, không trộn hai cách.',
+            })
+        }
+        if (usesPercent && !percentTotal.equals(100)) {
+            throw new BadRequestException({
+                code: 'PAYMENT_PLAN_PERCENT_TOTAL_INVALID',
+                message: `Tổng tỷ lệ lịch thanh toán phải bằng 100% (hiện tại ${percentTotal.toString()}%).`,
+            })
+        }
+        if (usesAmount) {
+            const orderTotal = (dto.lines ?? []).reduce((sum, line) => {
+                const qty = new Prisma.Decimal(line.orderedActualQty ?? 0)
+                const price = new Prisma.Decimal(line.unitPrice ?? 0)
+                const discount = new Prisma.Decimal(
+                    line.discountBaseAmount ?? line.discountAmount ?? 0,
+                ).plus(line.discountAdjustmentAmount ?? 0)
+                return sum.plus(qty.mul(price.minus(discount)))
+            }, new Prisma.Decimal(0))
+            if (!amountTotal.equals(orderTotal)) {
+                throw new BadRequestException({
+                    code: 'PAYMENT_PLAN_AMOUNT_TOTAL_INVALID',
+                    message: 'Tổng tiền các đợt thanh toán phải bằng giá trị đơn hàng.',
+                })
+            }
+        }
+
+        const paymentTermDays = Math.max(
+            ...plans.map((plan) => Math.round((plan.dueDate.getTime() - orderDay.getTime()) / 86_400_000)),
+        )
+        return { paymentTermDays, plans }
     }
 
     /**
@@ -168,23 +303,59 @@ export class SalesOrderWorkflowService {
         const warehouseIds = [
             ...new Set((dto.lines ?? []).map((line) => line.issueWarehouseId).filter(Boolean)),
         ] as string[]
-        if (!warehouseIds.length) {
+        const areaIds = [
+            ...new Set(
+                (dto.lines ?? []).map((line) => line.receivingWarehouseAreaId).filter(Boolean),
+            ),
+        ] as string[]
+        for (const [index, line] of (dto.lines ?? []).entries()) {
+            if (Boolean(line.issueWarehouseId) === Boolean(line.receivingWarehouseAreaId)) {
+                throw new BadRequestException({
+                    code: 'RECEIVING_SCOPE_REQUIRED',
+                    message: `Dòng ${index + 1} phải chọn đúng một kho nhận: khu vực hoặc kho cụ thể.`,
+                })
+            }
+        }
+        if (!warehouseIds.length && !areaIds.length) {
             throw new BadRequestException({
                 code: 'ISSUE_WAREHOUSE_REQUIRED',
-                message: 'Đơn bán nội bộ phải chọn kho xuất cho từng dòng.',
+                message: 'Đơn bán nội bộ phải chọn kho nhận cho từng dòng.',
             })
         }
-        const warehouses = await this.prisma.warehouse.findMany({
-            where: { id: { in: warehouseIds } },
-            select: { id: true, legalEntityId: true },
-        })
+        const [warehouses, areas] = await Promise.all([
+            this.prisma.warehouse.findMany({
+                where: { id: { in: warehouseIds }, status: MasterStatus.ACTIVE },
+                select: { id: true, legalEntityId: true },
+            }),
+            this.prisma.warehouseArea.findMany({
+                where: { id: { in: areaIds }, status: MasterStatus.ACTIVE },
+                select: {
+                    id: true,
+                    warehouses: {
+                        where: { status: MasterStatus.ACTIVE, isOperationalWarehouse: true },
+                        select: { legalEntityId: true },
+                    },
+                },
+            }),
+        ])
         if (warehouses.length !== warehouseIds.length) {
             throw new BadRequestException({
                 code: 'ISSUE_WAREHOUSE_INVALID',
                 message: 'Kho xuất không tồn tại hoặc không hoạt động.',
             })
         }
-        const legalEntityIds = [...new Set(warehouses.map((row) => row.legalEntityId))]
+        if (areas.length !== areaIds.length || areas.some((area) => !area.warehouses.length)) {
+            throw new BadRequestException({
+                code: 'RECEIVING_WAREHOUSE_AREA_INVALID',
+                message: 'Khu vực nhận không tồn tại hoặc chưa có kho vận hành.',
+            })
+        }
+        const legalEntityIds = [
+            ...new Set([
+                ...warehouses.map((row) => row.legalEntityId),
+                ...areas.flatMap((area) => area.warehouses.map((row) => row.legalEntityId)),
+            ]),
+        ]
         if (legalEntityIds.length > 1) {
             throw new BadRequestException({
                 code: 'ISSUE_WAREHOUSE_LEGAL_ENTITY_MISMATCH',
@@ -214,11 +385,17 @@ export class SalesOrderWorkflowService {
         const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
         if (!dto.lines?.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+        // Chặn ngay, không để đơn lưu xong rồi mới kẹt im ở nháp vì thiếu công bố giá.
+        await this.assertDiscountsAnnounced(
+            dto.lines.map((line, index) => ({ lineNo: index + 1, ...line })),
+            legalEntityId,
+        )
         const contractId = await this.resolveContractForCreate(
             dto.customerPartyId,
             orderDate,
             dto.contractId,
         )
+        const paymentSchedule = this.paymentSchedule(dto, orderDate)
 
         const orderNo = await this.orders.generateOrderNo(dto.customerPartyId, orderDate)
 
@@ -241,9 +418,12 @@ export class SalesOrderWorkflowService {
                               SalesLotInvoiceMode.ON_WITHDRAWAL)
                             : null,
                     paymentTermType: (dto.paymentTermType as PaymentTermType) ?? PaymentTermType.SAME_DAY,
-                    paymentTermDays: dto.paymentTermDays ?? null,
+                    paymentTermDays: paymentSchedule.paymentTermDays,
+                    paymentPlans: paymentSchedule.plans.length
+                        ? { create: paymentSchedule.plans }
+                        : undefined,
                     createdById: actor.userId,
-                    lines: { create: this.linesCreateInput(dto) },
+                    lines: { create: this.linesCreateInput(dto, kind) },
                 },
                 select: { id: true, status: true },
             })
@@ -288,7 +468,16 @@ export class SalesOrderWorkflowService {
         await this.prisma.$transaction(async (tx) => {
             const order = await tx.salesOrder.findUnique({
                 where: { id },
-                select: { id: true, kind: true, status: true, version: true },
+                select: {
+                    id: true,
+                    kind: true,
+                    status: true,
+                    version: true,
+                    orderDate: true,
+                    legalEntityId: true,
+                    paymentTermType: true,
+                    paymentTermDays: true,
+                },
             })
             if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
             this.assertInternalKind(order.kind)
@@ -320,8 +509,31 @@ export class SalesOrderWorkflowService {
                     ? { connect: { id: dto.contractId } }
                     : { disconnect: true }
             }
-            if (dto.paymentTermType !== undefined) data.paymentTermType = dto.paymentTermType as PaymentTermType
-            if (dto.paymentTermDays !== undefined) data.paymentTermDays = dto.paymentTermDays ?? null
+            const rebuildPaymentSchedule =
+                dto.paymentPlans !== undefined ||
+                dto.paymentTermType !== undefined ||
+                dto.paymentTermDays !== undefined
+            if (rebuildPaymentSchedule) {
+                const effectiveOrderDate = dto.orderDate ? new Date(dto.orderDate) : order.orderDate
+                const schedule = this.paymentSchedule(
+                    {
+                        ...dto,
+                        paymentTermType: dto.paymentTermType ?? order.paymentTermType,
+                        paymentTermDays:
+                            dto.paymentTermDays === undefined ? (order.paymentTermDays ?? undefined) : dto.paymentTermDays ?? undefined,
+                    },
+                    effectiveOrderDate,
+                )
+                data.paymentTermType =
+                    (dto.paymentTermType as PaymentTermType | undefined) ?? order.paymentTermType
+                data.paymentTermDays = schedule.paymentTermDays
+                await tx.salesOrderPaymentPlan.deleteMany({ where: { salesOrderId: id } })
+                if (schedule.plans.length) {
+                    await tx.salesOrderPaymentPlan.createMany({
+                        data: schedule.plans.map((plan) => ({ ...plan, salesOrderId: id })),
+                    })
+                }
+            }
             if (dto.lotInvoiceMode !== undefined) {
                 if (order.kind !== SalesOrderKind.LOT) {
                     throw new BadRequestException({
@@ -336,9 +548,19 @@ export class SalesOrderWorkflowService {
 
             if (dto.lines) {
                 if (!dto.lines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+                // Cùng luật như lúc tạo: sửa xong mà vẫn thiếu công bố giá thì chặn tại
+                // đây, đừng để đơn lưu được rồi lại kẹt im ở nháp.
+                await this.assertDiscountsAnnounced(
+                    dto.lines.map((line, index) => ({ lineNo: index + 1, ...line })),
+                    order.legalEntityId,
+                    tx,
+                )
                 await tx.salesOrderLine.deleteMany({ where: { salesOrderId: id } })
                 await tx.salesOrderLine.createMany({
-                    data: this.linesCreateInput(dto).map((line) => ({ ...line, salesOrderId: id })),
+                    data: this.linesCreateInput(dto, order.kind).map((line) => ({
+                        ...line,
+                        salesOrderId: id,
+                    })),
                 })
             }
 
@@ -449,6 +671,111 @@ export class SalesOrderWorkflowService {
         return { ...payload, policyHash } as unknown as Prisma.InputJsonObject
     }
 
+    /**
+     * "Phải có thông báo chiết khấu thì mới cho bán hàng" (docs/thongbaogia.md §1).
+     *
+     * Chặn ngay từ lúc lưu chứ không đợi tới bước gửi duyệt: đơn lưu được rồi mới hỏng ở
+     * submit thì lỗi bị submitQuietly nuốt (cố tình, để không mất đơn), Sale tưởng đã xong
+     * mà đơn nằm im ở nháp. Dùng chung một hàm cho cả lúc lưu lẫn lúc gửi duyệt để hai nơi
+     * không bao giờ nói khác nhau.
+     *
+     * Dòng chốt tới khu vực thì chỉ cần MỘT kho vận hành trong khu vực đã có công bố.
+     */
+    private async assertDiscountsAnnounced(
+        lines: Array<{
+            lineNo: number
+            productId: string
+            issueWarehouseId?: string | null
+            receivingWarehouseAreaId?: string | null
+        }>,
+        legalEntityId: string,
+        db: Prisma.TransactionClient | PrismaService = this.prisma,
+    ) {
+        const areaIds = [
+            ...new Set(lines.map((line) => line.receivingWarehouseAreaId).filter(Boolean)),
+        ] as string[]
+        const areas = areaIds.length
+            ? await db.warehouseArea.findMany({
+                  where: { id: { in: areaIds } },
+                  select: {
+                      id: true,
+                      name: true,
+                      warehouses: {
+                          where: {
+                              status: MasterStatus.ACTIVE,
+                              isOperationalWarehouse: true,
+                              legalEntityId,
+                          },
+                          select: { id: true },
+                      },
+                  },
+              })
+            : []
+        const areaById = new Map(areas.map((area) => [area.id, area]))
+        const candidatesOf = (line: (typeof lines)[number]) =>
+            line.issueWarehouseId
+                ? [line.issueWarehouseId]
+                : (areaById.get(line.receivingWarehouseAreaId!)?.warehouses ?? []).map(
+                      (warehouse) => warehouse.id,
+                  )
+
+        const announced = await this.discounts.resolveDiscounts(
+            lines.flatMap((line) =>
+                candidatesOf(line).map((warehouseId) => ({ warehouseId, productId: line.productId })),
+            ),
+            new Date(),
+            db,
+        )
+        const failing = lines.filter(
+            (line) =>
+                !candidatesOf(line).some((warehouseId) =>
+                    announced.has(`${warehouseId}:${line.productId}`),
+                ),
+        )
+        if (!failing.length) return
+
+        // Chỉ tra tên cho những dòng hỏng — thông báo phải chỉ đúng mặt hàng và nơi nhận.
+        const [products, warehouses] = await Promise.all([
+            db.product.findMany({
+                where: { id: { in: [...new Set(failing.map((line) => line.productId))] } },
+                select: { id: true, code: true, name: true },
+            }),
+            db.warehouse.findMany({
+                where: {
+                    id: {
+                        in: [
+                            ...new Set(failing.map((line) => line.issueWarehouseId).filter(Boolean)),
+                        ] as string[],
+                    },
+                },
+                select: { id: true, name: true },
+            }),
+        ])
+        const productById = new Map(products.map((row) => [row.id, row]))
+        const warehouseById = new Map(warehouses.map((row) => [row.id, row]))
+        const detail = failing.map((line) => {
+            const product = productById.get(line.productId)
+            const location = line.issueWarehouseId
+                ? (warehouseById.get(line.issueWarehouseId)?.name ?? '')
+                : `khu vực ${areaById.get(line.receivingWarehouseAreaId!)?.name ?? ''}`
+            return {
+                lineNo: line.lineNo,
+                productId: line.productId,
+                productCode: product?.code ?? null,
+                warehouseId: line.issueWarehouseId ?? null,
+                warehouseAreaId: line.receivingWarehouseAreaId ?? null,
+                text: `dòng ${line.lineNo} (${product?.code ?? product?.name ?? ''} tại ${location})`,
+            }
+        })
+        throw new BadRequestException({
+            code: 'DISCOUNT_NOT_ANNOUNCED',
+            message: `Chưa có thông báo chiết khấu cho ${detail
+                .map((row) => row.text)
+                .join('; ')} — vận hành phải ra thông báo trước khi bán.`,
+            detail: { lines: detail },
+        })
+    }
+
     private async validateSubmittable(
         tx: Prisma.TransactionClient,
         order: {
@@ -461,6 +788,7 @@ export class SalesOrderWorkflowService {
                 lineNo: number
                 productId: string
                 issueWarehouseId: string | null
+                receivingWarehouseAreaId: string | null
                 unitPrice: Prisma.Decimal
                 vehiclePlate: string | null
                 driverName: string | null
@@ -469,10 +797,10 @@ export class SalesOrderWorkflowService {
     ) {
         if (!order.lines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
         for (const line of order.lines) {
-            if (!line.issueWarehouseId) {
+            if (Boolean(line.issueWarehouseId) === Boolean(line.receivingWarehouseAreaId)) {
                 throw new BadRequestException({
-                    code: 'ISSUE_WAREHOUSE_REQUIRED',
-                    message: `Dòng ${line.lineNo} chưa chọn kho nhận.`,
+                    code: 'RECEIVING_SCOPE_REQUIRED',
+                    message: `Dòng ${line.lineNo} phải chọn đúng một khu vực hoặc kho nhận cụ thể.`,
                 })
             }
             if (!line.unitPrice.greaterThan(0)) {
@@ -488,12 +816,35 @@ export class SalesOrderWorkflowService {
                 })
             }
         }
-        const warehouseIds = [...new Set(order.lines.map((line) => line.issueWarehouseId!))]
-        const warehouses = await tx.warehouse.findMany({
-            where: { id: { in: warehouseIds } },
-            select: { id: true, name: true, status: true, legalEntityId: true, areaId: true },
-        })
+        const warehouseIds = [
+            ...new Set(order.lines.map((line) => line.issueWarehouseId).filter(Boolean)),
+        ] as string[]
+        const areaIds = [
+            ...new Set(order.lines.map((line) => line.receivingWarehouseAreaId).filter(Boolean)),
+        ] as string[]
+        const [warehouses, areas] = await Promise.all([
+            tx.warehouse.findMany({
+                where: { id: { in: warehouseIds } },
+                select: { id: true, name: true, status: true, legalEntityId: true, areaId: true },
+            }),
+            tx.warehouseArea.findMany({
+                where: { id: { in: areaIds }, status: MasterStatus.ACTIVE },
+                select: {
+                    id: true,
+                    name: true,
+                    warehouses: {
+                        where: {
+                            status: MasterStatus.ACTIVE,
+                            isOperationalWarehouse: true,
+                            legalEntityId: order.legalEntityId,
+                        },
+                        select: { id: true, name: true, legalEntityId: true },
+                    },
+                },
+            }),
+        ])
         const byId = new Map(warehouses.map((row) => [row.id, row]))
+        const areaById = new Map(areas.map((row) => [row.id, row]))
         for (const warehouseId of warehouseIds) {
             const warehouse = byId.get(warehouseId)
             if (!warehouse || warehouse.status !== MasterStatus.ACTIVE) {
@@ -517,6 +868,16 @@ export class SalesOrderWorkflowService {
                 })
             }
         }
+        for (const areaId of areaIds) {
+            const area = areaById.get(areaId)
+            if (!area?.warehouses.length) {
+                throw new BadRequestException({
+                    code: 'RECEIVING_WAREHOUSE_AREA_INVALID',
+                    message: `Khu vực nhận ${area?.name ?? ''} chưa có kho vận hành phù hợp với pháp nhân của đơn.`,
+                    detail: { areaId },
+                })
+            }
+        }
 
         // Chỉ bán cho TNPP (mua bán hai chiều) và TNDL (chỉ bán cho họ). Xét theo phân
         // loại TẠI NGÀY ĐƠN, vì một đối tác có thể đổi loại theo thời gian.
@@ -528,23 +889,7 @@ export class SalesOrderWorkflowService {
         // Tra theo THỜI ĐIỂM gửi duyệt, không phải orderDate: orderDate là cột DATE nên
         // luôn là 00:00, mà chiết khấu thì đổi trong ngày (14h, 17h...). Lấy orderDate sẽ
         // khiến bản công bố lúc 14h không bao giờ áp cho đơn cùng ngày.
-        const discounts = await this.discounts.resolveDiscounts(
-            order.lines.map((line) => ({
-                warehouseId: line.issueWarehouseId!,
-                productId: line.productId,
-            })),
-            new Date(),
-            tx,
-        )
-        for (const line of order.lines) {
-            if (discounts.has(`${line.issueWarehouseId}:${line.productId}`)) continue
-            const warehouse = byId.get(line.issueWarehouseId!)
-            throw new BadRequestException({
-                code: 'DISCOUNT_NOT_ANNOUNCED',
-                message: `Dòng ${line.lineNo}: kho ${warehouse?.name ?? ''} chưa có thông báo chiết khấu cho mặt hàng này tại thời điểm đơn — vận hành phải ra thông báo trước khi bán.`,
-                detail: { lineNo: line.lineNo, warehouseId: line.issueWarehouseId },
-            })
-        }
+        await this.assertDiscountsAnnounced(order.lines, order.legalEntityId, tx)
     }
 
     async submit(id: string, actor: SalesActor) {
@@ -720,8 +1065,21 @@ export class SalesOrderWorkflowService {
             })
         }
         if (order.kind === SalesOrderKind.LOT) {
-            // A lot order commits a quantity; it holds nothing until a draw is requested.
-            return this.lots.openPositions(tx, orderId)
+            // Đơn lô là cam kết cả lô cho khách: giữ đủ ngay khi duyệt. Khi khách rút,
+            // lượng giữ này được chuyển sang yêu cầu rút chứ không giữ trùng lần hai.
+            const outcome = await this.reservations.reserveOrder(tx, orderId, actor)
+            if (!outcome.fullyReserved) {
+                throw new BadRequestException({
+                    code: 'INSUFFICIENT_AVAILABLE_STOCK',
+                    message: `Không thể duyệt vì tồn kho chưa đủ: ${outcome.lines
+                        .filter((line) => !new Prisma.Decimal(line.shortageQty).isZero())
+                        .map((line) => `${line.productName} tại ${line.warehouseName} thiếu ${line.shortageQty}`)
+                        .join('; ')}`,
+                    details: outcome.lines,
+                })
+            }
+            await this.lots.openPositions(tx, orderId)
+            return outcome
         }
         const outcome = await this.reserveAndDispatch(tx, orderId, actor)
         if (!outcome.fullyReserved) {
@@ -1008,7 +1366,37 @@ export class SalesOrderWorkflowService {
                     message: 'Đơn đã có lệnh xuất kho thành công — phải xử lý bằng chứng từ điều chỉnh.',
                 })
             }
+            const liveInvoices = await tx.salesInvoice.findMany({
+                where: {
+                    status: { not: 'CANCELLED' },
+                    OR: [
+                        { salesOrderId: id },
+                        { withdrawalRequest: { salesOrderId: id } },
+                    ],
+                },
+                select: { id: true, invoiceNoInternal: true, status: true },
+            })
+            const nonDraftInvoice = liveInvoices.find((invoice) => invoice.status !== 'DRAFT')
+            if (nonDraftInvoice) {
+                throw new BadRequestException({
+                    code: 'SALES_ORDER_HAS_EFFECTIVE_INVOICE',
+                    message: `Đơn đã có hóa đơn ${nonDraftInvoice.invoiceNoInternal} ở trạng thái ${nonDraftInvoice.status}. Phải xử lý hóa đơn trước khi hủy đơn.`,
+                    detail: nonDraftInvoice,
+                })
+            }
             const cancelReason = reason.trim()
+            if (liveInvoices.length) {
+                await tx.salesInvoice.updateMany({
+                    where: { id: { in: liveInvoices.map((invoice) => invoice.id) }, status: 'DRAFT' },
+                    data: {
+                        status: 'CANCELLED',
+                        cancelledAt: new Date(),
+                        cancelledById: actor.userId,
+                        cancelReason,
+                        version: { increment: 1 },
+                    },
+                })
+            }
             await this.deliveries.voidOpenDeliveries(tx, id, actor, cancelReason)
             await this.reservations.releaseOrder(tx, id, actor, cancelReason)
             await tx.salesApprovalRequest.updateMany({

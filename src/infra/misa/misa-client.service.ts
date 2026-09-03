@@ -1,8 +1,12 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common'
+import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { randomUUID } from 'crypto'
+import { amountInWords } from './amount-in-words'
 
 export type MisaInvoiceLine = {
     lineNo: number
+    /** Nhãn thuế đóng băng lúc dựng hóa đơn; null thì suy từ taxRate. */
+    taxRateName?: string | null
     description: string
     uom: string
     qty: string
@@ -34,6 +38,8 @@ export type MisaPublishResult = {
     ok: boolean
     /** Present when MISA accepted the invoice. */
     invoiceNo?: string
+    /** Mã giao dịch DO MISA sinh (khác RefID của mình) — cần khi làm việc với hỗ trợ MISA. */
+    misaTransactionId?: string
     templateNo?: string
     serial?: string
     transactionId?: string
@@ -70,13 +76,54 @@ function parseEmbedded<T>(value: unknown): T | null {
     }
 }
 
-/** MISA identifies VAT by label ("10%", "KCT"), not by a number. */
+/**
+ * Nhãn thuế suất MISA chấp nhận — đúng danh sách trong ô chọn của meInvoice.
+ * KCT = không chịu thuế, KKKNT = không kê khai nộp thuế.
+ */
+const MISA_VAT_RATE_NAMES: readonly string[] = ['0%', '5%', '8%', '10%']
+const MISA_VAT_SPECIAL_NAMES: readonly string[] = ['KCT', 'KKKNT']
+
+/**
+ * MISA nhận thuế suất theo NHÃN chứ không theo số, và chỉ nhận đúng sáu nhãn trên. Thuế
+ * suất ngoài danh sách (7%, 2%, 7,5%…) bị từ chối — mà bảng thuế của mình cho nhập bất
+ * kỳ số nào từ 0 đến 100, nên chặn ngay tại đây với câu đọc được, thay vì để hóa đơn đi
+ * tới MISA rồi nhận về một mã lỗi không ai luận ra.
+ */
 export function vatRateName(rate: string | number | null | undefined) {
     if (rate == null || rate === '') return 'KCT'
+    // Cho phép truyền thẳng nhãn đặc biệt, vì hai trường hợp này không quy ra số được.
+    if (typeof rate === 'string') {
+        const label = rate.trim().toUpperCase()
+        if (MISA_VAT_SPECIAL_NAMES.includes(label)) return label
+    }
     const fraction = Number(rate)
     if (!Number.isFinite(fraction)) return 'KCT'
-    if (fraction === 0) return '0%'
-    return `${Number((fraction * 100).toFixed(4))}%`
+    const name = `${Number((fraction * 100).toFixed(4))}%`
+    if (!MISA_VAT_RATE_NAMES.includes(name)) {
+        throw new BadRequestException({
+            code: 'MISA_VAT_RATE_UNSUPPORTED',
+            message: `Thuế suất ${name} không phát hành được: MISA chỉ nhận ${MISA_VAT_RATE_NAMES.join(', ')}, KCT hoặc KKKNT.`,
+        })
+    }
+    return name
+}
+
+export type MisaConfig = {
+    baseUrl: string
+    taxCode: string
+    username: string
+    password: string
+    appId: string
+    templateNo: string
+    serial: string
+    signType: number
+    paymentMethod: string
+    publishMinGapMs: number
+    mock: boolean
+    /** Cấu hình đang lấy từ đâu — để màn cấu hình nói rõ với người dùng. */
+    source: 'DATABASE' | 'ENV'
+    /** Môi trường của dòng đang dùng; ENV thì suy từ địa chỉ API. */
+    environment: 'TEST' | 'PRODUCTION'
 }
 
 /**
@@ -100,21 +147,74 @@ export function vatRateName(rate: string | number | null | undefined) {
 export class MisaClientService {
     private readonly logger = new Logger(MisaClientService.name)
     private token: { value: string; expiresAt: number } | null = null
+    /** Cấu hình đọc từ DB, nhớ tạm để không truy vấn lại ở mỗi dòng hóa đơn. */
+    private cachedConfig: { value: MisaConfig; at: number } | null = null
+    private static readonly CONFIG_TTL_MS = 30_000
+
     /** Mock-mode ledger so a "did this already publish?" query behaves like the real thing. */
     private readonly mockPublished = new Map<string, MisaStatusResult>()
     private lastPublishAt = 0
 
+    constructor(private readonly prisma: PrismaService) {}
+
     /**
-     * Mock when credentials are missing, or when MISA_MOCK is set explicitly — tests and demos
-     * must be able to run the sales flow without touching a real invoicing system.
+     * Cấu hình lấy từ bảng InvoiceProviderConfig; chưa có dòng nào thì lùi về biến môi
+     * trường, để hệ thống đang chạy không đứt trước khi ai đó bấm lưu lần đầu.
      */
-    get isMock() {
-        if (process.env.MISA_MOCK === '1') return true
-        return !process.env.MISA_BASE_URL || !process.env.MISA_APP_ID
+    async config(): Promise<MisaConfig> {
+        const now = Date.now()
+        if (this.cachedConfig && now - this.cachedConfig.at < MisaClientService.CONFIG_TTL_MS) {
+            return this.cachedConfig.value
+        }
+
+        // Đúng một dòng active; chưa có dòng nào thì lùi về biến môi trường.
+        const row = await this.prisma.invoiceProviderConfig.findFirst({ where: { active: true } })
+        const value: MisaConfig = row
+            ? {
+                  baseUrl: row.baseUrl.replace(/\/+$/, ''),
+                  taxCode: row.taxCode,
+                  username: row.username,
+                  password: row.password,
+                  appId: row.appId,
+                  templateNo: row.templateNo,
+                  serial: row.serial,
+                  signType: row.signType,
+                  paymentMethod: row.paymentMethod,
+                  publishMinGapMs: row.publishMinGapMs,
+                  // Thiếu thông tin kết nối thì buộc phải giả lập, không gọi mù ra ngoài.
+                  mock: row.mock || !row.baseUrl || !row.appId,
+                  source: 'DATABASE',
+                  environment: row.environment,
+              }
+            : {
+                  baseUrl: (process.env.MISA_BASE_URL ?? '').replace(/\/+$/, ''),
+                  taxCode: process.env.MISA_TAX_CODE ?? '',
+                  username: process.env.MISA_USERNAME ?? '',
+                  password: process.env.MISA_PASSWORD ?? '',
+                  appId: process.env.MISA_APP_ID ?? '',
+                  templateNo: process.env.MISA_TEMPLATE_NO ?? '1/001',
+                  serial: process.env.MISA_SERIAL ?? 'C25MOCK',
+                  signType: Number(process.env.MISA_SIGN_TYPE ?? 1),
+                  paymentMethod: process.env.MISA_PAYMENT_METHOD ?? 'TM/CK',
+                  publishMinGapMs: Number(process.env.MISA_PUBLISH_MIN_GAP_MS ?? 3000),
+                  mock:
+                      process.env.MISA_MOCK === '1' ||
+                      !process.env.MISA_BASE_URL ||
+                      !process.env.MISA_APP_ID,
+                  source: 'ENV',
+                  environment: (process.env.MISA_BASE_URL ?? '').includes('testapi.')
+                      ? 'TEST'
+                      : 'PRODUCTION',
+              }
+
+        this.cachedConfig = { value, at: now }
+        return value
     }
 
-    private get baseUrl() {
-        return (process.env.MISA_BASE_URL ?? '').replace(/\/+$/, '')
+    /** Gọi ngay sau khi lưu cấu hình để lần dùng kế tiếp đọc lại từ DB. */
+    invalidateConfigCache() {
+        this.cachedConfig = null
+        this.token = null
     }
 
     /** Secrets must never reach the issuance log. */
@@ -146,17 +246,17 @@ export class MisaClientService {
      * The bearer is long lived (MISA documents ~14 days) and the vendor asks that it be
      * fetched only at session start, so it is cached here rather than per request.
      */
-    private async authenticate(): Promise<string> {
+    private async authenticate(cfg: MisaConfig): Promise<string> {
         if (this.token && this.token.expiresAt > Date.now() + 60_000) return this.token.value
 
-        const response = await fetch(`${this.baseUrl}/auth/token`, {
+        const response = await fetch(`${cfg.baseUrl}/auth/token`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                appid: process.env.MISA_APP_ID,
-                taxcode: process.env.MISA_TAX_CODE,
-                username: process.env.MISA_USERNAME,
-                password: process.env.MISA_PASSWORD,
+                appid: cfg.appId,
+                taxcode: cfg.taxCode,
+                username: cfg.username,
+                password: cfg.password,
             }),
         })
         const text = await response.text()
@@ -200,9 +300,9 @@ export class MisaClientService {
         }
     }
 
-    private async call(path: string, payload: unknown) {
-        const token = await this.authenticate()
-        const response = await fetch(`${this.baseUrl}${path}`, {
+    private async call(cfg: MisaConfig, path: string, payload: unknown) {
+        const token = await this.authenticate(cfg)
+        const response = await fetch(`${cfg.baseUrl}${path}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -222,20 +322,102 @@ export class MisaClientService {
     }
 
     /** MISA asks for at least ~3s between consecutive publishes on the same series. */
-    private async respectPublishSpacing() {
-        const minGapMs = Number(process.env.MISA_PUBLISH_MIN_GAP_MS ?? 3000)
+    private async respectPublishSpacing(cfg: MisaConfig) {
+        const minGapMs = cfg.publishMinGapMs
         const waitMs = this.lastPublishAt + minGapMs - Date.now()
         if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs))
         this.lastPublishAt = Date.now()
     }
 
+    /** Dựng khối InvoiceData dùng chung cho cả lập nháp lẫn phát hành. */
+    private buildInvoicePayload(cfg: MisaConfig, request: MisaPublishRequest) {
+        // MISA wants each money field twice: OC = original currency, plain = base currency.
+        // Only VND is in scope today (exchange rate 1), so the two are equal.
+        const numeric = (value: string) => Number(value)
+        // Tiền hàng sau chiết khấu, gộp từ chính các dòng — không lấy subtotal trừ đi
+        // discountTotal, để đầu hóa đơn luôn khớp đúng tổng các dòng bên dưới.
+        const netTotal = request.lines.reduce((sum, line) => sum + numeric(line.netAmount), 0)
+        const invoice = {
+            RefID: request.transactionId,
+            InvTemplateNo: cfg.templateNo,
+            InvSeries: cfg.serial,
+            // Tài liệu tích hợp nhận ngày trần "YYYY-MM-DD"; đính thêm giờ là thừa và
+            // dễ bị đọc lệch một ngày.
+            InvDate: request.invoiceDate,
+            CurrencyCode: request.currency,
+            ExchangeRate: 1,
+            PaymentMethodName: cfg.paymentMethod,
+            BuyerLegalName: request.buyerName,
+            BuyerTaxCode: request.buyerTaxCode ?? '',
+            BuyerAddress: request.buyerAddress ?? '',
+            BuyerEmail: request.buyerEmail ?? '',
+            // Hóa đơn KHÔNG thể hiện chiết khấu: đơn giá đưa lên MISA đã là giá sau chiết
+            // khấu, nên tiền hàng bằng luôn tiền sau chiết khấu và dòng chiết khấu bằng 0.
+            // Tổng thanh toán không đổi, chỉ khác cách trình bày trên tờ hóa đơn.
+            TotalSaleAmount: netTotal,
+            TotalSaleAmountOC: netTotal,
+            TotalDiscountAmount: 0,
+            TotalDiscountAmountOC: 0,
+            TotalAmountWithoutVAT: netTotal,
+            TotalAmountWithoutVATOC: netTotal,
+            TotalVATAmount: numeric(request.taxTotal),
+            TotalVATAmountOC: numeric(request.taxTotal),
+            TotalAmount: numeric(request.grandTotal),
+            TotalAmountOC: numeric(request.grandTotal),
+            // MISA in nguyên văn dòng chữ này lên hóa đơn, nên mình phải tự dựng.
+            TotalAmountInWords: amountInWords(request.grandTotal),
+            // Per-rate summary block; MISA rejects the invoice without it.
+            TaxRateInfo: this.taxRateSummary(request.lines),
+            OriginalInvoiceDetail: request.lines.map((line) => {
+                const qty = numeric(line.qty)
+                const net = numeric(line.netAmount)
+                const tax = numeric(line.taxAmount)
+                /*
+                 * Đơn giá đưa lên MISA là giá ĐÃ TRỪ chiết khấu, suy ngược từ thành tiền:
+                 * netAmount = qty × (đơn giá gốc − chiết khấu mỗi đơn vị), nên net / qty trả
+                 * lại đúng đơn giá sau chiết khấu. Làm tròn 8 chữ số đúng bằng độ chính xác
+                 * cột unitPrice trong CSDL, tránh sai số dấu phẩy động làm lệch
+                 * Quantity × UnitPrice so với Amount và bị MISA từ chối.
+                 */
+                const netUnitPrice = qty === 0 ? 0 : Number((net / qty).toFixed(8))
+                return {
+                    LineNumber: line.lineNo,
+                    SortOrder: line.lineNo,
+                    ItemType: 1,
+                    ItemName: line.description,
+                    UnitName: line.uom,
+                    Quantity: qty,
+                    UnitPrice: netUnitPrice,
+                    UnitPriceOC: netUnitPrice,
+                    Amount: net,
+                    AmountOC: net,
+                    AmountWithoutVAT: net,
+                    AmountWithoutVATOC: net,
+                    // Chiết khấu đã nằm trong đơn giá, không hiện thành dòng riêng.
+                    DiscountRate: 0,
+                    DiscountAmount: 0,
+                    DiscountAmountOC: 0,
+                    VATRateName: line.taxRateName ?? vatRateName(line.taxRate),
+                    VATAmount: tax,
+                    VATAmountOC: tax,
+                    TotalAmount: net + tax,
+                    TotalAmountOC: net + tax,
+                }
+            }),
+        }
+
+        return invoice
+    }
+
+
     async publish(request: MisaPublishRequest): Promise<MisaPublishResult> {
-        if (this.isMock) {
+        const cfg = await this.config()
+        if (cfg.mock) {
             const result: MisaStatusResult = {
                 published: true,
                 invoiceNo: `MOCK-${request.transactionId}`,
-                templateNo: process.env.MISA_TEMPLATE_NO ?? '1/001',
-                serial: process.env.MISA_SERIAL ?? 'C25MOCK',
+                templateNo: cfg.templateNo,
+                serial: cfg.serial,
             }
             this.mockPublished.set(request.transactionId, result)
             this.logger.debug(`MISA mock publish ${request.transactionId}`)
@@ -249,67 +431,39 @@ export class MisaClientService {
             }
         }
 
-        await this.respectPublishSpacing()
+        await this.respectPublishSpacing(cfg)
 
-        // MISA wants each money field twice: OC = original currency, plain = base currency.
-        // Only VND is in scope today (exchange rate 1), so the two are equal.
-        const numeric = (value: string) => Number(value)
-        const invoice = {
-            RefID: request.transactionId,
-            InvTemplateNo: process.env.MISA_TEMPLATE_NO,
-            InvSeries: process.env.MISA_SERIAL,
-            InvDate: `${request.invoiceDate}T00:00:00`,
-            CurrencyCode: request.currency,
-            ExchangeRate: 1,
-            PaymentMethodName: process.env.MISA_PAYMENT_METHOD ?? 'TM/CK',
-            BuyerLegalName: request.buyerName,
-            BuyerTaxCode: request.buyerTaxCode ?? '',
-            BuyerAddress: request.buyerAddress ?? '',
-            BuyerEmail: request.buyerEmail ?? '',
-            TotalSaleAmount: numeric(request.subtotal),
-            TotalSaleAmountOC: numeric(request.subtotal),
-            TotalDiscountAmount: numeric(request.discountTotal),
-            TotalDiscountAmountOC: numeric(request.discountTotal),
-            TotalAmountWithoutVAT: numeric(request.subtotal) - numeric(request.discountTotal),
-            TotalAmountWithoutVATOC: numeric(request.subtotal) - numeric(request.discountTotal),
-            TotalVATAmount: numeric(request.taxTotal),
-            TotalVATAmountOC: numeric(request.taxTotal),
-            TotalAmount: numeric(request.grandTotal),
-            TotalAmountOC: numeric(request.grandTotal),
-            // Per-rate summary block; MISA rejects the invoice without it.
-            TaxRateInfo: this.taxRateSummary(request.lines),
-            OriginalInvoiceDetail: request.lines.map((line) => {
-                const net = numeric(line.netAmount)
-                const tax = numeric(line.taxAmount)
-                return {
-                    LineNumber: line.lineNo,
-                    ItemType: 1,
-                    ItemName: line.description,
-                    UnitName: line.uom,
-                    Quantity: numeric(line.qty),
-                    UnitPrice: numeric(line.unitPrice),
-                    UnitPriceOC: numeric(line.unitPrice),
-                    Amount: net,
-                    AmountOC: net,
-                    AmountWithoutVAT: net,
-                    AmountWithoutVATOC: net,
-                    DiscountAmount: numeric(line.discountAmount),
-                    DiscountAmountOC: numeric(line.discountAmount),
-                    VATRateName: vatRateName(line.taxRate),
-                    VATAmount: tax,
-                    VATAmountOC: tax,
-                    TotalAmount: net + tax,
-                    TotalAmountOC: net + tax,
-                }
-            }),
-        }
-
-        // POST {BaseURL}/invoice — InvoiceData is a real array, not a JSON string.
-        const { httpStatus, ok, raw } = await this.call('/invoice', {
-            SignType: Number(process.env.MISA_SIGN_TYPE ?? 1),
-            InvoiceData: [invoice],
-            PublishInvoiceData: [{ RefID: request.transactionId }],
+        /*
+         * MỘT lệnh duy nhất, `PublishInvoiceData` để null — đây là hình dạng đã kiểm chứng
+         * chạy được trên sandbox.
+         *
+         * Quyết định phát hành hay không nằm ở SignType, KHÔNG phải ở khối PublishInvoiceData:
+         *  - SignType 1: MISA chỉ lập XML để ký bằng USB token tại máy → publishInvoiceResult
+         *    trả null, hóa đơn không bao giờ ra.
+         *  - SignType 2: MISA ký và phát hành ngay, kết quả nằm trong publishInvoiceResult.
+         *
+         * Từng thử tách thành hai lệnh (lập rồi phát hành riêng): lệnh phát hành luôn bị từ
+         * chối `InvoiceTemplateNotExist` với mọi SignType và mọi cách truyền mẫu số/ký hiệu.
+         */
+        const response = await this.call(cfg, '/invoice', {
+            SignType: cfg.signType,
+            InvoiceData: [this.buildInvoicePayload(cfg, request)],
+            PublishInvoiceData: null,
         })
+        return this.readInvoiceResult(cfg, response, request.transactionId, 'publish')
+    }
+
+    /**
+     * Bóc kết quả của `POST /invoice`. Vỏ ngoài có thể `success` trong khi từng hóa đơn
+     * bên trong lại hỏng, nên phải soi cả hai khối kết quả.
+     */
+    private readInvoiceResult(
+        cfg: MisaConfig,
+        response: { httpStatus?: number; ok: boolean; raw: unknown },
+        transactionId: string,
+        kind: 'draft' | 'publish',
+    ): MisaPublishResult {
+        const { httpStatus, ok, raw } = response
         const body = raw as
             | {
                   success?: boolean
@@ -320,19 +474,24 @@ export class MisaClientService {
               }
             | null
 
+        const rejectMessage =
+            kind === 'draft'
+                ? 'MISA từ chối lập hóa đơn nháp.'
+                : 'MISA từ chối phát hành hóa đơn.'
+
         if (!ok || body?.success === false) {
             return {
                 ok: false,
                 errorCode: body?.errorCode ?? `HTTP_${httpStatus}`,
-                errorMessage: body?.descriptionErrorCode ?? 'MISA từ chối phát hành hóa đơn.',
+                errorMessage: body?.descriptionErrorCode ?? rejectMessage,
                 httpStatus,
                 raw,
             }
         }
 
-        // The envelope can succeed while the individual invoice fails — check both results.
         type MisaResultItem = {
             RefID?: string
+            TransactionID?: string
             InvNo?: string
             InvTemplateNo?: string
             InvSeries?: string
@@ -347,7 +506,21 @@ export class MisaClientService {
             return {
                 ok: false,
                 errorCode: failed.ErrorCode ?? 'MISA_INVOICE_REJECTED',
-                errorMessage: failed.DescriptionErrorCode ?? 'MISA từ chối hóa đơn.',
+                errorMessage: failed.DescriptionErrorCode ?? rejectMessage,
+                httpStatus,
+                raw,
+            }
+        }
+
+        // Lệnh phát hành mà không có publishInvoiceResult nghĩa là MISA mới chỉ LẬP hóa đơn
+        // (đã cấp số nhưng chưa ký, chưa gửi CQT). Trước đây chỗ này rơi về createInvoiceResult
+        // rồi báo thành công — hệ thống ghi ISSUED và mở công nợ cho hóa đơn chưa hề ra.
+        if (kind === 'publish' && !published) {
+            return {
+                ok: false,
+                errorCode: 'MISA_NOT_PUBLISHED',
+                errorMessage:
+                    'MISA mới lập hóa đơn chứ chưa phát hành (không có publishInvoiceResult). Kiểm tra mẫu số và ký hiệu đã đăng ký tờ khai chưa.',
                 httpStatus,
                 raw,
             }
@@ -357,9 +530,10 @@ export class MisaClientService {
         return {
             ok: true,
             invoiceNo: result?.InvNo,
-            templateNo: result?.InvTemplateNo ?? process.env.MISA_TEMPLATE_NO,
-            serial: result?.InvSeries ?? process.env.MISA_SERIAL,
-            transactionId: request.transactionId,
+            misaTransactionId: result?.TransactionID,
+            templateNo: result?.InvTemplateNo ?? cfg.templateNo,
+            serial: result?.InvSeries ?? cfg.serial,
+            transactionId,
             httpStatus,
             raw,
         }
@@ -369,7 +543,7 @@ export class MisaClientService {
     private taxRateSummary(lines: MisaInvoiceLine[]) {
         const byRate = new Map<string, { net: number; tax: number }>()
         for (const line of lines) {
-            const key = vatRateName(line.taxRate)
+            const key = line.taxRateName ?? vatRateName(line.taxRate)
             const current = byRate.get(key) ?? { net: 0, tax: 0 }
             current.net += Number(line.netAmount)
             current.tax += Number(line.taxAmount)
@@ -390,12 +564,13 @@ export class MisaClientService {
      * issue the same invoice twice (spec v1.2 §10.2).
      */
     async getStatus(transactionId: string): Promise<MisaStatusResult> {
-        if (this.isMock) {
+        const cfg = await this.config()
+        if (cfg.mock) {
             return this.mockPublished.get(transactionId) ?? { published: false }
         }
         // POST {BaseURL}/invoice/status takes a BARE ARRAY of RefIDs — looked up by our own
         // key, which is why that key must exist before the first publish attempt.
-        const { ok, raw } = await this.call('/invoice/status', [transactionId])
+        const { ok, raw } = await this.call(cfg, '/invoice/status', [transactionId])
         const body = raw as { success?: boolean; data?: unknown } | null
         const records = parseEmbedded<
             Array<{ InvNo?: string; InvTemplateNo?: string; InvSeries?: string }>
@@ -411,6 +586,50 @@ export class MisaClientService {
         }
     }
 
+
+    /**
+     * Đường dẫn xem bản PDF của hóa đơn đã phát hành.
+     *
+     * `POST /invoice/publishview` nhận một MẢNG RefID trần và trả thẳng một URL trong
+     * `data` (không phải chuỗi JSON lồng như các endpoint khác). MISA trả URL kể cả với
+     * RefID chưa phát hành, nên bên gọi phải tự kiểm tra trạng thái trước.
+     */
+    async viewUrl(transactionId: string): Promise<string | null> {
+        const cfg = await this.config()
+        if (cfg.mock) {
+            this.logger.debug(`MISA mock view ${transactionId}`)
+            return null
+        }
+
+        const { ok, raw } = await this.call(cfg, '/invoice/publishview', [transactionId])
+        const body = raw as { success?: boolean; data?: unknown } | null
+        if (!ok || body?.success === false) return null
+        const url = typeof body?.data === 'string' && body.data.startsWith('http') ? body.data : null
+        if (!url) return null
+
+        // MISA trả URL xem có thời hạn ngắn. Không tải thử PDF ở backend: máy chủ MISA
+        // có thể trả body rỗng/khác phản hồi theo Node fetch nhưng lại mở PDF bình thường
+        // trong trình duyệt người dùng. API chính thức đã xác nhận `data` là link xem PDF,
+        // nên chuyển thẳng URL này cho browser.
+        return url
+    }
+
+    /**
+     * Trang tra cứu ổn định của meInvoice theo TransactionID. Khác với URL PDF
+     * `/publishview` chỉ có hiệu lực ngắn, link này là đúng dạng MISA đặt trong
+     * QR code hóa đơn (`/tra-cuu/?sc=<TransactionID>`).
+     */
+    async lookupUrl(transactionId: string): Promise<string | null> {
+        const cfg = await this.config()
+        if (cfg.mock) return null
+
+        const api = new URL(cfg.baseUrl)
+        const portalHost = api.hostname
+            .replace(/^testapi\./i, 'test.')
+            .replace(/^api\./i, '')
+        return `${api.protocol}//${portalHost}/tra-cuu/?sc=${encodeURIComponent(transactionId)}`
+    }
+
     /**
      * Cancelling at MISA is NOT wired: the public documentation names no cancel endpoint and
      * guessing one risks voiding the invoice on our side while the tax system still holds it.
@@ -420,7 +639,8 @@ export class MisaClientService {
      * cancellation happened.
      */
     async cancel(transactionId: string, reason: string) {
-        if (this.isMock) {
+        const cfg = await this.config()
+        if (cfg.mock) {
             this.mockPublished.delete(transactionId)
             return { ok: true, manualActionRequired: false, raw: { mock: true } }
         }
@@ -437,7 +657,7 @@ export class MisaClientService {
             }
         }
 
-        const { ok, httpStatus, raw } = await this.call(path, {
+        const { ok, httpStatus, raw } = await this.call(cfg, path, {
             RefIDs: [transactionId],
             Reason: reason,
         })

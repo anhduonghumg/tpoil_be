@@ -212,12 +212,28 @@ const TEMPLATES: Record<string, TemplateDefinition> = {
         body: 'Sale cần chọn đơn lô nguồn phù hợp cho yêu cầu rút này.',
         action: 'SELECT_WITHDRAWAL_SOURCE',
     },
+    'sales.withdrawal.review_requested': {
+        moduleCode: 'sales',
+        category: 'SALES_WITHDRAWAL',
+        severity: 'WARNING',
+        title: 'Yêu cầu rút {{requestNo}} đang chờ duyệt',
+        body: 'Rút từ đơn lô {{orderNo}} — khách {{customerName}}.',
+        action: 'VIEW_SALES_WITHDRAWAL',
+    },
     'sales.withdrawal.approved': {
         moduleCode: 'sales',
         category: 'SALES_WITHDRAWAL',
         severity: 'SUCCESS',
         title: 'Yêu cầu rút {{requestNo}} đã được duyệt',
         body: 'Rút từ đơn lô {{orderNo}} — khách {{customerName}}.',
+        action: 'VIEW_SALES_WITHDRAWAL',
+    },
+    'sales.withdrawal.rejected': {
+        moduleCode: 'sales',
+        category: 'SALES_WITHDRAWAL',
+        severity: 'ERROR',
+        title: 'Yêu cầu rút {{requestNo}} bị từ chối',
+        body: '{{decisionNote}}',
         action: 'VIEW_SALES_WITHDRAWAL',
     },
     'sales.withdrawal.cancelled': {

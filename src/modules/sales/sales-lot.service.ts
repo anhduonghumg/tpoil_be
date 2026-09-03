@@ -83,6 +83,7 @@ export class SalesLotService {
                 lotPosition: true,
                 product: { select: { name: true } },
                 issueWarehouse: { select: { id: true, name: true } },
+                receivingWarehouseArea: { select: { id: true, name: true } },
             },
         })
         if (!line?.lotPosition) return null
@@ -98,8 +99,10 @@ export class SalesLotService {
             lotPositionId: position.id,
             productId: line.productId,
             productName: line.product.name,
-            warehouseId: line.issueWarehouse?.id ?? null,
-            warehouseName: line.issueWarehouse?.name ?? null,
+            warehouseId:
+                line.issueWarehouse?.id ?? line.receivingWarehouseArea?.id ?? null,
+            warehouseName:
+                line.issueWarehouse?.name ?? line.receivingWarehouseArea?.name ?? null,
             totalQty: position.totalQty.toString(),
             issuedQty: position.issuedQty.toString(),
             adjustedQty: position.adjustedQty.toString(),

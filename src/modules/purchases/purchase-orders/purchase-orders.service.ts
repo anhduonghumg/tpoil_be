@@ -235,9 +235,13 @@ export class PurchaseOrdersService {
         return this.contractCheck.checkPurchaseContractWarning({ supplierCustomerId, onDate })
     }
 
-    private async assertLocationsBelongToSupplier(args: { supplierCustomerId: string; locationIds: string[] }) {
-        const { supplierCustomerId, locationIds } = args
-        if (!locationIds.length) throw new BadRequestException('RECEIVING_WAREHOUSE_REQUIRED')
+    private async assertLocationsBelongToSupplier(args: {
+        supplierCustomerId: string
+        locationIds: string[]
+        areaIds?: string[]
+    }) {
+        const { supplierCustomerId, locationIds, areaIds = [] } = args
+        if (!locationIds.length && !areaIds.length) throw new BadRequestException('RECEIVING_WAREHOUSE_REQUIRED')
 
         const rows = await this.prisma.warehouse.findMany({
             where: {
@@ -259,7 +263,59 @@ export class PurchaseOrdersService {
                 invalidLocationIds: bad,
             })
         }
-        const legalEntityIds = [...new Set(rows.map((row) => row.legalEntityId))]
+        const areas = areaIds.length
+            ? await this.prisma.warehouseArea.findMany({
+                  where: {
+                      id: { in: areaIds },
+                      status: MasterStatus.ACTIVE,
+                      warehouses: {
+                          some: {
+                              status: MasterStatus.ACTIVE,
+                              isOperationalWarehouse: true,
+                              parties: {
+                                  some: {
+                                      partyId: supplierCustomerId,
+                                      role: WarehousePartyRole.OPERATOR,
+                                      validTo: null,
+                                  },
+                              },
+                          },
+                      },
+                  },
+                  select: {
+                      id: true,
+                      warehouses: {
+                          where: {
+                              status: MasterStatus.ACTIVE,
+                              isOperationalWarehouse: true,
+                              parties: {
+                                  some: {
+                                      partyId: supplierCustomerId,
+                                      role: WarehousePartyRole.OPERATOR,
+                                      validTo: null,
+                                  },
+                              },
+                          },
+                          select: { legalEntityId: true },
+                      },
+                  },
+              })
+            : []
+        const validAreaIds = new Set(areas.map((area) => area.id))
+        const invalidAreaIds = areaIds.filter((id) => !validAreaIds.has(id))
+        if (invalidAreaIds.length) {
+            throw new BadRequestException({
+                code: 'SUPPLIER_WAREHOUSE_AREA_INVALID',
+                message: 'Khu vực kho không hoạt động hoặc không có kho của nhà cung cấp đã chọn.',
+                invalidAreaIds,
+            })
+        }
+        const legalEntityIds = [
+            ...new Set([
+                ...rows.map((row) => row.legalEntityId),
+                ...areas.flatMap((area) => area.warehouses.map((warehouse) => warehouse.legalEntityId)),
+            ]),
+        ]
         if (legalEntityIds.length !== 1) {
             throw new BadRequestException('PURCHASE_ORDER_WAREHOUSES_MUST_BELONG_TO_ONE_LEGAL_ENTITY')
         }
@@ -268,7 +324,18 @@ export class PurchaseOrdersService {
 
     private async createExpectedSupplies(
         tx: Prisma.TransactionClient,
-        args: { purchaseOrderId: string; legalEntityId: string; expectedAt: Date | null; lines: Array<{ id: string; productId: string; receivingWarehouseId: string | null; orderedQty: Prisma.Decimal | number }> },
+        args: {
+            purchaseOrderId: string
+            legalEntityId: string
+            expectedAt: Date | null
+            lines: Array<{
+                id: string
+                productId: string
+                receivingWarehouseId: string | null
+                plannedReceivingAreaId: string | null
+                orderedQty: Prisma.Decimal | number
+            }>
+        },
     ) {
         const legalEntity = await tx.legalEntity.findUnique({
             where: { id: args.legalEntityId },
@@ -278,10 +345,13 @@ export class PurchaseOrdersService {
 
         await tx.expectedSupply.createMany({
             data: args.lines.map((line) => {
-                if (!line.receivingWarehouseId) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+                if (!line.receivingWarehouseId && !line.plannedReceivingAreaId) {
+                    throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+                }
                 return {
                     expectedNo: `EXP-PO-${args.purchaseOrderId}-${line.id}`,
                     warehouseId: line.receivingWarehouseId,
+                    warehouseAreaId: line.plannedReceivingAreaId,
                     productId: line.productId,
                     ownerPartyId: legalEntity.partyId,
                     purchaseOrderLineId: line.id,
@@ -296,7 +366,10 @@ export class PurchaseOrdersService {
         const lines = (order.lines ?? []).map((line: any) => ({
             ...line,
             supplierLocationId: line.receivingWarehouseId,
+            supplierLocationAreaId: line.plannedReceivingAreaId,
+            supplierLocationType: line.plannedReceivingAreaId ? 'AREA' : 'WAREHOUSE',
             supplierLocation: line.receivingWarehouse,
+            supplierLocationArea: line.plannedReceivingArea,
         }))
         const totalQty = lines.reduce((sum: number, line: any) => sum + Number(line.orderedQty ?? 0), 0)
         const totalAmount = lines.reduce((sum: number, line: any) => {
@@ -514,6 +587,7 @@ export class PurchaseOrdersService {
             productId: string
             orderedQty: number
             supplierLocationId?: string
+            plannedReceivingAreaId?: string
             discountAmount?: number
             unitPrice?: number
             taxRate?: number
@@ -575,6 +649,7 @@ export class PurchaseOrdersService {
                 productId: l.productId,
                 orderedQty: Number(l.orderedQty) || 0,
                 supplierLocationId: l.supplierLocationId ?? undefined,
+                plannedReceivingAreaId: l.plannedReceivingAreaId ?? undefined,
                 discountAmount: l.discountAmount == null ? 0 : Number(l.discountAmount) || 0,
                 unitPrice: l.unitPrice == null ? null : Number(l.unitPrice),
                 taxRate: l.taxRate == null ? null : Number(l.taxRate),
@@ -617,18 +692,22 @@ export class PurchaseOrdersService {
 
         for (const l of lines) {
             const resolvedLocId = l.supplierLocationId ?? headerLocId
-            if (!resolvedLocId) {
+            if (Boolean(resolvedLocId) === Boolean(l.plannedReceivingAreaId)) {
                 throw new BadRequestException({
                     code: 'SUPPLIER_LOCATION_REQUIRED',
-                    message: 'Mỗi dòng hàng phải chọn kho nhận (hoặc chọn kho mặc định ở đầu Hàng hoá).',
+                    message: 'Mỗi dòng hàng phải chọn đúng một Kho nhận: khu vực hoặc kho đích danh.',
                 })
             }
         }
 
         const allLocIds = Array.from(new Set([headerLocId, ...lines.map((x) => x.supplierLocationId)].filter(Boolean) as string[]))
+        const allAreaIds = Array.from(
+            new Set(lines.map((line) => line.plannedReceivingAreaId).filter(Boolean) as string[]),
+        )
         const legalEntityId = await this.assertLocationsBelongToSupplier({
             supplierCustomerId: dto.supplierCustomerId,
             locationIds: allLocIds,
+            areaIds: allAreaIds,
         })
 
         const contract = await this.contractCheck.requireActivePurchaseContract({
@@ -677,7 +756,8 @@ export class PurchaseOrdersService {
                     create: lines.map((l, index) => ({
                         lineNo: index + 1,
                         productId: l.productId,
-                        receivingWarehouseId: (l.supplierLocationId ?? headerLocId)!,
+                        receivingWarehouseId: l.supplierLocationId ?? headerLocId,
+                        plannedReceivingAreaId: l.plannedReceivingAreaId ?? null,
                         orderedQty: new Prisma.Decimal(l.orderedQty),
                         unitPrice: l.unitPrice == null ? null : new Prisma.Decimal(l.unitPrice),
                         taxRate: l.taxRate == null ? null : new Prisma.Decimal(l.taxRate),
@@ -693,6 +773,7 @@ export class PurchaseOrdersService {
                     lines: {
                         include: {
                             receivingWarehouse: { select: { id: true, code: true, name: true } },
+                            plannedReceivingArea: { select: { id: true, code: true, name: true } },
                             product: { select: { id: true, name: true, code: true } },
                         },
                     },
@@ -746,14 +827,19 @@ export class PurchaseOrdersService {
             productId: line.productId,
             orderedQty: Number(line.orderedQty) || 0,
             supplierLocationId: line.supplierLocationId,
+            plannedReceivingAreaId: line.plannedReceivingAreaId,
             unitPrice: line.unitPrice == null ? null : Number(line.unitPrice),
             discountAmount: Number(line.discountAmount ?? 0),
             taxRate: line.taxRate == null ? null : Number(line.taxRate),
         })).filter((line: any) => line.productId && line.orderedQty > 0)
-        if (!lines.length || lines.some((line: any) => !line.supplierLocationId)) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+        if (
+            !lines.length ||
+            lines.some((line: any) => Boolean(line.supplierLocationId) === Boolean(line.plannedReceivingAreaId))
+        ) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
 
-        const locationIds = Array.from(new Set(lines.map((line: any) => line.supplierLocationId))) as string[]
-        const legalEntityId = await this.assertLocationsBelongToSupplier({ supplierCustomerId: dto.supplierCustomerId, locationIds })
+        const locationIds = Array.from(new Set(lines.map((line: any) => line.supplierLocationId).filter(Boolean))) as string[]
+        const areaIds = Array.from(new Set(lines.map((line: any) => line.plannedReceivingAreaId).filter(Boolean))) as string[]
+        const legalEntityId = await this.assertLocationsBelongToSupplier({ supplierCustomerId: dto.supplierCustomerId, locationIds, areaIds })
         const contract = await this.contractCheck.requireActivePurchaseContract({ supplierCustomerId: dto.supplierCustomerId, onDate: orderDate })
         const orderNo = current.supplierCustomerId === dto.supplierCustomerId
             ? current.orderNo
@@ -773,7 +859,7 @@ export class PurchaseOrdersService {
                 paymentTermDays: dto.paymentMode === 'POSTPAID' ? Number(dto.paymentTermDays) || null : null,
                 orderDate, expectedDate, note: dto.note?.trim() || null,
                 paymentPlans: { create: plans },
-                lines: { create: lines.map((line: any, index: number) => ({ lineNo: index + 1, productId: line.productId, receivingWarehouseId: line.supplierLocationId, orderedQty: new Prisma.Decimal(line.orderedQty), unitPrice: line.unitPrice == null ? null : new Prisma.Decimal(line.unitPrice), discountAmount: new Prisma.Decimal(line.discountAmount), taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate) })) },
+                lines: { create: lines.map((line: any, index: number) => ({ lineNo: index + 1, productId: line.productId, receivingWarehouseId: line.supplierLocationId ?? null, plannedReceivingAreaId: line.plannedReceivingAreaId ?? null, orderedQty: new Prisma.Decimal(line.orderedQty), unitPrice: line.unitPrice == null ? null : new Prisma.Decimal(line.unitPrice), discountAmount: new Prisma.Decimal(line.discountAmount), taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate) })) },
             }, include: { lines: true } })
             await this.createExpectedSupplies(tx, {
                 purchaseOrderId: id,
@@ -792,7 +878,7 @@ export class PurchaseOrdersService {
             where: { id },
             include: {
                 supplierInvoices: { select: { id: true } },
-                lines: { select: { id: true, productId: true, receivingWarehouseId: true } },
+                lines: { select: { id: true, productId: true, receivingWarehouseId: true, plannedReceivingAreaId: true } },
             },
         })
         if (!order) throw new NotFoundException('PURCHASE_ORDER_NOT_FOUND')
@@ -828,11 +914,12 @@ export class PurchaseOrdersService {
                     data: { expectedActualQty: qty, version: { increment: 1 } },
                 })
                 if (expected.count === 0) {
-                    if (!line.receivingWarehouseId) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
+                    if (!line.receivingWarehouseId && !line.plannedReceivingAreaId) throw new BadRequestException('SUPPLIER_LOCATION_REQUIRED')
                     await tx.expectedSupply.create({
                         data: {
                             expectedNo: `EXP-PO-${order.id}-${line.id}`,
                             warehouseId: line.receivingWarehouseId,
+                            warehouseAreaId: line.plannedReceivingAreaId,
                             productId: line.productId,
                             ownerPartyId: legalEntity.partyId,
                             purchaseOrderLineId: line.id,
@@ -1201,6 +1288,13 @@ export class PurchaseOrdersService {
                         sourceFileUrl: true,
                         sourceFileChecksum: true,
                         totalAmount: true,
+                        lines: {
+                            select: {
+                                id: true,
+                                purchaseOrderLineId: true,
+                                actualQty: true,
+                            },
+                        },
                         openItem: {
                             select: {
                                 id: true,

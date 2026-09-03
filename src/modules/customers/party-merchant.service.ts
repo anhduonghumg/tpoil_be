@@ -47,7 +47,10 @@ export class PartyMerchantService {
     /** So sánh theo NGÀY vì validFrom/validTo là cột DATE. */
     private startOfDay(at: Date) {
         const day = new Date(at)
-        day.setHours(0, 0, 0, 0)
+        // PostgreSQL DATE được Prisma biểu diễn bằng 00:00:00 UTC. Dùng setHours()
+        // sẽ quy đổi qua múi giờ máy chủ (UTC+7 thành 17:00 ngày hôm trước) và bỏ sót
+        // các vai trò bắt đầu đúng ngày chứng từ. Luôn chuẩn hóa theo UTC.
+        day.setUTCHours(0, 0, 0, 0)
         return day
     }
 
@@ -89,7 +92,12 @@ export class PartyMerchantService {
         at: Date,
         db: Prisma.TransactionClient | PrismaService = this.prisma,
     ) {
-        const role = await this.merchantRoleAt(partyId, at, db)
+        // A draft document may have been entered with an earlier date before
+        // the counterparty was classified. If there is no historical role at
+        // that date, use the currently selected classification; once a
+        // historical classification exists, it remains authoritative.
+        const roleAtDocumentDate = await this.merchantRoleAt(partyId, at, db)
+        const role = roleAtDocumentDate ?? (await this.merchantRoleAt(partyId, new Date(), db))
         const allowed = direction === 'SELL' ? SELLABLE_ROLES : PURCHASABLE_ROLES
         if (role && allowed.includes(role)) return role
 
@@ -140,7 +148,7 @@ export class PartyMerchantService {
             if (!isManaged || keep.has(existing.role)) continue
             // Kỳ mới bắt đầu từ `day` nên kỳ cũ đóng ngay trước đó.
             const validTo = new Date(day)
-            validTo.setDate(validTo.getDate() - 1)
+            validTo.setUTCDate(validTo.getUTCDate() - 1)
             await db.partyRole.update({
                 where: { id: existing.id },
                 data: { validTo: validTo < existing.validFrom ? existing.validFrom : validTo },

@@ -19,6 +19,7 @@ import { CreateSupplierInvoiceDto } from './dto/supplier-invoice.dto'
 import PdfParse from 'pdf-parse'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
 import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import { AccountingInventoryService } from '../../inventory/accounting-inventory.service'
 
 @Injectable()
 export class SupplierInvoicesService {
@@ -31,6 +32,7 @@ export class SupplierInvoicesService {
         private readonly artifacts: JobArtifactsService,
         private readonly drive: GoogleDriveService,
         private readonly notificationOutbox: NotificationOutboxService,
+        private readonly accountingInventory: AccountingInventoryService,
     ) {}
 
     private async findExistingFileByChecksum(checksum: string) {
@@ -345,6 +347,15 @@ export class SupplierInvoicesService {
             let totalAmount = new Prisma.Decimal(0)
 
             for (const [index, input] of dto.lines.entries()) {
+                const purchaseOrderLine = dto.purchaseOrderId
+                    ? await this.resolveInvoicePurchaseOrderLine(tx, {
+                          purchaseOrderId: dto.purchaseOrderId,
+                          purchaseOrderLineId: input.purchaseOrderLineId,
+                          productId: input.productId,
+                          supplierLocationId: input.supplierLocationId,
+                      })
+                    : null
+
                 const warehouse = await tx.warehouse.findUnique({
                     where: { id: input.supplierLocationId },
                     select: {
@@ -384,6 +395,16 @@ export class SupplierInvoicesService {
                     if (receiptLine.goodsReceipt.warehouseId !== input.supplierLocationId) {
                         throw new BadRequestException('INVOICE_LINE_GR_LOCATION_MISMATCH')
                     }
+                    if (
+                        purchaseOrderLine &&
+                        receiptLine.purchaseOrderLineId &&
+                        receiptLine.purchaseOrderLineId !== purchaseOrderLine.id
+                    ) {
+                        throw new BadRequestException({
+                            code: 'INVOICE_LINE_RECEIPT_PO_LINE_MISMATCH',
+                            message: 'Dòng phiếu nhận không khớp với dòng đơn mua của hóa đơn.',
+                        })
+                    }
                     const allocated = await tx.supplierInvoiceLine.aggregate({
                         where: {
                             receiptLineId: receiptLine.id,
@@ -401,12 +422,6 @@ export class SupplierInvoicesService {
                     receiptLineId = receiptLine.id
                 }
 
-                const purchaseOrderLine = dto.purchaseOrderId
-                    ? await tx.purchaseOrderLine.findFirst({
-                          where: { purchaseOrderId: dto.purchaseOrderId, productId: input.productId },
-                          select: { id: true },
-                      })
-                    : null
                 const qty = new Prisma.Decimal(input.qty)
                 const unitPrice = new Prisma.Decimal(input.unitPrice ?? 0)
                 const discountPerUnit = new Prisma.Decimal(input.discountAmount ?? 0)
@@ -466,6 +481,57 @@ export class SupplierInvoicesService {
             return invoice.id
         })
         return this.detail(invoiceId)
+    }
+
+    /**
+     * An invoice line must point at the exact purchase-order line.  Looking up
+     * by product is ambiguous when the same item is ordered for multiple depots
+     * and caused their invoiced quantities to be accumulated into the first row.
+     */
+    private async resolveInvoicePurchaseOrderLine(
+        tx: Prisma.TransactionClient,
+        args: {
+            purchaseOrderId: string
+            purchaseOrderLineId?: string
+            productId: string
+            supplierLocationId: string
+        },
+    ) {
+        if (!args.purchaseOrderLineId) {
+            throw new BadRequestException({
+                code: 'INVOICE_LINE_PURCHASE_ORDER_LINE_REQUIRED',
+                message: 'Mỗi dòng hóa đơn của đơn mua phải chọn đúng dòng hàng nguồn.',
+            })
+        }
+
+        const line = await tx.purchaseOrderLine.findUnique({
+            where: { id: args.purchaseOrderLineId },
+            select: {
+                id: true,
+                purchaseOrderId: true,
+                productId: true,
+                receivingWarehouseId: true,
+            },
+        })
+        if (!line || line.purchaseOrderId !== args.purchaseOrderId) {
+            throw new BadRequestException({
+                code: 'INVOICE_LINE_PO_MISMATCH',
+                message: 'Dòng hàng được chọn không thuộc đơn mua của hóa đơn.',
+            })
+        }
+        if (line.productId !== args.productId) {
+            throw new BadRequestException({
+                code: 'INVOICE_LINE_PRODUCT_MISMATCH',
+                message: 'Mặt hàng trên hóa đơn không khớp với dòng đơn mua đã chọn.',
+            })
+        }
+        if (line.receivingWarehouseId && line.receivingWarehouseId !== args.supplierLocationId) {
+            throw new BadRequestException({
+                code: 'INVOICE_LINE_LOCATION_MISMATCH',
+                message: 'Kho trên hóa đơn không khớp với kho của dòng đơn mua đã chọn.',
+            })
+        }
+        return line
     }
 
     async detail(id: string) {
@@ -561,14 +627,15 @@ export class SupplierInvoicesService {
                     purchaseOrderId: true,
                     productId: true,
                     receivingWarehouseId: true,
+                    plannedReceivingAreaId: true,
                     orderedQty: true,
                 },
             })
             if (!purchaseOrderLine || purchaseOrderLine.purchaseOrderId !== purchaseOrder.id) {
                 throw new BadRequestException('LOT_INVOICE_LINE_PO_MISMATCH')
             }
-            if (!purchaseOrderLine.receivingWarehouseId) {
-                throw new BadRequestException('LOT_PLANNED_WAREHOUSE_REQUIRED')
+            if (!purchaseOrderLine.receivingWarehouseId && !purchaseOrderLine.plannedReceivingAreaId) {
+                throw new BadRequestException('LOT_RECEIVING_SCOPE_REQUIRED')
             }
 
             const position = await tx.commercialLotPosition.upsert({
@@ -577,6 +644,7 @@ export class SupplierInvoicesService {
                     purchaseOrderLineId: purchaseOrderLine.id,
                     supplierCustomerId: purchaseOrder.supplierCustomerId,
                     plannedWarehouseId: purchaseOrderLine.receivingWarehouseId,
+                    plannedWarehouseAreaId: purchaseOrderLine.plannedReceivingAreaId,
                     productId: purchaseOrderLine.productId,
                     releaseCode: purchaseOrder.releaseCode,
                 },
@@ -666,6 +734,10 @@ export class SupplierInvoicesService {
                 },
             })
             await this.postCommercialLotInvoice(tx, inv)
+            await this.accountingInventory.postPurchaseInvoice(tx, {
+                supplierInvoiceId: inv.id,
+                actorId,
+            })
             const receiptIds = [
                 ...new Set(inv.lines.map((line) => line.receiptLine?.goodsReceiptId).filter(Boolean)),
             ] as string[]
@@ -767,6 +839,10 @@ export class SupplierInvoicesService {
                     note: payload?.reason ?? inv.note,
                     version: { increment: 1 },
                 },
+            })
+            await this.accountingInventory.reverseInvoicePosting(tx, {
+                sourceType: 'SUPPLIER_INVOICE',
+                sourceId: inv.id,
             })
             const receiptIds = [
                 ...new Set(inv.lines.map((line) => line.receiptLine?.goodsReceiptId).filter(Boolean)),

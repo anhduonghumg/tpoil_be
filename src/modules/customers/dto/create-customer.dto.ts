@@ -1,6 +1,6 @@
 import { Transform, Type } from 'class-transformer'
 import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
-import { CustomerRole, CustomerStatus, CustomerType, OperationalPartyRole, PartyRoleType, PartyType, TaxSource } from '@prisma/client'
+import { CustomerRole, CustomerStatus, CustomerType, PartyRoleType, PartyType, TaxSource } from '@prisma/client'
 
 export class CreateCustomerDto {
     @IsOptional()
@@ -40,8 +40,14 @@ export class CreateCustomerDto {
 
     @IsOptional()
     @IsArray()
-    @IsEnum(OperationalPartyRole, { each: true })
-    partnerRoles?: OperationalPartyRole[]
+    /**
+     * Legacy clients used this field for the complete partner-role picker and
+     * therefore may send CUSTOMER/SUPPLIER or a merchant role (TNPP/TNDM/TNDL)
+     * alongside the operational roles. The service normalizes these values and
+     * derives CUSTOMER/SUPPLIER from merchantRole when applicable.
+     */
+    @IsEnum(PartyRoleType, { each: true })
+    partnerRoles?: PartyRoleType[]
 
     @IsEnum(CustomerType)
     type!: CustomerType

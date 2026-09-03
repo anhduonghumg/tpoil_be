@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
+import { AccountingInventoryService } from 'src/modules/inventory/accounting-inventory.service'
 import { SalesIssuePostingService } from 'src/modules/inventory/sales-issue-posting.service'
 import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
 import { SalesOrdersController } from './sales-orders.controller'
@@ -43,6 +44,10 @@ import { SalesOrderWorkflowService } from './sales-order-workflow.service'
 import { SalesReservationService } from './sales-reservation.service'
 import { SalesWarehouseScopeService } from './sales-warehouse-scope.service'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
+import { SalesOrderAdjustmentsController } from './sales-order-adjustments.controller'
+import { SalesOrderAdjustmentsService } from './sales-order-adjustments.service'
+import { SalesDashboardController } from './sales-dashboard.controller'
+import { SalesDashboardService } from './sales-dashboard.service'
 
 @Module({
     controllers: [
@@ -60,10 +65,13 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
         ReceivablesController,
         SalesCreditController,
         SalesDiscountController,
+        SalesOrderAdjustmentsController,
+        SalesDashboardController,
     ],
     providers: [
         PrismaService,
         InventoryCoreService,
+        AccountingInventoryService,
         PurchaseTermCostLayerService,
         SalesIssuePostingService,
         SalesOrdersService,
@@ -90,6 +98,8 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
         SalesQuickEntryService,
         SalesWarehouseScopeService,
         SalesApprovalsService,
+        SalesOrderAdjustmentsService,
+        SalesDashboardService,
     ],
     exports: [
         SalesOrdersService,

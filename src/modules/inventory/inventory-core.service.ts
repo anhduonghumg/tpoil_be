@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common'
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common'
 import {
     InventoryPostingKind,
     InventoryPostingStatus,
@@ -21,6 +21,7 @@ export type InventoryPostingLineInput = {
 }
 
 export type InventoryPostingSource = {
+    openingBalanceBatchId?: string
     goodsReceiptId?: string
     movementDispatchId?: string
     movementArrivalId?: string
@@ -59,6 +60,16 @@ export class InventoryCoreService {
         for (const key of [...new Set(keys)].sort()) {
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
         }
+    }
+
+    private async lockReservationLine(tx: Prisma.TransactionClient, reservationLineId: string) {
+        const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id"
+            FROM "InventoryReservationLine"
+            WHERE "id" = ${reservationLineId}::uuid
+            FOR UPDATE
+        `)
+        if (!rows.length) throw new NotFoundException('Inventory reservation line not found')
     }
 
     private aggregateLines(lines: InventoryPostingLineInput[]) {
@@ -475,6 +486,12 @@ export class InventoryCoreService {
         })
         if (existing) return existing
 
+        await this.lockReservationLine(tx, args.reservationLineId)
+        const existingAfterLock = await tx.inventoryReservationEvent.findUnique({
+            where: { idempotencyKey: args.idempotencyKey },
+        })
+        if (existingAfterLock) return existingAfterLock
+
         const line = await tx.inventoryReservationLine.findUniqueOrThrow({
             where: { id: args.reservationLineId },
             include: { reservation: true },
@@ -580,6 +597,12 @@ export class InventoryCoreService {
         })
         if (existing) return existing
 
+        await this.lockReservationLine(tx, args.reservationLineId)
+        const existingAfterLock = await tx.inventoryReservationEvent.findUnique({
+            where: { idempotencyKey: args.idempotencyKey },
+        })
+        if (existingAfterLock) return existingAfterLock
+
         const line = await tx.inventoryReservationLine.findUniqueOrThrow({
             where: { id: args.reservationLineId },
         })
@@ -662,6 +685,12 @@ export class InventoryCoreService {
             where: { idempotencyKey: args.idempotencyKey },
         })
         if (existing) return existing
+
+        await this.lockReservationLine(tx, args.reservationLineId)
+        const existingAfterLock = await tx.inventoryReservationEvent.findUnique({
+            where: { idempotencyKey: args.idempotencyKey },
+        })
+        if (existingAfterLock) return existingAfterLock
 
         const line = await tx.inventoryReservationLine.findUniqueOrThrow({
             where: { id: args.reservationLineId },

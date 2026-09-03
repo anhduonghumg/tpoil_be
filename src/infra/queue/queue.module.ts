@@ -6,7 +6,7 @@ import { QueueFactory } from './queue.factory'
 
 @Global()
 @Module({
-    providers: [{ provide: QUEUE_CONN, useFactory: () => createRedisConnection() }, QueueFactory],
+    providers: [{ provide: QUEUE_CONN, useFactory: () => createRedisConnection('queue') }, QueueFactory],
     exports: [QUEUE_CONN, QueueFactory],
 })
 export class QueueModule {}

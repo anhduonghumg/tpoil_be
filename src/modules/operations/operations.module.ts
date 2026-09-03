@@ -3,6 +3,7 @@ import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { OperationsController } from './operations.controller'
 import { OperationsDashboardService } from './operations-dashboard.service'
+import { WarehouseDashboardService } from './warehouse-dashboard.service'
 import { RoadOperationsService } from './road-operations.service'
 import { ShipCharterService } from './ship-charter.service'
 import { WarehouseOperationsService } from './warehouse-operations.service'
@@ -22,6 +23,7 @@ import { InventoryCoreService } from 'src/modules/inventory/inventory-core.servi
         WarehouseOperationsService,
         RoadOperationsService,
         OperationsDashboardService,
+        WarehouseDashboardService,
     ],
     exports: [InventoryCoreService, GoodsReceiptPostingService],
 })

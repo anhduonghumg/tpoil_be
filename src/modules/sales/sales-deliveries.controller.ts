@@ -9,6 +9,7 @@ import { ScopedActor } from './sales-warehouse-scope.service'
 import {
     ConfirmSalesDeliveryDto,
     ListSalesDeliveriesQueryDto,
+    QuickConfirmSalesDeliveriesDto,
     ReturnSalesDeliveryDto,
     VoidSalesDeliveryDto,
 } from './dto/sales-delivery.dto'
@@ -51,6 +52,13 @@ export class SalesDeliveriesController {
     @RequirePermissions(PERMISSIONS.sales.deliveryConfirm)
     confirm(@Param('id') id: string, @Body() dto: ConfirmSalesDeliveryDto, @Req() req: Request) {
         return this.service.confirm(id, dto, actorFrom(req))
+    }
+
+    /** Ghi sổ ngay theo số kế hoạch và phương án lô đề xuất, không qua form. */
+    @Post('quick-confirm')
+    @RequirePermissions(PERMISSIONS.sales.deliveryConfirm)
+    quickConfirm(@Body() dto: QuickConfirmSalesDeliveriesDto, @Req() req: Request) {
+        return this.service.quickConfirm(dto, actorFrom(req))
     }
 
     @Post(':id/void')

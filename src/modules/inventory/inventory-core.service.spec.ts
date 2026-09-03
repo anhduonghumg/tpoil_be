@@ -149,6 +149,7 @@ describe('InventoryCoreService', () => {
     it('rejects reservation when all on-hand stock is already restricted', async () => {
         const tx = {
             $executeRaw: jest.fn(),
+            $queryRaw: jest.fn().mockResolvedValue([{ id: 'line-1' }]),
             inventoryReservationEvent: {
                 findUnique: jest.fn().mockResolvedValue(null),
                 create: jest.fn(),

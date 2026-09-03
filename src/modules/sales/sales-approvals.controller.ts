@@ -81,7 +81,12 @@ export class SalesApprovalsController {
         @Body() dto: AdjustLineSupplierDto,
         @Req() req: Request,
     ) {
-        return this.service.adjustLineSupplier(lineId, dto.supplierPartyId, actorFrom(req))
+        return this.service.adjustLineSupplier(
+            lineId,
+            dto.supplierPartyId,
+            dto.supplySource,
+            actorFrom(req),
+        )
     }
 
     @Post(':id/approve')

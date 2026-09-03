@@ -34,8 +34,12 @@ export class CreatePurchaseOrderLineDto {
     orderedQty!: number
 
     @IsOptional()
-    @IsString()
+    @IsUUID()
     supplierLocationId?: string
+
+    @IsOptional()
+    @IsUUID()
+    plannedReceivingAreaId?: string
 
     @IsOptional()
     @Type(() => Number)

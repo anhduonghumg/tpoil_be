@@ -52,6 +52,7 @@ export class SalesOrderPrintService {
                         receivingWarehouse: { select: { name: true } },
                     },
                 },
+                paymentPlans: { orderBy: [{ dueDate: 'asc' }, { sortOrder: 'asc' }] },
             },
         })
         if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
@@ -77,6 +78,12 @@ export class SalesOrderPrintService {
             }
         })
 
+        const paymentPlans = order.paymentPlans.map((plan) => ({
+            dueDate: plan.dueDate,
+            percent: plan.percent?.toNumber() ?? null,
+            amount: plan.amount?.toNumber() ?? totalAmount.mul(plan.percent ?? 0).div(100).toNumber(),
+        }))
+
         return {
             variant: this.variantOf(order),
             orderNo: order.orderNo,
@@ -87,9 +94,11 @@ export class SalesOrderPrintService {
             sellerName: order.legalEntity.party.name,
             uomText: order.lines[0]?.product.uom ?? 'lít',
             paymentMethodText: 'Chuyển khoản',
+            paymentTermType: order.paymentTermType,
             receiveDateText: this.receiveDateText(order.orderDate),
             totalAmount: totalAmount.toNumber(),
             lines,
+            paymentPlans,
         }
     }
 

@@ -44,6 +44,7 @@ import {
     WarehouseReservationStatus,
 } from './dto/operations.dto'
 import { OperationsDashboardService } from './operations-dashboard.service'
+import { WarehouseDashboardService } from './warehouse-dashboard.service'
 import { RoadOperationsService } from './road-operations.service'
 import { ShipCharterService } from './ship-charter.service'
 import { WarehouseOperationsService } from './warehouse-operations.service'
@@ -54,6 +55,7 @@ import { WarehouseOperationsService } from './warehouse-operations.service'
 export class OperationsController {
     constructor(
         private readonly dashboard: OperationsDashboardService,
+        private readonly warehouseDashboard: WarehouseDashboardService,
         private readonly charter: ShipCharterService,
         private readonly warehouse: WarehouseOperationsService,
         private readonly road: RoadOperationsService,
@@ -62,6 +64,11 @@ export class OperationsController {
     @Get('dashboard')
     getDashboard() {
         return this.dashboard.get()
+    }
+
+    @Get('warehouse-dashboard')
+    getWarehouseDashboard() {
+        return this.warehouseDashboard.get()
     }
 
     @Get('ship-charters/dashboard')
@@ -438,8 +445,22 @@ export class OperationsController {
     }
 
     @Get('warehouse/commercial-lots')
-    commercialLotInventory(@Query() q: PageQueryDto & { supplierLocationId?: string; productId?: string }) {
+    commercialLotInventory(
+        @Query() q: PageQueryDto & { supplierLocationId?: string; areaId?: string; productId?: string },
+    ) {
         return this.warehouse.listCommercialLotInventory(q)
+    }
+
+    @Get('warehouse/customer-holds')
+    customerHeldInventory(
+        @Query()
+        q: PageQueryDto & {
+            supplierLocationId?: string
+            customerPartyId?: string
+            productId?: string
+        },
+    ) {
+        return this.warehouse.listCustomerHeldInventory(q)
     }
 
     @Get('expected-inventory')

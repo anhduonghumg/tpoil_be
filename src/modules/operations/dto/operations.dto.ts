@@ -1073,6 +1073,24 @@ export class UpsertWarehouseTransferDto extends OwnerDto {
     driverId?: string
 
     @IsOptional()
+    @IsUUID()
+    salesOrderId?: string
+
+    @IsOptional()
+    @IsString()
+    transferReason?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber({ maxDecimalPlaces: 4 })
+    @Min(0)
+    transferFee?: number
+
+    @IsOptional()
+    @IsBoolean()
+    chargeCustomer?: boolean
+
+    @IsOptional()
     @IsString()
     note?: string
 

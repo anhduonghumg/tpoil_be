@@ -310,6 +310,21 @@ export class SalesQuickEntryService {
      */
     async confirm(dto: ConfirmQuickEntryDto, actor: ScopedActor) {
         if (!dto.lines?.length) throw new BadRequestException('QUICK_ENTRY_LINES_REQUIRED')
+        for (const line of dto.lines) {
+            if (Boolean(line.warehouseId) === Boolean(line.warehouseAreaId)) {
+                throw new BadRequestException({
+                    code: 'QUICK_ENTRY_WAREHOUSE_SCOPE_INVALID',
+                    message: 'Mỗi dòng hàng phải chọn đúng một kho cụ thể hoặc một khu vực.',
+                })
+            }
+            // Phiếu rút phải xuất từ một kho có thật; khu vực không đủ để trừ tồn.
+            if (dto.orderKind === 'WITHDRAWAL' && !line.warehouseId) {
+                throw new BadRequestException({
+                    code: 'QUICK_ENTRY_WITHDRAWAL_WAREHOUSE_REQUIRED',
+                    message: 'Phiếu rút tồn phải chọn kho cụ thể, không nhận khu vực.',
+                })
+            }
+        }
         const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
         await this.assertActiveSalesContract(dto.customerPartyId, orderDate)
@@ -328,7 +343,7 @@ export class SalesQuickEntryService {
                           driverName: dto.driverName ?? '',
                           lines: dto.lines.map((line) => ({
                               productId: line.productId,
-                              warehouseId: line.warehouseId,
+                              warehouseId: line.warehouseId!,
                               requestedQty: line.quantity,
                           })),
                       } as never,
@@ -342,9 +357,11 @@ export class SalesQuickEntryService {
                           lotInvoiceMode: dto.lotInvoiceMode,
                           paymentTermType: dto.paymentTermType,
                           paymentTermDays: dto.paymentTermDays,
+                          paymentPlans: dto.paymentPlans,
                           lines: dto.lines.map((line) => ({
                               productId: line.productId,
                               issueWarehouseId: line.warehouseId,
+                              receivingWarehouseAreaId: line.warehouseAreaId,
                               orderedActualQty: line.quantity,
                               unitPrice: line.unitPrice ?? 0,
                               discountBaseAmount: line.discountBaseAmount ?? line.discountAmount ?? 0,
@@ -356,20 +373,6 @@ export class SalesQuickEntryService {
                       } as never,
                       actor,
                   )
-
-        // Lịch thanh toán chỉ có nghĩa với đơn bán trả chậm; phiếu rút lô không có.
-        if (dto.orderKind !== 'WITHDRAWAL' && dto.paymentPlans?.length && created?.id) {
-            await this.prisma.salesOrderPaymentPlan.createMany({
-                data: dto.paymentPlans.map((plan, index) => ({
-                    salesOrderId: created.id,
-                    dueDays: plan.dueDays,
-                    percent: plan.percent == null ? null : new Prisma.Decimal(plan.percent),
-                    amount: plan.amount == null ? null : new Prisma.Decimal(plan.amount),
-                    note: plan.note?.trim() || null,
-                    sortOrder: index,
-                })),
-            })
-        }
 
         if (dto.logId) {
             await this.prisma.salesQuickEntryLog.update({

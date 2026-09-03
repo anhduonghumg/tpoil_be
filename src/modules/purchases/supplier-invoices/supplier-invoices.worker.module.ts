@@ -6,6 +6,7 @@ import { BackgroundJobsModule } from 'src/modules/background-jobs/background-job
 import { JobArtifactsModule } from 'src/modules/job-artifacts/job-artifacts.module'
 import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
 import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
+import { AccountingInventoryService } from 'src/modules/inventory/accounting-inventory.service'
 
 import { SupplierInvoicesService } from './supplier-invoices.service'
 import { SupplierInvoiceProcessor } from './jobs/supplier-invoice.processor'
@@ -16,6 +17,7 @@ import { SupplierInvoiceWorker } from './supplier-invoice-worker.listener'
     providers: [
         SupplierInvoicesService,
         InventoryCoreService,
+        AccountingInventoryService,
         GoodsReceiptPostingService,
         SupplierInvoiceProcessor,
         SupplierInvoiceWorker,

@@ -30,8 +30,8 @@ export class NotificationEventBus implements OnModuleInit, OnModuleDestroy {
     }
 
     async onModuleInit() {
-        this.publisher = createRedisConnection()
-        this.subscriber = createRedisConnection()
+        this.publisher = createRedisConnection('notify:pub')
+        this.subscriber = createRedisConnection('notify:sub')
         this.subscriber.on('message', (_channel, raw) => {
             try {
                 this.signals.next(JSON.parse(raw) as NotificationSignal)

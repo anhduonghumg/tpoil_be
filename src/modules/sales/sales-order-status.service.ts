@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common'
 import {
     Prisma,
     SalesDeliveryStatus,
+    SalesInvoiceDocumentType,
+    SalesInvoiceStatus,
     SalesOrderKind,
     SalesOrderStatus,
     SalesReconciliationStatus,
@@ -30,6 +32,13 @@ export class SalesOrderStatusService {
                 deliveries: {
                     where: { status: { not: SalesDeliveryStatus.VOIDED } },
                     select: { id: true, status: true },
+                },
+                invoices: {
+                    where: {
+                        documentType: SalesInvoiceDocumentType.ORIGINAL,
+                        status: SalesInvoiceStatus.ISSUED,
+                    },
+                    select: { id: true },
                 },
                 reservations: {
                     include: { lines: { select: { salesOrderLineId: true, activeActualQty: true } } },
@@ -67,6 +76,7 @@ export class SalesOrderStatusService {
         deliveries: Array<{ status: SalesDeliveryStatus }>
         reservations: Array<{ lines: Array<{ salesOrderLineId: string | null; activeActualQty: Prisma.Decimal }> }>
         reconciliation: { lines: Array<{ status: SalesReconciliationStatus }> } | null
+        invoices: Array<{ id: string }>
     }): SalesOrderStatus {
         const deliveries = order.deliveries
         if (deliveries.length) {
@@ -80,7 +90,10 @@ export class SalesOrderStatusService {
                         line.status === SalesReconciliationStatus.MATCHED ||
                         line.status === SalesReconciliationStatus.RESOLVED,
                 )
-                return settled ? SalesOrderStatus.AWAITING_INVOICE : SalesOrderStatus.AWAITING_RECONCILIATION
+                if (!settled) return SalesOrderStatus.AWAITING_RECONCILIATION
+                return order.invoices.length
+                    ? SalesOrderStatus.COMPLETED
+                    : SalesOrderStatus.AWAITING_INVOICE
             }
             if (posted > 0) return SalesOrderStatus.PARTIALLY_DELIVERED
             return SalesOrderStatus.WAREHOUSE_PROCESSING

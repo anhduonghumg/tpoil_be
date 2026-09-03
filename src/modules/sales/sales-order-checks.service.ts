@@ -11,6 +11,7 @@ import {
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
+import { SalesDiscountService } from './sales-discount.service'
 import { startOfToday } from './receivables.service'
 
 export type SalesCheckViolation = {
@@ -58,6 +59,7 @@ export class SalesOrderChecksService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly costLayers: PurchaseTermCostLayerService,
+        private readonly discounts: SalesDiscountService,
     ) {}
 
     /**
@@ -117,7 +119,11 @@ export class SalesOrderChecksService {
                 },
             }),
             db.receivableOpenItem.findMany({
-                where: { customerPartyId, status: { in: ['OPEN', 'PARTIALLY_SETTLED'] } },
+                where: {
+                    customerPartyId,
+                    status: { in: ['OPEN', 'PARTIALLY_SETTLED'] },
+                    settlementType: 'RECEIVABLE',
+                },
                 select: { outstandingAmount: true, dueDate: true },
             }),
         ])
@@ -170,6 +176,24 @@ export class SalesOrderChecksService {
                                 status: true,
                                 legalEntityId: true,
                                 legalEntity: { select: { partyId: true } },
+                            },
+                        },
+                        receivingWarehouseArea: {
+                            select: {
+                                id: true,
+                                name: true,
+                                status: true,
+                                warehouses: {
+                                    where: {
+                                        status: MasterStatus.ACTIVE,
+                                        isOperationalWarehouse: true,
+                                    },
+                                    select: {
+                                        id: true,
+                                        legalEntityId: true,
+                                        legalEntity: { select: { partyId: true } },
+                                    },
+                                },
                             },
                         },
                     },
@@ -269,6 +293,41 @@ export class SalesOrderChecksService {
                 }
             }
         }
+        // Luật "phải có thông báo chiết khấu thì mới cho bán" nằm ở validateSubmittable và
+        // chặn bằng cách throw. submitQuietly nuốt lỗi đó để đơn không bị mất, hậu quả là
+        // đơn nằm im ở nháp mà Sale không biết vì sao. Soi lại đúng luật ấy ở đây để lý do
+        // hiện ra trong danh sách vi phạm của đơn.
+        const discountPairs = order.lines.flatMap((line) =>
+            line.issueWarehouse
+                ? [{ warehouseId: line.issueWarehouse.id, productId: line.productId }]
+                : (line.receivingWarehouseArea?.warehouses ?? [])
+                      .filter((warehouse) => warehouse.legalEntityId === order.legalEntityId)
+                      .map((warehouse) => ({ warehouseId: warehouse.id, productId: line.productId })),
+        )
+        const announcedDiscounts = await this.discounts.resolveDiscounts(discountPairs, new Date(), db)
+        for (const line of order.lines) {
+            const candidates = line.issueWarehouse
+                ? [line.issueWarehouse.id]
+                : (line.receivingWarehouseArea?.warehouses ?? [])
+                      .filter((warehouse) => warehouse.legalEntityId === order.legalEntityId)
+                      .map((warehouse) => warehouse.id)
+            if (candidates.some((warehouseId) => announcedDiscounts.has(`${warehouseId}:${line.productId}`))) {
+                continue
+            }
+            const location = line.issueWarehouse?.name ?? line.receivingWarehouseArea?.name ?? ''
+            violations.push({
+                approvalType: SalesApprovalType.EXCEPTION,
+                code: 'DISCOUNT_NOT_ANNOUNCED',
+                message: `Dòng ${line.lineNo}: ${location} chưa có thông báo chiết khấu cho ${line.product.code ?? line.product.name} — vận hành phải ra thông báo thì đơn mới gửi duyệt được.`,
+                detail: {
+                    lineNo: line.lineNo,
+                    productId: line.productId,
+                    warehouseId: line.issueWarehouseId,
+                    warehouseAreaId: line.receivingWarehouseAreaId,
+                },
+            })
+        }
+
         const maxDiscountEnv = process.env.SALES_MAX_LINE_DISCOUNT
         if (maxDiscountEnv) {
             const maxDiscount = new Prisma.Decimal(maxDiscountEnv)
@@ -331,45 +390,67 @@ export class SalesOrderChecksService {
 
         // ===== 4) Tồn khả dụng (chỉ cảnh báo — chặn thật ở bước giữ hàng, D2 owner pháp nhân) =====
         for (const line of order.lines) {
-            if (!line.issueWarehouse) continue
-            if (line.issueWarehouse.status !== MasterStatus.ACTIVE) {
+            if (!line.issueWarehouse && !line.receivingWarehouseArea) continue
+            if (
+                (line.issueWarehouse && line.issueWarehouse.status !== MasterStatus.ACTIVE) ||
+                (line.receivingWarehouseArea &&
+                    line.receivingWarehouseArea.status !== MasterStatus.ACTIVE)
+            ) {
                 violations.push({
                     approvalType: SalesApprovalType.EXCEPTION,
                     code: 'ISSUE_WAREHOUSE_INACTIVE',
-                    message: `Kho nhận ${line.issueWarehouse.name} không còn hoạt động.`,
-                    detail: { lineNo: line.lineNo, warehouseId: line.issueWarehouse.id },
+                    message: `Kho nhận ${line.issueWarehouse?.name ?? line.receivingWarehouseArea?.name} không còn hoạt động.`,
+                    detail: {
+                        lineNo: line.lineNo,
+                        warehouseId: line.issueWarehouse?.id,
+                        warehouseAreaId: line.receivingWarehouseArea?.id,
+                    },
                 })
                 continue
             }
-            const availability = await db.inventoryAvailabilityBalance.findUnique({
+            const candidateWarehouses = line.issueWarehouse
+                ? [line.issueWarehouse]
+                : (line.receivingWarehouseArea?.warehouses ?? []).filter(
+                      (warehouse) => warehouse.legalEntityId === order.legalEntityId,
+                  )
+            const availability = await db.inventoryAvailabilityBalance.findMany({
                 where: {
-                    warehouseId_productId_ownerPartyId: {
-                        warehouseId: line.issueWarehouse.id,
-                        productId: line.productId,
-                        ownerPartyId: line.issueWarehouse.legalEntity.partyId,
+                    warehouseId: { in: candidateWarehouses.map((warehouse) => warehouse.id) },
+                    productId: line.productId,
+                    ownerPartyId: {
+                        in: [
+                            ...new Set(
+                                candidateWarehouses.map(
+                                    (warehouse) => warehouse.legalEntity.partyId,
+                                ),
+                            ),
+                        ],
                     },
                 },
             })
-            const available = availability
-                ? new Prisma.Decimal(availability.onHandActualQty)
-                      .minus(availability.reservedActualQty)
-                      .minus(availability.pendingActualQty)
-                      .minus(availability.blockedActualQty)
-                : new Prisma.Decimal(0)
+            const available = availability.reduce(
+                (sum, balance) =>
+                    sum
+                        .plus(balance.onHandActualQty)
+                        .minus(balance.reservedActualQty)
+                        .minus(balance.pendingActualQty)
+                        .minus(balance.blockedActualQty),
+                new Prisma.Decimal(0),
+            )
             if (available.lessThan(line.orderedActualQty)) {
                 warnings.push({
                     code: 'INSUFFICIENT_AVAILABLE_STOCK',
-                    message: `Kho ${line.issueWarehouse.name} chỉ còn khả dụng ${available.toString()} cho ${line.product.name} (cần ${line.orderedActualQty.toString()}).`,
+                    message: `${line.issueWarehouse ? 'Kho' : 'Khu vực'} ${line.issueWarehouse?.name ?? line.receivingWarehouseArea?.name} chỉ còn khả dụng ${available.toString()} cho ${line.product.name} (cần ${line.orderedActualQty.toString()}).`,
                     detail: {
                         lineNo: line.lineNo,
-                        warehouseId: line.issueWarehouse.id,
+                        warehouseId: line.issueWarehouse?.id,
+                        warehouseAreaId: line.receivingWarehouseArea?.id,
                         availableQty: available.toString(),
                         requestedQty: line.orderedActualQty.toString(),
                     },
                 })
             }
         }
-
         return {
             violations,
             warnings,

@@ -8,6 +8,7 @@ export type SalesWorkflowEntityType =
     | 'SALES_DELIVERY'
     | 'SALES_INVOICE'
     | 'SALES_RECONCILIATION'
+    | 'SALES_ORDER_ADJUSTMENT'
 
 export type SalesWorkflowEventInput = {
     entityType: SalesWorkflowEntityType

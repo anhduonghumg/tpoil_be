@@ -29,15 +29,20 @@ export class CustomersService {
         PartyRoleType.INTERNAL_COMPANY,
     ])
 
-    private toPartyRole(role: OperationalPartyRole): PartyRoleType {
-        return role === OperationalPartyRole.STORAGE_LESSOR
-            ? PartyRoleType.STORAGE_LESSOR
-            : (role as unknown as PartyRoleType)
+    private readonly merchantRoles = new Set<PartyRoleType>([
+        PartyRoleType.TNPP,
+        PartyRoleType.TNDM,
+        PartyRoleType.TNDL,
+    ])
+
+    private toPartyRole(role: PartyRoleType): PartyRoleType {
+        return role
     }
 
     private toOperationalRole(role: PartyRoleType): OperationalPartyRole | null {
         if (
             this.businessRoles.has(role) ||
+            this.merchantRoles.has(role) ||
             role === PartyRoleType.INVENTORY_OWNER ||
             role === PartyRoleType.WAREHOUSE_OPERATOR ||
             role === PartyRoleType.WAREHOUSE_LESSOR
@@ -302,7 +307,7 @@ export class CustomersService {
         const customerRoles =
             dto.roles ??
             (partnerRoles.some(
-                (role) => role === OperationalPartyRole.SHIP_OWNER || role === OperationalPartyRole.SEA_CARRIER,
+                (role) => role === PartyRoleType.SHIP_OWNER || role === PartyRoleType.SEA_CARRIER,
             )
                 ? [CustomerRole.Other]
                 : [CustomerRole.Retail])

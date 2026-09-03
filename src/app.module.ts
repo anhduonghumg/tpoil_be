@@ -46,6 +46,7 @@ import { BankingModule } from './modules/banking/banking.module'
 import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module'
 import { VatRatesModule } from './modules/vat-rates/vat-rates.module'
 import { NotificationsModule } from './modules/notifications/notifications.module'
+import { OpeningBalancesModule } from './modules/opening-balances/opening-balances.module'
 
 @Module({
     imports: [
@@ -96,6 +97,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         BankAccountsModule,
         VatRatesModule,
         NotificationsModule,
+        OpeningBalancesModule,
     ],
     controllers: [LookupsController, ContractTypesController, EmployeesController, DepartmentsController, AuthController, AppController],
     providers: [ContractTypesService, DepartmentsService, AuditService, AppService, LoggingInterceptor, AllExceptionsFilter],

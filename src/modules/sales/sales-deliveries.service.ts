@@ -1,6 +1,7 @@
 import {
     BadRequestException,
     ConflictException,
+    HttpException,
     Injectable,
     NotFoundException,
 } from '@nestjs/common'
@@ -27,6 +28,7 @@ import { SalesWarehouseScopeService, ScopedActor } from './sales-warehouse-scope
 import {
     ConfirmSalesDeliveryDto,
     ListSalesDeliveriesQueryDto,
+    QuickConfirmSalesDeliveriesDto,
     ReturnSalesDeliveryDto,
     VoidSalesDeliveryDto,
 } from './dto/sales-delivery.dto'
@@ -474,6 +476,88 @@ export class SalesDeliveriesService {
             ),
         )
         return { salesDeliveryId: id, deliveryNo: delivery.deliveryNo, lines }
+    }
+
+    /**
+     * Xác nhận nhanh: ghi sổ ngay theo số kế hoạch và đúng phương án lô hệ thống đề xuất,
+     * không mở form. Dùng cho trường hợp phổ biến là thực xuất đúng bằng kế hoạch — đơn đã
+     * được duyệt và giữ lô từ trước nên không có gì để khai thêm.
+     *
+     * Chạy tuần tự và bắt lỗi từng lệnh: một lệnh hỏng (hết tồn, người khác vừa xác nhận)
+     * không được kéo đổ những lệnh còn lại. Lệnh hỏng vẫn nằm nguyên trong hàng đợi để kho
+     * mở form xử lý tay.
+     */
+    async quickConfirm(dto: QuickConfirmSalesDeliveriesDto, actor: ScopedActor) {
+        const ids = [...new Set(dto.ids)]
+        const rows = await this.prisma.salesDelivery.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, deliveryNo: true },
+        })
+        const deliveryNoById = new Map(rows.map((row) => [row.id, row.deliveryNo]))
+
+        const results: Array<{
+            id: string
+            deliveryNo: string | null
+            ok: boolean
+            code?: string
+            message?: string
+        }> = []
+        for (const id of ids) {
+            const deliveryNo = deliveryNoById.get(id) ?? null
+            try {
+                const plan = await this.fifoSuggestion(id, actor)
+                const shortLine = plan.lines.find((line) =>
+                    new Prisma.Decimal(line.shortageQty).greaterThan(0),
+                )
+                if (shortLine) {
+                    throw new BadRequestException({
+                        code: 'SALES_DELIVERY_QUICK_CONFIRM_SHORTAGE',
+                        message: `Dòng ${shortLine.lineNo} còn thiếu ${shortLine.shortageQty} chưa có lô để xuất — mở form để xử lý.`,
+                    })
+                }
+                await this.confirm(
+                    id,
+                    {
+                        issuedAt: dto.issuedAt,
+                        lines: plan.lines.map((line) => ({
+                            salesDeliveryLineId: line.salesDeliveryLineId,
+                            actualQty: Number(line.plannedActualQty),
+                            allocations: line.suggestion.map((row) => ({
+                                inventoryLotId: row.inventoryLotId,
+                                actualQty: Number(row.actualQty),
+                            })),
+                        })),
+                    },
+                    actor,
+                )
+                results.push({ id, deliveryNo, ok: true })
+            } catch (error) {
+                // Lỗi nghiệp vụ của Nest gói code/message trong response — lấy đúng chỗ đó
+                // để kho đọc được lý do, thay vì nhận một câu chung chung.
+                const payload =
+                    error instanceof HttpException
+                        ? (error.getResponse() as Record<string, unknown>)
+                        : null
+                results.push({
+                    id,
+                    deliveryNo,
+                    ok: false,
+                    code: typeof payload?.code === 'string' ? payload.code : undefined,
+                    message:
+                        typeof payload?.message === 'string'
+                            ? payload.message
+                            : error instanceof Error
+                              ? error.message
+                              : 'Không xác nhận được lệnh xuất.',
+                })
+            }
+        }
+
+        return {
+            confirmed: results.filter((row) => row.ok).length,
+            failed: results.filter((row) => !row.ok).length,
+            results,
+        }
     }
 
     /**

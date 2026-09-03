@@ -68,6 +68,20 @@ function invoiceTimingText(data: SalesOrderPrintData) {
         : 'Ngay sau khi xác nhận đơn hàng'
 }
 
+function paymentScheduleText(data: SalesOrderPrintData) {
+    if (data.paymentTermType === 'SAME_DAY' || !data.paymentPlans.length) {
+        return '<p class="sub-clause">Thanh toán 100% trong ngày đặt hàng.</p>'
+    }
+    return data.paymentPlans
+        .map(
+            (plan, index) => `
+    <p class="sub-clause">Đợt ${index + 1}: ${
+        plan.percent == null ? '' : `${qtyText(plan.percent)}% - `
+    }ngày ${dateText(plan.dueDate)} - <strong>₫ ${money(plan.amount)}</strong></p>`,
+        )
+        .join('')
+}
+
 function retailBody(data: SalesOrderPrintData) {
     return `
     <p class="clause">1. Công ty chúng tôi có nhu cầu đặt hàng <strong>${escapeHtml(data.sellerName)}</strong>, cụ thể như sau:</p>
@@ -131,8 +145,7 @@ function lotBody(data: SalesOrderPrintData) {
 
     <p class="clause">1. Thời gian xuất hóa đơn : ${escapeHtml(invoiceTimingText(data))}</p>
     <p class="clause">2. Thời gian thanh toán:</p>
-    <p class="sub-clause"><span class="box"></span> Thanh toán cùng ngày đặt hàng cũng như ngày nhận hóa đơn của lô hàng</p>
-    <p class="sub-clause"><span class="box"></span> Thỏa thuận khác:...........................................................</p>
+    ${paymentScheduleText(data)}
     <p class="clause">3. Phương thức thanh toán : Bên mua thanh toán cho bên bán bằng ${escapeHtml(data.paymentMethodText.toLowerCase())}.</p>
     <p class="clause">4. Thời gian nhận hàng: ${escapeHtml(data.receiveDateText)}</p>
     <p class="clause dotted">5. Phương thức nhận hàng: ......................................................................................</p>

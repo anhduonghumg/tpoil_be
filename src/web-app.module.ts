@@ -49,6 +49,7 @@ import { EnvironmentTaxesModule } from './modules/environment-taxes/environment-
 import { OperationsModule } from './modules/operations/operations.module'
 import { VatRatesModule } from './modules/vat-rates/vat-rates.module'
 import { NotificationsModule } from './modules/notifications/notifications.module'
+import { OpeningBalancesModule } from './modules/opening-balances/opening-balances.module'
 
 @Module({
     imports: [
@@ -83,6 +84,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         OperationsModule,
         VatRatesModule,
         NotificationsModule,
+        OpeningBalancesModule,
 
         BankingModule,
         BankPurposesModule,

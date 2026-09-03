@@ -31,6 +31,11 @@ export class SalesOrderLineDto {
     @IsUUID()
     receivingWarehouseId?: string
 
+    /** Khu vực nhận khi đơn (đặc biệt đơn lô) chưa xác định kho rút cụ thể. */
+    @IsOptional()
+    @IsUUID()
+    receivingWarehouseAreaId?: string
+
     /** Kho xuất — bắt buộc trước khi gửi kiểm duyệt với đơn SINGLE/LOT. */
     @IsOptional()
     @IsUUID()
@@ -87,6 +92,37 @@ export class SalesOrderLineDto {
     @Type(() => Number)
     @IsNumber()
     taxRate?: number
+
+    /**
+     * Dòng thuế trong bảng thuế GTGT. Gửi cái này thay vì taxRate trần thì hóa đơn điện
+     * tử mới phân biệt được "không chịu thuế" với "thuế suất 0%".
+     */
+    @IsOptional()
+    @IsUUID()
+    vatRateId?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+/** Một đợt thanh toán của đơn bán theo ngày cụ thể. */
+export class SalesOrderPaymentPlanDto {
+    @IsOptional()
+    @IsDateString()
+    dueDate?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    percent?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    amount?: number
 
     @IsOptional()
     @IsString()
@@ -149,8 +185,14 @@ export class CreateSalesOrderDto {
     @IsOptional()
     @Type(() => Number)
     @IsInt()
-    @Min(1)
+    @Min(0)
     paymentTermDays?: number
+
+    @IsOptional()
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => SalesOrderPaymentPlanDto)
+    paymentPlans?: SalesOrderPaymentPlanDto[]
 
     @IsOptional()
     @IsDateString()
@@ -184,8 +226,14 @@ export class UpdateSalesOrderDto {
     @IsOptional()
     @Type(() => Number)
     @IsInt()
-    @Min(1)
+    @Min(0)
     paymentTermDays?: number | null
+
+    @IsOptional()
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => SalesOrderPaymentPlanDto)
+    paymentPlans?: SalesOrderPaymentPlanDto[]
 
     @IsOptional()
     @IsDateString()
@@ -358,4 +406,9 @@ export class AdjustLineSupplierDto {
     @IsOptional()
     @IsUUID()
     supplierPartyId?: string | null
+
+    /** Mã rút đi cùng NCC đã chọn. Bắt buộc về nghiệp vụ khi đổi thủ công. */
+    @IsOptional()
+    @IsEnum(SalesOrderSupplySource)
+    supplySource?: SalesOrderSupplySource
 }

@@ -33,8 +33,17 @@ export class ConfirmQuickEntryLineDto {
     @IsUUID()
     productId!: string
 
+    /**
+     * Kho cụ thể. Đơn lô nhiều khi chỉ chốt được khu vực, kho lấy hàng quyết định ở từng
+     * lượt rút — khi đó để trống và điền warehouseAreaId. Phải có đúng một trong hai.
+     */
+    @IsOptional()
     @IsUUID()
-    warehouseId!: string
+    warehouseId?: string
+
+    @IsOptional()
+    @IsUUID()
+    warehouseAreaId?: string
 
     @Type(() => Number)
     @IsNumber()
@@ -78,12 +87,10 @@ export class ConfirmQuickEntryLineDto {
     warehouseRawText?: string
 }
 
-/** Một mốc phải trả: sau bao nhiêu ngày, theo tỷ lệ hay theo số tiền chốt sẵn. */
+/** Một mốc phải trả theo ngày cụ thể, theo tỷ lệ hay theo số tiền chốt sẵn. */
 export class QuickEntryPaymentPlanDto {
-    @Type(() => Number)
-    @IsInt()
-    @Min(0)
-    dueDays!: number
+    @IsDateString()
+    dueDate!: string
 
     @IsOptional()
     @Type(() => Number)

@@ -131,6 +131,18 @@ export class ConfirmSalesDeliveryDto {
     lines!: ConfirmSalesDeliveryLineDto[]
 }
 
+export class QuickConfirmSalesDeliveriesDto {
+    /** Lệnh xuất cần ghi sổ ngay theo số kế hoạch và phương án lô hệ thống đề xuất. */
+    @IsArray()
+    @ArrayMinSize(1)
+    @IsUUID(undefined, { each: true })
+    ids!: string[]
+
+    @IsOptional()
+    @IsDateString()
+    issuedAt?: string
+}
+
 export class VoidSalesDeliveryDto {
     @IsString()
     @MaxLength(1000)

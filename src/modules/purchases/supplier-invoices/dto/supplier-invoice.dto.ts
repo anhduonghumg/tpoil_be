@@ -8,6 +8,16 @@ export class CreateSupplierInvoiceLineDto {
     @IsUUID()
     productId!: string
 
+    /**
+     * Required whenever the invoice is created from a purchase order.  A product
+     * can occur on more than one purchase-order line (for example, at different
+     * supplier depots), so productId alone is not a safe way to identify its
+     * source line.
+     */
+    @IsOptional()
+    @IsUUID()
+    purchaseOrderLineId?: string
+
     @IsNumber()
     qty!: number
 

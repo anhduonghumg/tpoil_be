@@ -19,6 +19,12 @@ export type SalesOrderPrintLine = {
     warehouseName: string
 }
 
+export type SalesOrderPrintPaymentPlan = {
+    dueDate: Date | string
+    percent: number | null
+    amount: number
+}
+
 export type SalesOrderPrintData = {
     variant: SalesOrderPrintVariant
     orderNo: string
@@ -34,8 +40,10 @@ export type SalesOrderPrintData = {
 
     uomText: string
     paymentMethodText: string
+    paymentTermType: 'SAME_DAY' | 'NET_DAYS'
     receiveDateText: string
     totalAmount: number
 
     lines: SalesOrderPrintLine[]
+    paymentPlans: SalesOrderPrintPaymentPlan[]
 }

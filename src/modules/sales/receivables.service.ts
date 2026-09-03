@@ -55,6 +55,7 @@ export class ReceivablesService {
             salesOrderId?: string
             withdrawalRequestId?: string
             salesInvoiceId?: string
+            installmentNo?: number
             amount: Prisma.Decimal
             currency: string
             legalEntityId: string
@@ -82,7 +83,10 @@ export class ReceivablesService {
             where: {
                 status: { not: ReceivableOpenItemStatus.VOIDED },
                 ...(args.salesInvoiceId
-                    ? { salesInvoiceId: args.salesInvoiceId }
+                    ? {
+                          salesInvoiceId: args.salesInvoiceId,
+                          installmentNo: args.installmentNo ?? 1,
+                      }
                     : args.withdrawalRequestId
                       ? { withdrawalRequestId: args.withdrawalRequestId }
                       : { salesOrderId: args.salesOrderId }),
@@ -94,6 +98,7 @@ export class ReceivablesService {
         const openItem = await tx.receivableOpenItem.create({
             data: {
                 salesInvoiceId: args.salesInvoiceId ?? null,
+                installmentNo: args.installmentNo ?? 1,
                 salesOrderId: args.salesOrderId ?? null,
                 withdrawalRequestId: args.withdrawalRequestId ?? null,
                 legalEntityId: args.legalEntityId,
@@ -408,7 +413,7 @@ export class ReceivablesService {
     /** Total a customer still owes — feeds the credit check and the customer overview. */
     async customerBalance(customerPartyId: string) {
         const items = await this.prisma.receivableOpenItem.findMany({
-            where: { customerPartyId, status: { in: openStatuses } },
+            where: { customerPartyId, status: { in: openStatuses }, settlementType: 'RECEIVABLE' },
             select: { outstandingAmount: true, dueDate: true },
         })
         const now = startOfToday()
@@ -442,6 +447,7 @@ export class ReceivablesService {
             where: {
                 status: { in: openStatuses },
                 customerPartyId: customerPartyId ?? undefined,
+                settlementType: 'RECEIVABLE',
             },
             include: { customer: { select: { id: true, code: true, name: true } } },
         })

@@ -26,6 +26,7 @@ const permissions = [
     ['sales.profitability.view', 'Xem báo cáo lãi/lỗ theo nguồn hàng mua'],
     ['sales.quickentry.use', 'Dùng nhập nhanh đơn hàng'],
     ['sales.alias.manage', 'Quản lý danh mục cách viết tắt (alias)'],
+    ['sales.invoice.credit_override', 'Cho phep ke toan xac nhan phat hanh khi vuot han muc cong no'],
 ] as const
 
 export async function seedSalesPermissions(db: PrismaClient) {
@@ -55,6 +56,26 @@ export async function seedSalesPermissions(db: PrismaClient) {
             data: permissionRows.map((permission) => ({
                 roleId: systemAdmin.id,
                 permissionId: permission.id,
+            })),
+            skipDuplicates: true,
+        })
+    }
+
+    // Every role that may publish sales invoices is an accounting decision-maker for
+    // the soft credit warning. Keep this explicit permission so it can be revoked later.
+    const [issuePermission, overridePermission] = await Promise.all([
+        db.permission.findUnique({ where: { code: 'sales.invoice.issue' }, select: { id: true } }),
+        db.permission.findUnique({ where: { code: 'sales.invoice.credit_override' }, select: { id: true } }),
+    ])
+    if (issuePermission && overridePermission) {
+        const issuerRoles = await db.rolePermission.findMany({
+            where: { permissionId: issuePermission.id },
+            select: { roleId: true },
+        })
+        await db.rolePermission.createMany({
+            data: issuerRoles.map((row) => ({
+                roleId: row.roleId,
+                permissionId: overridePermission.id,
             })),
             skipDuplicates: true,
         })

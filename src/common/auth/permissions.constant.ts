@@ -2,6 +2,9 @@
 export const PERMISSIONS = {
     system: {
         rbacAdmin: 'system.rbac.admin',
+        openingBalancesView: 'system.opening_balances.view',
+        openingBalancesManage: 'system.opening_balances.manage',
+        openingBalancesPost: 'system.opening_balances.post',
     },
     contracts: {
         view: 'contracts.view',
@@ -92,6 +95,7 @@ export const PERMISSIONS = {
         reconcile: 'sales.reconcile',
         invoiceView: 'sales.invoice.view',
         invoiceIssue: 'sales.invoice.issue',
+        invoiceCreditOverride: 'sales.invoice.credit_override',
         withdrawCreate: 'sales.withdraw.create',
         receivableView: 'sales.receivable.view',
         receivableAllocate: 'sales.receivable.allocate',
