@@ -2,14 +2,34 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { CustomerListQueryDto } from './dto/customer-list-query.dto'
 import { CreateCustomerDto } from './dto/create-customer.dto'
 import { UpdateCustomerDto } from './dto/update-customer.dto'
-import { CustomerRole, OperationalPartyRole, PartyRoleType, Prisma } from '@prisma/client'
+import { OperationalPartyRole, PartyRoleType, Prisma } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import dayjs from 'dayjs'
 import { CustomerSelectQueryDto } from './dto/customer-select-query.dto'
 import { CustomerListRole } from './dto/customer-list-query.dto'
 import { CustomerSelectRole } from './dto/customer-select-query.dto'
 import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchase-defaults.dto'
-import { MERCHANT_DERIVED_ROLES, MerchantRole, PartyMerchantService } from './party-merchant.service'
+import {
+    MERCHANT_DERIVED_ROLES,
+    MerchantRole,
+    PartyMerchantService,
+} from './party-merchant.service'
+import {
+    CreatePartyBankAccountDto,
+    PartyBankAccountInputDto,
+    UpdatePartyBankAccountDto,
+} from './dto/party-bank-account.dto'
+
+/** Một dòng tài khoản ngân hàng đã được chuẩn hóa, sẵn sàng ghi xuống DB. */
+type NormalizedBankAccount = {
+    id?: string
+    bankName: string
+    bankCode: string | null
+    accountNo: string
+    accountName: string
+    isDefault: boolean
+    isActive: boolean
+}
 
 @Injectable()
 export class CustomersService {
@@ -84,8 +104,119 @@ export class CustomersService {
         return s ? s : null
     }
 
-    private async syncPartyRoles(tx: Prisma.TransactionClient, partyId: string, roles: PartyRoleType[]) {
-        const uniqueRoles = [...new Set(roles)]
+    /** Ngày loại thương nhân bắt đầu có hiệu lực; bỏ trống thì tính từ hôm nay. */
+    private merchantEffectiveFrom(value?: string): Date {
+        if (!value) return new Date()
+        const day = new Date(value)
+        if (Number.isNaN(day.getTime())) {
+            throw new BadRequestException('Ngày áp dụng loại thương nhân không hợp lệ.')
+        }
+        return day
+    }
+
+    /**
+     * Chuẩn hóa danh sách tài khoản ngân hàng: bỏ dòng trắng, chặn trùng số tài khoản,
+     * và giữ đúng MỘT tài khoản mặc định — đề nghị thanh toán lấy tài khoản mặc định ra
+     * điền sẵn nên hai dòng cùng đánh dấu sẽ cho kết quả tùy thứ tự đọc.
+     */
+    private normalizeBankAccounts(input?: PartyBankAccountInputDto[]): NormalizedBankAccount[] {
+        const rows: NormalizedBankAccount[] = (input ?? [])
+            .map((item) => ({
+                id: item.id,
+                bankName: String(item.bankName ?? '').trim(),
+                bankCode: this.normalizeNullableText(item.bankCode),
+                accountNo: String(item.accountNo ?? '').trim(),
+                accountName: String(item.accountName ?? '').trim(),
+                isDefault: item.isDefault ?? false,
+                isActive: item.isActive ?? true,
+            }))
+            .filter((item) => item.accountNo && item.bankName)
+
+        const seen = new Set<string>()
+        for (const row of rows) {
+            if (seen.has(row.accountNo)) {
+                throw new BadRequestException(`Số tài khoản ${row.accountNo} bị khai trùng.`)
+            }
+            seen.add(row.accountNo)
+            if (!row.accountName) row.accountName = row.bankName
+        }
+
+        const active = rows.filter((row) => row.isActive)
+        const chosen = active.find((row) => row.isDefault) ?? active[0]
+        for (const row of rows) row.isDefault = row === chosen
+        return rows
+    }
+
+    /**
+     * Đề nghị thanh toán trỏ vào tài khoản (onDelete: SetNull), nên xóa thẳng sẽ làm
+     * chứng từ cũ mất thông tin thụ hưởng. Chỉ xóa khi chưa ai tham chiếu, còn lại
+     * ngừng hoạt động để không xuất hiện trong ô chọn nữa.
+     */
+    private async retireBankAccount(tx: Prisma.TransactionClient, id: string) {
+        const referenced = await tx.purchaseTermPaymentRequest.count({
+            where: { beneficiaryBankAccountId: id },
+        })
+        if (referenced > 0) {
+            await tx.partyBankAccount.update({
+                where: { id },
+                data: { isActive: false, isDefault: false },
+            })
+            return false
+        }
+        await tx.partyBankAccount.delete({ where: { id } })
+        return true
+    }
+
+    /** Đồng bộ toàn bộ danh sách tài khoản của một đối tác theo đúng những gì form gửi lên. */
+    private async syncBankAccounts(
+        tx: Prisma.TransactionClient,
+        partyId: string,
+        rows: NormalizedBankAccount[],
+    ) {
+        const current = await tx.partyBankAccount.findMany({
+            where: { partyId },
+            select: { id: true, accountNo: true },
+        })
+        const keep = new Set(rows.map((row) => row.id).filter((id): id is string => Boolean(id)))
+
+        // Gỡ trước rồi mới ghi, để số tài khoản vừa bỏ không chặn dòng mới trùng số.
+        for (const existing of current) {
+            if (keep.has(existing.id)) continue
+            await this.retireBankAccount(tx, existing.id)
+        }
+
+        const remaining = await tx.partyBankAccount.findMany({
+            where: { partyId },
+            select: { id: true, accountNo: true },
+        })
+        for (const row of rows) {
+            const { id, ...data } = row
+            const target =
+                (id && remaining.find((item) => item.id === id)) ||
+                // Tài khoản cũ chỉ bị ngừng hoạt động vẫn giữ chỗ số tài khoản (unique
+                // theo partyId+accountNo), nên khai lại chính số đó là dùng lại dòng cũ.
+                remaining.find((item) => item.accountNo === data.accountNo)
+            if (target) {
+                await tx.partyBankAccount.update({ where: { id: target.id }, data })
+            } else {
+                await tx.partyBankAccount.create({ data: { partyId, ...data } })
+            }
+        }
+    }
+
+    /**
+     * Đồng bộ vai trò đối tác. `preserve` là các vai trò do trục thương nhân quản lý
+     * (loại thương nhân và CUSTOMER/SUPPLIER suy ra từ nó): chúng có ngày hiệu lực
+     * riêng nên PartyMerchantService đóng/mở kỳ, ở đây chỉ được để yên.
+     */
+    private async syncPartyRoles(
+        tx: Prisma.TransactionClient,
+        partyId: string,
+        roles: PartyRoleType[],
+        preserve: PartyRoleType[] = [],
+    ) {
+        const preserved = new Set(preserve)
+        const uniqueRoles = [...new Set(roles)].filter((role) => !preserved.has(role))
         const currentRoles = await tx.partyRole.findMany({
             where: { partyId, validTo: null },
             select: { id: true, role: true },
@@ -101,11 +232,12 @@ export class CustomersService {
         }
 
         const now = new Date()
+        const untouchable = [...new Set([...uniqueRoles, ...preserved])]
         await tx.partyRole.updateMany({
             where: {
                 partyId,
                 validTo: null,
-                ...(uniqueRoles.length ? { role: { notIn: uniqueRoles } } : {}),
+                ...(untouchable.length ? { role: { notIn: untouchable } } : {}),
             },
             data: { validTo: now },
         })
@@ -304,23 +436,16 @@ export class CustomersService {
         const isSupplier = dto.isSupplier ?? inferred === 'SUPPLIER'
         const isInternal = dto.isInternal ?? inferred === 'INTERNAL'
         const partnerRoles = [...new Set(dto.partnerRoles ?? [])]
-        const customerRoles =
-            dto.roles ??
-            (partnerRoles.some(
-                (role) => role === PartyRoleType.SHIP_OWNER || role === PartyRoleType.SEA_CARRIER,
-            )
-                ? [CustomerRole.Other]
-                : [CustomerRole.Retail])
-
         // Chọn loại thương nhân là đủ — CUSTOMER/SUPPLIER suy ra từ đó, khỏi tick tay.
+        // Trục thương nhân do PartyMerchantService mở kỳ vì nó cần ngày hiệu lực riêng.
         const merchantRole = (dto.merchantRole ?? null) as MerchantRole | null
-        const derivedFromMerchant: PartyRoleType[] = merchantRole
+        const merchantManaged: PartyRoleType[] = merchantRole
             ? [merchantRole, ...MERCHANT_DERIVED_ROLES[merchantRole]]
             : []
+        const bankAccounts = this.normalizeBankAccounts(dto.bankAccounts)
 
         const assignedRoles: PartyRoleType[] = [
             ...new Set([
-                ...derivedFromMerchant,
                 ...(isCustomer && !merchantRole ? [PartyRoleType.CUSTOMER] : []),
                 ...(isSupplier && !merchantRole ? [PartyRoleType.SUPPLIER] : []),
                 ...(isInternal ? [PartyRoleType.INTERNAL_COMPANY] : []),
@@ -328,8 +453,8 @@ export class CustomersService {
             ]),
         ]
 
-        if (!assignedRoles.length) {
-            throw new BadRequestException('Pháº£i chá»n Ã­t nháº¥t má»™t vai trÃ² Ä‘á»‘i tÃ¡c.')
+        if (!merchantRole && !assignedRoles.length) {
+            throw new BadRequestException('Phải chọn ít nhất một vai trò đối tác.')
         }
 
         const data: Prisma.PartyCreateInput = {
@@ -339,20 +464,17 @@ export class CustomersService {
             taxVerified: dto.taxVerified ?? false,
             taxSource: dto.taxSource,
             taxSyncedAt: dto.taxSyncedAt,
-            customerRoles,
-            type: dto.type,
             ...(dto.groupId && { group: { connect: { id: dto.groupId } } }),
             ...(dto.documentOwnerEmpId && { documentOwnerEmp: { connect: { id: dto.documentOwnerEmpId } } }),
             billingAddress: dto.billingAddress,
             shippingAddress: dto.shippingAddress,
             contactEmail: dto.contactEmail,
             contactPhone: dto.contactPhone,
-            bankAccountNo: dto.bankAccountNo?.trim() || null,
-            creditLimit: dto.creditLimit ?? undefined,
-            tempLimit: dto.tempLimit ?? undefined,
-            tempFrom: dto.tempFrom,
-            tempTo: dto.tempTo,
-            paymentTermDays: dto.paymentTermDays,
+            // Bản sao của tài khoản mặc định, giữ lại cho các báo cáo và bản in cũ vẫn
+            // đang đọc cột này. Nguồn thật là bảng PartyBankAccount.
+            bankAccountNo: bankAccounts.find((item) => item.isDefault)?.accountNo ?? null,
+            // creditLimit / paymentTermDays cố ý không nhận ở đây: màn Quản lý công nợ
+            // mới được ghi chúng, vì nó có kiểm quyền, bắt lý do và ghi CreditLimitHistory.
             status: dto.status,
             note: dto.note,
             ...(dto.salesOwnerEmpId && {
@@ -368,8 +490,26 @@ export class CustomersService {
 
         return this.prisma.$transaction(async (tx) => {
             const created = await tx.party.create({ data })
-            await this.syncPartyRoles(tx, created.id, assignedRoles)
-            return this.apiParty({ ...created, roles: assignedRoles.map((role) => ({ role })) })
+            // Trục thương nhân mở kỳ trước, syncPartyRoles để yên các vai trò nó vừa mở.
+            if (merchantRole) {
+                await this.merchants.setMerchantRole(
+                    created.id,
+                    merchantRole,
+                    this.merchantEffectiveFrom(dto.merchantEffectiveFrom),
+                    tx,
+                )
+            }
+            await this.syncPartyRoles(tx, created.id, assignedRoles, merchantManaged)
+            if (bankAccounts.length) {
+                await tx.partyBankAccount.createMany({
+                    data: bankAccounts.map(({ id: _id, ...row }) => ({ partyId: created.id, ...row })),
+                })
+            }
+            const roles = await tx.partyRole.findMany({
+                where: { partyId: created.id, validTo: null },
+                select: { role: true },
+            })
+            return this.apiParty({ ...created, roles })
         })
     }
 
@@ -377,10 +517,16 @@ export class CustomersService {
     async detail(id: string) {
         const customer = await this.prisma.party.findFirst({
             where: { id, deletedAt: null },
-            include: { roles: { where: { validTo: null }, select: { role: true } } },
+            include: {
+                roles: { where: { validTo: null }, select: { role: true } },
+                bankAccounts: { orderBy: [{ isActive: 'desc' }, { isDefault: 'desc' }, { createdAt: 'asc' }] },
+            },
         })
         if (!customer) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y khÃ¡ch hÃ ng')
-        return this.apiParty(customer)
+        // Lịch sử loại thương nhân đi kèm hồ sơ: người dùng cần thấy kỳ nào áp dụng từ
+        // khi nào trước khi đổi sang loại mới.
+        const merchantHistory = await this.merchants.merchantHistory(id)
+        return { ...this.apiParty(customer), merchantHistory }
     }
 
     // Update
@@ -414,18 +560,30 @@ export class CustomersService {
             (role) => activeRoleSet.has(role),
         ) ?? null
         const merchantRole = dto.merchantRole !== undefined ? (dto.merchantRole as MerchantRole | null) : currentMerchantRole
-        const derivedFromMerchant: PartyRoleType[] = merchantRole
+        const merchantChanged = merchantRole !== currentMerchantRole
+        // Không gửi mảng = không đụng tới tài khoản ngân hàng; gửi mảng rỗng = xóa hết.
+        const bankAccounts = dto.bankAccounts ? this.normalizeBankAccounts(dto.bankAccounts) : null
+
+        /**
+         * Vai trò do trục thương nhân quản SAU thay đổi: loại thương nhân mới và
+         * CUSTOMER/SUPPLIER nó suy ra. syncPartyRoles phải để yên chúng vì kỳ hiệu lực
+         * của chúng do PartyMerchantService đóng/mở theo ngày người dùng chọn.
+         *
+         * Tính theo loại MỚI chứ không phải loại cũ: khi người dùng bỏ loại thương nhân,
+         * CUSTOMER/SUPPLIER quay về do các tick thủ công quyết định.
+         */
+        const merchantManaged: PartyRoleType[] = merchantRole
             ? [merchantRole, ...MERCHANT_DERIVED_ROLES[merchantRole]]
             : []
+
         const assignedRoles: PartyRoleType[] = [
-            ...derivedFromMerchant,
             ...(nextIsCustomer && !merchantRole ? [PartyRoleType.CUSTOMER] : []),
             ...(nextIsSupplier && !merchantRole ? [PartyRoleType.SUPPLIER] : []),
             ...(nextIsInternal ? [PartyRoleType.INTERNAL_COMPANY] : []),
             ...nextPartnerRoles.map((role) => this.toPartyRole(role)),
         ]
 
-        if (!nextIsCustomer && !nextIsSupplier && !nextIsInternal && nextPartnerRoles.length === 0) {
+        if (!merchantRole && !nextIsCustomer && !nextIsSupplier && !nextIsInternal && nextPartnerRoles.length === 0) {
             throw new BadRequestException('Pháº£i chá»n Ã­t nháº¥t má»™t vai trÃ² Ä‘á»‘i tÃ¡c.')
         }
 
@@ -435,8 +593,6 @@ export class CustomersService {
             taxVerified: dto.taxVerified,
             taxSource: dto.taxSource,
             taxSyncedAt: dto.taxSyncedAt,
-            customerRoles: dto.roles,
-            type: dto.type,
 
             ...(dto.groupId === null ? { group: { disconnect: true } } : dto.groupId ? { group: { connect: { id: dto.groupId } } } : {}),
 
@@ -449,12 +605,13 @@ export class CustomersService {
             shippingAddress: dto.shippingAddress,
             contactEmail: dto.contactEmail,
             contactPhone: dto.contactPhone,
-            bankAccountNo: dto.bankAccountNo?.trim() || null,
-            creditLimit: dto.creditLimit ?? undefined,
-            tempLimit: dto.tempLimit ?? undefined,
-            tempFrom: dto.tempFrom,
-            tempTo: dto.tempTo,
-            paymentTermDays: dto.paymentTermDays,
+            // Bản sao của tài khoản mặc định cho các báo cáo cũ; chỉ đụng tới khi form
+            // thực sự gửi danh sách tài khoản lên.
+            ...(bankAccounts
+                ? { bankAccountNo: bankAccounts.find((item) => item.isDefault)?.accountNo ?? null }
+                : {}),
+            // creditLimit / paymentTermDays cố ý không nhận ở đây: màn Quản lý công nợ
+            // mới được ghi chúng, vì nó có kiểm quyền, bắt lý do và ghi CreditLimitHistory.
             status: dto.status,
             note: dto.note,
             ...(dto.salesOwnerEmpId && {
@@ -470,7 +627,20 @@ export class CustomersService {
 
         return this.prisma.$transaction(async (tx) => {
             const updated = await tx.party.update({ where: { id }, data })
-            await this.syncPartyRoles(tx, id, assignedRoles)
+            // Trục thương nhân chạy TRƯỚC: đổi loại là mở một kỳ mới chứ không ghi đè, kỳ
+            // cũ được đóng ngay trước ngày hiệu lực để chứng từ cũ vẫn tra ra đúng loại
+            // của nó. Xong rồi syncPartyRoles mới xử lý phần vai trò còn lại, dựa trên
+            // trạng thái đã chốt.
+            if (merchantChanged) {
+                await this.merchants.setMerchantRole(
+                    id,
+                    merchantRole,
+                    this.merchantEffectiveFrom(dto.merchantEffectiveFrom),
+                    tx,
+                )
+            }
+            await this.syncPartyRoles(tx, id, assignedRoles, merchantManaged)
+            if (bankAccounts) await this.syncBankAccounts(tx, id, bankAccounts)
             const roles = await tx.partyRole.findMany({
                 where: { partyId: id, validTo: null },
                 select: { role: true },
@@ -613,5 +783,124 @@ export class CustomersService {
             defaultDeliveryLocation: updated.defaultDeliveryLocation,
             updatedAt: updated.updatedAt,
         }
+    }
+
+    // ---- Tài khoản ngân hàng của đối tác ----
+
+    private async assertPartyExists(partyId: string) {
+        const party = await this.prisma.party.findFirst({
+            where: { id: partyId, deletedAt: null },
+            select: { id: true },
+        })
+        if (!party) throw new NotFoundException('Không tìm thấy đối tác')
+    }
+
+    /** Số tài khoản mặc định được nhân bản sang Party.bankAccountNo cho các báo cáo cũ đọc. */
+    private async refreshLegacyBankAccountNo(tx: Prisma.TransactionClient, partyId: string) {
+        const preferred = await tx.partyBankAccount.findFirst({
+            where: { partyId, isActive: true },
+            orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+            select: { accountNo: true },
+        })
+        await tx.party.update({
+            where: { id: partyId },
+            data: { bankAccountNo: preferred?.accountNo ?? null },
+        })
+    }
+
+    /** Chỉ một tài khoản được làm mặc định cho mỗi đối tác. */
+    private async clearOtherDefaults(tx: Prisma.TransactionClient, partyId: string, keepId: string) {
+        await tx.partyBankAccount.updateMany({
+            where: { partyId, isDefault: true, id: { not: keepId } },
+            data: { isDefault: false },
+        })
+    }
+
+    async listBankAccounts(partyId: string) {
+        await this.assertPartyExists(partyId)
+        return this.prisma.partyBankAccount.findMany({
+            where: { partyId },
+            orderBy: [{ isActive: 'desc' }, { isDefault: 'desc' }, { createdAt: 'asc' }],
+        })
+    }
+
+    async createBankAccount(partyId: string, dto: CreatePartyBankAccountDto) {
+        await this.assertPartyExists(partyId)
+        const [row] = this.normalizeBankAccounts([dto])
+        if (!row) throw new BadRequestException('Thiếu tên ngân hàng hoặc số tài khoản.')
+
+        return this.prisma.$transaction(async (tx) => {
+            const duplicate = await tx.partyBankAccount.findFirst({
+                where: { partyId, accountNo: row.accountNo },
+                select: { id: true },
+            })
+            if (duplicate) {
+                throw new BadRequestException(`Số tài khoản ${row.accountNo} đã có trong hồ sơ.`)
+            }
+            // Tài khoản đầu tiên mặc nhiên là mặc định, nếu không đề nghị thanh toán sẽ
+            // không có gì để điền sẵn.
+            const existingCount = await tx.partyBankAccount.count({ where: { partyId, isActive: true } })
+            const { id: _id, ...data } = row
+            const created = await tx.partyBankAccount.create({
+                data: { partyId, ...data, isDefault: data.isDefault || existingCount === 0 },
+            })
+            if (created.isDefault) await this.clearOtherDefaults(tx, partyId, created.id)
+            await this.refreshLegacyBankAccountNo(tx, partyId)
+            return created
+        })
+    }
+
+    async updateBankAccount(partyId: string, accountId: string, dto: UpdatePartyBankAccountDto) {
+        const existing = await this.prisma.partyBankAccount.findFirst({
+            where: { id: accountId, partyId },
+        })
+        if (!existing) throw new NotFoundException('Không tìm thấy tài khoản ngân hàng')
+
+        const accountNo = dto.accountNo?.trim()
+        return this.prisma.$transaction(async (tx) => {
+            if (accountNo && accountNo !== existing.accountNo) {
+                const duplicate = await tx.partyBankAccount.findFirst({
+                    where: { partyId, accountNo, id: { not: accountId } },
+                    select: { id: true },
+                })
+                if (duplicate) {
+                    throw new BadRequestException(`Số tài khoản ${accountNo} đã có trong hồ sơ.`)
+                }
+            }
+            const updated = await tx.partyBankAccount.update({
+                where: { id: accountId },
+                data: {
+                    bankName: dto.bankName?.trim(),
+                    bankCode: dto.bankCode === undefined ? undefined : this.normalizeNullableText(dto.bankCode),
+                    accountNo,
+                    accountName: dto.accountName?.trim(),
+                    isActive: dto.isActive,
+                    // Tài khoản ngừng hoạt động không thể là mặc định.
+                    isDefault: dto.isActive === false ? false : dto.isDefault,
+                },
+            })
+            if (updated.isDefault) await this.clearOtherDefaults(tx, partyId, updated.id)
+            await this.refreshLegacyBankAccountNo(tx, partyId)
+            return updated
+        })
+    }
+
+    async removeBankAccount(partyId: string, accountId: string) {
+        const existing = await this.prisma.partyBankAccount.findFirst({
+            where: { id: accountId, partyId },
+            select: { id: true },
+        })
+        if (!existing) throw new NotFoundException('Không tìm thấy tài khoản ngân hàng')
+
+        return this.prisma.$transaction(async (tx) => {
+            const deleted = await this.retireBankAccount(tx, accountId)
+            await this.refreshLegacyBankAccountNo(tx, partyId)
+            return {
+                deleted,
+                message: deleted
+                    ? 'Đã xóa tài khoản ngân hàng.'
+                    : 'Tài khoản đã gắn với đề nghị thanh toán nên chỉ được ngừng sử dụng, không xóa.',
+            }
+        })
     }
 }

@@ -233,7 +233,7 @@ export class SalesDashboardService {
         // Giá trị đơn đặt trong tháng phải nhân từng dòng nên không dùng aggregate được.
         const bookedRows = await this.prisma.$queryRaw<{ value: number | null }[]>`
             SELECT COALESCE(
-                SUM(line."orderedActualQty" * (line."unitPrice" - line."discountAmount")),
+                SUM(line."orderedActualQty" * (line."unitPrice" - line."discountAmount" + line."transportFeeUnitPrice")),
                 0
             )::float8 AS value
             FROM "SalesOrderLine" line

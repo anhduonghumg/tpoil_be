@@ -81,6 +81,32 @@ export class SalesWithdrawalsService {
     }
 
     /**
+     * Số chính thức của một lần rút bám theo đơn lô nguồn. DocumentSequence khóa theo id đơn
+     * nên hai Sale tạo đồng thời vẫn nhận hai số khác nhau; orderNo chỉ dùng ở phần hiển thị.
+     */
+    private async nextSourceRequestNo(
+        tx: Prisma.TransactionClient,
+        salesOrderId: string,
+        orderNo: string,
+    ) {
+        const sequence = await tx.documentSequence.upsert({
+            where: {
+                moduleCode_period: {
+                    moduleCode: 'SALES_WITHDRAWAL_BY_ORDER',
+                    period: salesOrderId,
+                },
+            },
+            create: {
+                moduleCode: 'SALES_WITHDRAWAL_BY_ORDER',
+                period: salesOrderId,
+                currentNo: 1,
+            },
+            update: { currentNo: { increment: 1 } },
+        })
+        return `${orderNo}.RL${sequence.currentNo}`
+    }
+
+    /**
      * Lot orders that can serve a draw: same customer, same product, same warehouse,
      * order still active, and enough left to draw. Plate, driver and the message's
      * "Đơn 1/2/3" numbering are explicitly NOT selection criteria (spec §6).
@@ -361,6 +387,11 @@ export class SalesWithdrawalsService {
                 })
             }
 
+            const matches: Array<{
+                requestLineId: string
+                salesOrderLineId: string
+                requestedQty: Prisma.Decimal
+            }> = []
             for (const line of request.lines) {
                 const match = lotOrder.lines.find(
                     (orderLine) =>
@@ -376,22 +407,48 @@ export class SalesWithdrawalsService {
                         message: `Đơn lô nguồn không có dòng phù hợp cho dòng ${line.lineNo}.`,
                     })
                 }
-                const balance = await this.lots.balanceForLine(tx, match.id)
-                if (!balance || new Prisma.Decimal(line.requestedQty).greaterThan(balance.remainingQty)) {
+                matches.push({
+                    requestLineId: line.id,
+                    salesOrderLineId: match.id,
+                    requestedQty: new Prisma.Decimal(line.requestedQty),
+                })
+            }
+
+            // Hai dòng phiếu có thể cùng trỏ vào một dòng lô. Cộng trước khi kiểm tra để
+            // từng dòng không cùng vượt quá số còn rút được của lô nguồn.
+            const requestedBySourceLine = new Map<string, Prisma.Decimal>()
+            for (const match of matches) {
+                requestedBySourceLine.set(
+                    match.salesOrderLineId,
+                    (requestedBySourceLine.get(match.salesOrderLineId) ?? new Prisma.Decimal(0)).plus(
+                        match.requestedQty,
+                    ),
+                )
+            }
+            for (const [salesOrderLineId, requestedQty] of requestedBySourceLine) {
+                const balance = await this.lots.balanceForLine(tx, salesOrderLineId)
+                if (!balance || requestedQty.greaterThan(balance.remainingQty)) {
                     throw new BadRequestException({
                         code: 'WITHDRAWAL_EXCEEDS_REMAINING',
-                        message: `Dòng ${line.lineNo}: số lượng rút vượt số còn có thể rút (${balance?.remainingQty ?? 0}).`,
+                        message: `Tổng số lượng rút vượt số còn có thể rút của lô (${balance?.remainingQty ?? 0}).`,
                     })
                 }
+            }
+            for (const match of matches) {
                 await tx.salesLotWithdrawalRequestLine.update({
-                    where: { id: line.id },
-                    data: { salesOrderLineId: match.id },
+                    where: { id: match.requestLineId },
+                    data: { salesOrderLineId: match.salesOrderLineId },
                 })
             }
 
             await tx.salesLotWithdrawalRequest.update({
                 where: { id },
                 data: {
+                    requestNo:
+                        request.salesOrderId === lotOrder.id &&
+                        request.requestNo.startsWith(`${lotOrder.orderNo}.RL`)
+                            ? request.requestNo
+                            : await this.nextSourceRequestNo(tx, lotOrder.id, lotOrder.orderNo),
                     salesOrderId: lotOrder.id,
                     status: SalesWithdrawalStatus.DRAFT,
                     version: { increment: 1 },
@@ -451,13 +508,23 @@ export class SalesWithdrawalsService {
                 })
             }
 
-            // Re-check the balance at submit time: another draw may have taken it meanwhile.
+            // Re-check the aggregate balance at submit time: another draw may have taken it meanwhile.
+            const requestedBySourceLine = new Map<string, Prisma.Decimal>()
             for (const line of request.lines) {
-                const balance = await this.lots.balanceForLine(tx, line.salesOrderLineId!)
-                if (!balance || new Prisma.Decimal(line.requestedQty).greaterThan(balance.remainingQty)) {
+                const salesOrderLineId = line.salesOrderLineId!
+                requestedBySourceLine.set(
+                    salesOrderLineId,
+                    (requestedBySourceLine.get(salesOrderLineId) ?? new Prisma.Decimal(0)).plus(
+                        line.requestedQty,
+                    ),
+                )
+            }
+            for (const [salesOrderLineId, requestedQty] of requestedBySourceLine) {
+                const balance = await this.lots.balanceForLine(tx, salesOrderLineId)
+                if (!balance || requestedQty.greaterThan(balance.remainingQty)) {
                     throw new BadRequestException({
                         code: 'WITHDRAWAL_EXCEEDS_REMAINING',
-                        message: `Dòng ${line.lineNo}: số còn có thể rút chỉ còn ${balance?.remainingQty ?? 0}.`,
+                        message: `Số còn có thể rút chỉ còn ${balance?.remainingQty ?? 0}.`,
                     })
                 }
             }

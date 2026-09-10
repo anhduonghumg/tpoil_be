@@ -130,7 +130,10 @@ export class CommercialPaymentsService {
             dto.beneficiaryAccountNo?.trim() ||
             beneficiary?.accountNo ||
             order.supplier.bankAccountNo?.trim()
-        if (!beneficiaryAccountNo) throw new BadRequestException('SUPPLIER_BANK_ACCOUNT_REQUIRED')
+        // A payment request is an approval document, not a bank transfer. Suppliers
+        // often provide their account after the invoice arrives, so keep it optional
+        // here and require it only when the payment is returned/re-submitted for bank
+        // execution.
 
         return this.prisma.$transaction(async (tx) => {
             const request = await tx.purchaseTermPaymentRequest.create({

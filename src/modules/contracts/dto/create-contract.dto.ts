@@ -48,6 +48,11 @@ export class CreateContractDto {
     @IsString()
     approvalRequestId?: string
 
+    /**
+     * @deprecated Không còn được dùng. Chiều giao dịch do loại thương nhân của đối tác
+     * quyết định (TNPP mua và bán, TNDM chỉ mua của họ, TNDL chỉ bán cho họ), nên server
+     * tự suy ra `kind`. Vẫn nhận để client cũ không vỡ, nhưng giá trị gửi lên bị bỏ qua.
+     */
     @IsOptional()
     @IsEnum(ContractKind)
     kind?: ContractKind

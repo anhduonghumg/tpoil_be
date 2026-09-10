@@ -21,6 +21,7 @@ import {
 import { ListSalesApprovalsQueryDto } from './dto/sales-order.dto'
 import { SalesReservationService } from './sales-reservation.service'
 import { SalesWithdrawalsService } from './sales-withdrawals.service'
+import { salesLineNetAmount, salesLineNetUnitPrice } from './sales-order-amount'
 
 /**
  * Khoảng ngày cho cột @db.Date: giá trị lưu là 00:00 UTC nên cả hai đầu đều lấy
@@ -148,6 +149,7 @@ export class SalesApprovalsService {
                                     discountBaseAmount: true,
                                     discountAdjustmentAmount: true,
                                     discountAmount: true,
+                                    transportFeeUnitPrice: true,
                                     taxRate: true,
                                     product: { select: { code: true, name: true, uom: true } },
                                     issueWarehouse: {
@@ -197,6 +199,74 @@ export class SalesApprovalsService {
                             driverName: true,
                             salesOrder: { select: { id: true, orderNo: true } },
                             customer: { select: { id: true, code: true, name: true } },
+                            lines: {
+                                orderBy: { lineNo: 'asc' },
+                                select: {
+                                    id: true,
+                                    lineNo: true,
+                                    productId: true,
+                                    warehouseId: true,
+                                    salesOrderLineId: true,
+                                    requestedQty: true,
+                                    product: { select: { code: true, name: true, uom: true } },
+                                    warehouse: {
+                                        select: {
+                                            id: true,
+                                            name: true,
+                                            legalEntity: { select: { partyId: true } },
+                                        },
+                                    },
+                                    orderLine: {
+                                        select: {
+                                            supplySource: true,
+                                            preferredSupplierPartyId: true,
+                                            unitPrice: true,
+                                            discountBaseAmount: true,
+                                            discountAdjustmentAmount: true,
+                                            discountAmount: true,
+                                            transportFeeUnitPrice: true,
+                                            taxRate: true,
+                                            preferredSupplier: {
+                                                select: { id: true, code: true, name: true },
+                                            },
+                                            reservationLines: {
+                                                where: {
+                                                    activeActualQty: { gt: 0 },
+                                                    inventoryLotId: { not: null },
+                                                    reservation: {
+                                                        withdrawalRequestId: null,
+                                                        status: {
+                                                            in: [
+                                                                'DRAFT',
+                                                                'ACTIVE',
+                                                                'PARTIALLY_RELEASED',
+                                                            ],
+                                                        },
+                                                    },
+                                                },
+                                                select: {
+                                                    warehouseId: true,
+                                                    inventoryLotId: true,
+                                                    activeActualQty: true,
+                                                    lot: {
+                                                        select: {
+                                                            lotNo: true,
+                                                            releaseCode: true,
+                                                            supplier: {
+                                                                select: {
+                                                                    id: true,
+                                                                    code: true,
+                                                                    name: true,
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
                         },
                     },
                 },
@@ -216,17 +286,31 @@ export class SalesApprovalsService {
             }
         >()
         for (const row of rows) {
-            if (!row.salesOrder) continue
-            for (const line of row.salesOrder.lines) {
-                if (!line.issueWarehouse && !line.receivingWarehouseArea) continue
-                previewLines.set(line.id, {
-                    productId: line.productId,
-                    supplySource: line.supplySource,
-                    orderedActualQty: line.orderedActualQty,
-                    warehouseId: line.issueWarehouse?.id,
-                    warehouseAreaId: line.receivingWarehouseArea?.id,
-                    ownerPartyId: row.salesOrder.legalEntity.partyId,
-                })
+            if (row.salesOrder) {
+                if (row.salesOrder.kind === SalesOrderKind.DAY_TRADE) continue
+                for (const line of row.salesOrder.lines) {
+                    if (!line.issueWarehouse && !line.receivingWarehouseArea) continue
+                    previewLines.set(line.id, {
+                        productId: line.productId,
+                        supplySource: line.supplySource,
+                        orderedActualQty: line.orderedActualQty,
+                        warehouseId: line.issueWarehouse?.id,
+                        warehouseAreaId: line.receivingWarehouseArea?.id,
+                        ownerPartyId: row.salesOrder.legalEntity.partyId,
+                    })
+                }
+            }
+            if (row.withdrawalRequest) {
+                for (const line of row.withdrawalRequest.lines) {
+                    previewLines.set(line.id, {
+                        productId: line.productId,
+                        supplySource:
+                            line.orderLine?.supplySource ?? SalesOrderSupplySource.TP,
+                        orderedActualQty: line.requestedQty,
+                        warehouseId: line.warehouseId,
+                        ownerPartyId: line.warehouse.legalEntity.partyId,
+                    })
+                }
             }
         }
         const supplierPreviewByLine = new Map<string, Awaited<ReturnType<SalesReservationService['previewSupplierChoices']>>>()
@@ -273,25 +357,90 @@ export class SalesApprovalsService {
                                        actualQty: allocation.activeActualQty.toString(),
                                     })),
                                 supplierPreview: supplierPreviewByLine.get(line.id) ?? null,
-                                lineNetAmount: new Prisma.Decimal(line.orderedActualQty)
-                                  .mul(new Prisma.Decimal(line.unitPrice).minus(line.discountAmount))
-                                  .toString(),
+                                lineNetAmount: salesLineNetAmount(line).toString(),
                           })),
                           orderNetAmount: row.salesOrder.lines
                               .reduce(
                                   (sum, line) =>
                                       sum.plus(
-                                          new Prisma.Decimal(line.orderedActualQty).mul(
-                                              new Prisma.Decimal(line.unitPrice).minus(
-                                                  line.discountAmount,
-                                              ),
-                                          ),
+                                          salesLineNetAmount(line),
                                       ),
                                   new Prisma.Decimal(0),
                               )
                               .toString(),
                       }
                     : row.salesOrder,
+                withdrawalRequest: row.withdrawalRequest
+                    ? {
+                          ...row.withdrawalRequest,
+                          lines: row.withdrawalRequest.lines.map((line) => {
+                              const source = line.orderLine
+                              const unitPrice = source?.unitPrice ?? new Prisma.Decimal(0)
+                              const discountAmount =
+                                  source?.discountAmount ?? new Prisma.Decimal(0)
+                              const transportFeeUnitPrice =
+                                  source?.transportFeeUnitPrice ?? new Prisma.Decimal(0)
+                              return {
+                                  id: line.id,
+                                  lineNo: line.lineNo,
+                                  productId: line.productId,
+                                  issueWarehouseId: line.warehouseId,
+                                  receivingWarehouseAreaId: null,
+                                  supplySource:
+                                      source?.supplySource ?? SalesOrderSupplySource.TP,
+                                  preferredSupplierPartyId:
+                                      source?.preferredSupplierPartyId ?? null,
+                                  orderedActualQty: line.requestedQty.toString(),
+                                  unitPrice: unitPrice.toString(),
+                                  discountBaseAmount:
+                                      source?.discountBaseAmount?.toString() ?? '0',
+                                  discountAdjustmentAmount:
+                                      source?.discountAdjustmentAmount?.toString() ?? '0',
+                                  discountAmount: discountAmount.toString(),
+                                  transportFeeUnitPrice: transportFeeUnitPrice.toString(),
+                                  taxRate: source?.taxRate?.toString() ?? null,
+                                  product: line.product,
+                                  issueWarehouse: {
+                                      id: line.warehouse.id,
+                                      name: line.warehouse.name,
+                                  },
+                                  receivingWarehouseArea: null,
+                                  preferredSupplier: source?.preferredSupplier ?? null,
+                                  supplierAllocations: (source?.reservationLines ?? [])
+                                      .filter(
+                                          (allocation) =>
+                                              allocation.warehouseId === line.warehouseId,
+                                      )
+                                      .map((allocation) => ({
+                                          inventoryLotId: allocation.inventoryLotId,
+                                          lotNo: allocation.lot?.lotNo ?? null,
+                                          supplier: allocation.lot?.supplier ?? null,
+                                          releaseCode: allocation.lot?.releaseCode ?? null,
+                                          actualQty: allocation.activeActualQty.toString(),
+                                      })),
+                                  supplierPreview: supplierPreviewByLine.get(line.id) ?? null,
+                                  lineNetAmount: new Prisma.Decimal(line.requestedQty)
+                                      .mul(salesLineNetUnitPrice({ unitPrice, discountAmount, transportFeeUnitPrice }))
+                                      .toString(),
+                              }
+                          }),
+                          requestNetAmount: row.withdrawalRequest.lines
+                              .reduce((sum, line) => {
+                                  const unitPrice =
+                                      line.orderLine?.unitPrice ?? new Prisma.Decimal(0)
+                                  const discountAmount =
+                                      line.orderLine?.discountAmount ?? new Prisma.Decimal(0)
+                                  const transportFeeUnitPrice =
+                                      line.orderLine?.transportFeeUnitPrice ?? new Prisma.Decimal(0)
+                                  return sum.plus(
+                                      new Prisma.Decimal(line.requestedQty).mul(
+                                          salesLineNetUnitPrice({ unitPrice, discountAmount, transportFeeUnitPrice }),
+                                      ),
+                                  )
+                              }, new Prisma.Decimal(0))
+                              .toString(),
+                      }
+                    : row.withdrawalRequest,
             })),
             total,
             page,
@@ -366,15 +515,11 @@ export class SalesApprovalsService {
 
             const lines = await tx.salesOrderLine.findMany({
                 where: { salesOrderId: line.salesOrder.id },
-                select: { orderedActualQty: true, unitPrice: true, discountAmount: true },
+                select: { orderedActualQty: true, unitPrice: true, discountAmount: true, transportFeeUnitPrice: true },
             })
             const orderNetAmount = lines.reduce(
                 (sum, row) =>
-                    sum.plus(
-                        new Prisma.Decimal(row.orderedActualQty).mul(
-                            new Prisma.Decimal(row.unitPrice).minus(row.discountAmount),
-                        ),
-                    ),
+                    sum.plus(salesLineNetAmount(row)),
                 new Prisma.Decimal(0),
             )
 
@@ -390,6 +535,39 @@ export class SalesApprovalsService {
     }
 
     /** Chọn một mã NCC cụ thể hoặc trả về AUTO FIFO khi đơn còn ở hàng đợi duyệt. */
+    /** Sửa CPVC trong lúc chờ duyệt; cờ đầu đơn được đồng bộ theo các dòng có cước. */
+    async adjustLineTransportFee(lineId: string, transportFeeUnitPrice: number, actor: SalesActor) {
+        return this.prisma.$transaction(async (tx) => {
+            const line = await tx.salesOrderLine.findUnique({
+                where: { id: lineId },
+                select: {
+                    id: true, vehiclePlate: true, driverName: true,
+                    salesOrder: { select: { id: true, status: true, kind: true, transportVehiclePlate: true, transportDriverName: true } },
+                },
+            })
+            if (!line) throw new NotFoundException('SALES_ORDER_LINE_NOT_FOUND')
+            if (line.salesOrder.kind === SalesOrderKind.LOT) throw new BadRequestException('TRANSPORT_FEE_NOT_SUPPORTED_FOR_LOT')
+            if (line.salesOrder.status !== SalesOrderStatus.PENDING_REVIEW) throw new BadRequestException('SALES_ORDER_NOT_PENDING_REVIEW')
+
+            const fee = new Prisma.Decimal(transportFeeUnitPrice)
+            await tx.salesOrderLine.update({ where: { id: lineId }, data: { transportFeeUnitPrice: fee, isTransportFeeApplicable: fee.greaterThan(0) } })
+            const feeLines = await tx.salesOrderLine.count({ where: { salesOrderId: line.salesOrder.id, transportFeeUnitPrice: { gt: 0 } } })
+            const hasTransportFee = feeLines > 0
+            const vehiclePlate = line.salesOrder.transportVehiclePlate ?? line.vehiclePlate
+            const driverName = line.salesOrder.transportDriverName ?? line.driverName
+            if (hasTransportFee && (!vehiclePlate || !driverName)) throw new BadRequestException('TRANSPORT_VEHICLE_DRIVER_REQUIRED')
+            await tx.salesOrder.update({
+                where: { id: line.salesOrder.id },
+                data: { hasTransportFee, transportVehiclePlate: hasTransportFee ? vehiclePlate : null, transportDriverName: hasTransportFee ? driverName : null },
+            })
+            if (!hasTransportFee) await tx.salesOrderTransportRequest.updateMany({ where: { salesOrderId: line.salesOrder.id }, data: { status: 'CANCELLED' } })
+            await this.events.record(tx, { entityType: 'SALES_ORDER', entityId: line.salesOrder.id, eventType: 'ADJUST_TRANSPORT_FEE', actorId: actor.userId, metadata: { salesOrderLineId: lineId, transportFeeUnitPrice: fee.toString() } })
+            const lines = await tx.salesOrderLine.findMany({ where: { salesOrderId: line.salesOrder.id }, select: { orderedActualQty: true, unitPrice: true, discountAmount: true, transportFeeUnitPrice: true } })
+            const orderNetAmount = lines.reduce((sum, row) => sum.plus(salesLineNetAmount(row)), new Prisma.Decimal(0))
+            return { salesOrderLineId: lineId, salesOrderId: line.salesOrder.id, transportFeeUnitPrice: fee.toString(), orderNetAmount: orderNetAmount.toString() }
+        })
+    }
+
     async adjustLineSupplier(
         lineId: string,
         supplierPartyId: string | null | undefined,

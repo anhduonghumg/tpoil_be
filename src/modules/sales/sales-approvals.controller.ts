@@ -8,6 +8,7 @@ import { SalesApprovalsService } from './sales-approvals.service'
 import { SalesActor } from './sales-order-workflow.service'
 import {
     AdjustLineDiscountDto,
+    AdjustLineTransportFeeDto,
     AdjustLineSupplierDto,
     DecideManySalesApprovalsDto,
     DecideSalesApprovalDto,
@@ -66,6 +67,20 @@ export class SalesApprovalsController {
         @Req() req: Request,
     ) {
         return this.service.adjustLineDiscount(lineId, dto.discountAdjustmentAmount, actorFrom(req))
+    }
+
+    @Patch('lines/:lineId/transport-fee')
+    @RequirePermissions(
+        PERMISSIONS.sales.approvePrice,
+        PERMISSIONS.sales.approveCredit,
+        PERMISSIONS.sales.approveException,
+    )
+    adjustLineTransportFee(
+        @Param('lineId') lineId: string,
+        @Body() dto: AdjustLineTransportFeeDto,
+        @Req() req: Request,
+    ) {
+        return this.service.adjustLineTransportFee(lineId, dto.transportFeeUnitPrice, actorFrom(req))
     }
 
     /** Quản lý chọn Mã NCC ngay trên hàng đợi duyệt; bỏ chọn để quay về AUTO FIFO. */

@@ -88,6 +88,18 @@ export class SalesOrderLineDto {
     @IsString()
     driverName?: string
 
+    /** Cước vận chuyển thu khách trên đơn vị hàng của riêng dòng này. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    transportFeeUnitPrice?: number
+
+    /** Gửi để UI hiển thị rõ; backend luôn suy ra lại từ cước > 0. */
+    @IsOptional()
+    @IsBoolean()
+    isTransportFeeApplicable?: boolean
+
     @IsOptional()
     @Type(() => Number)
     @IsNumber()
@@ -202,6 +214,21 @@ export class CreateSalesOrderDto {
     @IsString()
     note?: string
 
+    /** Chỉ áp dụng đơn bán lẻ (SINGLE/DAY_TRADE), độc lập với điều xe. */
+    @IsOptional()
+    @IsBoolean()
+    hasTransportFee?: boolean
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(100)
+    transportVehiclePlate?: string
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(200)
+    transportDriverName?: string
+
     @IsArray()
     @ArrayMinSize(1)
     @ValidateNested({ each: true })
@@ -242,6 +269,20 @@ export class UpdateSalesOrderDto {
     @IsOptional()
     @IsString()
     note?: string
+
+    @IsOptional()
+    @IsBoolean()
+    hasTransportFee?: boolean
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(100)
+    transportVehiclePlate?: string | null
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(200)
+    transportDriverName?: string | null
 
     @IsOptional()
     @IsArray()
@@ -399,6 +440,14 @@ export class AdjustLineDiscountDto {
     @Type(() => Number)
     @IsNumber()
     discountAdjustmentAmount!: number
+}
+
+/** Người duyệt sửa cước vận chuyển theo đơn vị trên một dòng đơn chờ duyệt. */
+export class AdjustLineTransportFeeDto {
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    transportFeeUnitPrice!: number
 }
 
 /** Null/không truyền = quay về để hệ thống tự chọn Mã NCC theo FIFO. */

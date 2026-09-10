@@ -44,6 +44,8 @@ export const SALES_NOTIFICATION_EVENTS = {
     INVOICE_ISSUED: 'sales.invoice.issued',
     INVOICE_ISSUE_FAILED: 'sales.invoice.issue_failed',
     INVOICE_CANCELLED: 'sales.invoice.cancelled',
+    TRANSPORT_REQUESTED: 'sales.transport.requested',
+    TRANSPORT_CANCELLED: 'sales.transport.cancelled',
 } as const
 
 export type SalesNotificationEvent =

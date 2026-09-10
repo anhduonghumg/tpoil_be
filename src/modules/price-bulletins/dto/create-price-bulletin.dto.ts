@@ -46,6 +46,20 @@ export class CreatePriceBulletinDto {
     @IsString()
     fileChecksum?: string
 
+    /** Số quyết định của công ty, ví dụ "03.09.2026/TP". */
+    @IsOptional()
+    @IsString()
+    decisionNo?: string
+
+    /** Công văn Bộ Công Thương làm căn cứ, ví dụ "7010/BCT-TTTN". */
+    @IsOptional()
+    @IsString()
+    basisDocNo?: string
+
+    @IsOptional()
+    @IsDateString()
+    basisDocDate?: string
+
     @IsArray()
     @ValidateNested({ each: true })
     @Type(() => PriceBulletinItemInputDto)

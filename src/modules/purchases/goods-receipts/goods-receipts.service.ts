@@ -5,6 +5,7 @@ import {
     MasterStatus,
     PurchaseOrderStatus,
     PurchaseOrderType,
+    SalesOrderKind,
     WarehousePartyRole,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
@@ -16,6 +17,77 @@ import {
 import { GoodsReceiptPostingService } from 'src/modules/inventory/goods-receipt-posting.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
 import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import { SalesOrderWorkflowService } from 'src/modules/sales/sales-order-workflow.service'
+
+/** Chứng từ đã sinh ra một bút toán kho, đủ để màn thẻ kho mở ngược về nó. */
+type StockCardSource = {
+    type:
+        | 'GOODS_RECEIPT'
+        | 'SALES_DELIVERY'
+        | 'WAREHOUSE_TRANSFER'
+        | 'STOCK_ADJUSTMENT'
+        | 'OWNERSHIP_TRANSFER'
+    /** Id để mở màn chi tiết. Với chuyển kho là id LỆNH chuyển, không phải phiếu đi/đến. */
+    id: string
+    no: string
+}
+
+/**
+ * Bút toán đảo không treo ở chứng từ nào (nó trỏ về bút toán bị đảo), nên trả null và
+ * để màn hình rơi về số hiệu bút toán.
+ */
+function sourceDocumentOf(posting: {
+    goodsReceipt?: { id: string; receiptNo: string } | null
+    salesDelivery?: { id: string; deliveryNo: string } | null
+    movementDispatch?: { id: string; dispatchNo: string; movementId: string } | null
+    movementArrival?: { id: string; arrivalNo: string; movementId: string } | null
+    stockAdjustment?: { id: string; adjustmentNo: string } | null
+    ownershipTransfer?: { id: string; transferNo: string } | null
+}): StockCardSource | null {
+    if (posting.goodsReceipt) {
+        return {
+            type: 'GOODS_RECEIPT',
+            id: posting.goodsReceipt.id,
+            no: posting.goodsReceipt.receiptNo,
+        }
+    }
+    if (posting.salesDelivery) {
+        return {
+            type: 'SALES_DELIVERY',
+            id: posting.salesDelivery.id,
+            no: posting.salesDelivery.deliveryNo,
+        }
+    }
+    if (posting.movementDispatch) {
+        return {
+            type: 'WAREHOUSE_TRANSFER',
+            id: posting.movementDispatch.movementId,
+            no: posting.movementDispatch.dispatchNo,
+        }
+    }
+    if (posting.movementArrival) {
+        return {
+            type: 'WAREHOUSE_TRANSFER',
+            id: posting.movementArrival.movementId,
+            no: posting.movementArrival.arrivalNo,
+        }
+    }
+    if (posting.stockAdjustment) {
+        return {
+            type: 'STOCK_ADJUSTMENT',
+            id: posting.stockAdjustment.id,
+            no: posting.stockAdjustment.adjustmentNo,
+        }
+    }
+    if (posting.ownershipTransfer) {
+        return {
+            type: 'OWNERSHIP_TRANSFER',
+            id: posting.ownershipTransfer.id,
+            no: posting.ownershipTransfer.transferNo,
+        }
+    }
+    return null
+}
 
 @Injectable()
 export class GoodsReceiptsService {
@@ -23,6 +95,7 @@ export class GoodsReceiptsService {
         private readonly prisma: PrismaService,
         private readonly receiptPosting: GoodsReceiptPostingService,
         private readonly notificationOutbox: NotificationOutboxService,
+        private readonly salesOrderWorkflow: SalesOrderWorkflowService,
     ) {}
 
     private toDateOrThrow(value: string, code: string) {
@@ -162,40 +235,27 @@ export class GoodsReceiptsService {
             productId: q.productId,
             ownerPartyId: q.ownerPartyId ?? undefined,
         }
-        // Rút lô chỉ là nghiệp vụ theo dõi hàng đã nhận từ kho thuê. Các bút toán
-        // cũ từng phát sinh từ rút lô được loại khỏi thẻ kho để không làm sai tồn kinh doanh.
-        const excludeCommercialLotWithdrawal: Prisma.InventoryLedgerEntryWhereInput = {
-            NOT: [
-                {
-                    posting: {
-                        goodsReceipt: {
-                            is: { commercialLotWithdrawalLine: { isNot: null } },
-                        },
-                    },
-                },
-                {
-                    posting: {
-                        reversalOf: {
-                            is: {
-                                goodsReceipt: {
-                                    is: { commercialLotWithdrawalLine: { isNot: null } },
-                                },
-                            },
-                        },
-                    },
-                },
-            ],
-        }
+        /*
+         * Thẻ kho đọc TRỌN sổ cái kho, không loại bút toán nào.
+         *
+         * Trước đây ở đây có bộ lọc bỏ các bút toán sinh từ rút lô, với lý do "bút toán
+         * cũ làm sai tồn kinh doanh". Nhưng nó bỏ các dòng NHẬP mà vẫn giữ các dòng
+         * XUẤT, nên số dư chạy xuống âm: kho đang có 1,79 triệu lít mà thẻ kho báo
+         * -8.845. Một cuốn sổ dùng để đối chiếu mà báo tồn âm thì vô dụng.
+         *
+         * Đã đối chiếu trước khi gỡ: tổng sổ cái đầy đủ khớp `InventoryAvailabilityBalance`
+         * ở toàn bộ cặp (kho × mặt hàng × chủ hàng), không dòng nào lệch — tức các bút
+         * toán rút lô đã được tính đúng một lần, không hề nhân đôi.
+         */
         const opening = dateFrom
             ? await this.prisma.inventoryLedgerEntry.aggregate({
-                  where: { ...dimensions, ...excludeCommercialLotWithdrawal, effectiveAt: { lt: dateFrom } },
+                  where: { ...dimensions, effectiveAt: { lt: dateFrom } },
                   _sum: { actualQtyDelta: true, v15QtyDelta: true },
               })
             : null
         const entries = await this.prisma.inventoryLedgerEntry.findMany({
             where: {
                 ...dimensions,
-                ...excludeCommercialLotWithdrawal,
                 effectiveAt: {
                     gte: dateFrom ?? undefined,
                     lte: dateTo ?? undefined,
@@ -210,7 +270,14 @@ export class GoodsReceiptsService {
                 lot: { select: { id: true, lotNo: true } },
                 posting: {
                     include: {
+                        // Mỗi loại bút toán treo ở một chứng từ khác nhau; lấy đủ để dòng
+                        // nào trên thẻ kho cũng bấm ngược về được chứng từ sinh ra nó.
                         goodsReceipt: { select: { id: true, receiptNo: true } },
+                        salesDelivery: { select: { id: true, deliveryNo: true } },
+                        movementDispatch: { select: { id: true, dispatchNo: true, movementId: true } },
+                        movementArrival: { select: { id: true, arrivalNo: true, movementId: true } },
+                        stockAdjustment: { select: { id: true, adjustmentNo: true } },
+                        ownershipTransfer: { select: { id: true, transferNo: true } },
                     },
                 },
             },
@@ -220,10 +287,12 @@ export class GoodsReceiptsService {
         const items = entries.map((entry) => {
             runningActualQty = runningActualQty.plus(entry.actualQtyDelta)
             runningV15Qty = runningV15Qty.plus(entry.v15QtyDelta ?? 0)
+            const source = sourceDocumentOf(entry.posting)
             return {
                 ...entry,
-                documentNo: entry.posting.goodsReceipt?.receiptNo ?? entry.posting.postingNo,
+                documentNo: source?.no ?? entry.posting.postingNo,
                 goodsReceiptId: entry.posting.goodsReceipt?.id ?? null,
+                source,
                 runningActualQty,
                 runningV15Qty,
             }
@@ -358,12 +427,28 @@ export class GoodsReceiptsService {
                 include: {
                     lines: { orderBy: { lineNo: 'asc' } },
                     warehouse: { select: { code: true, name: true } },
-                    purchaseOrder: { select: { id: true, orderNo: true, status: true, createdById: true, supplierCustomerId: true, releaseCode: true } },
+                    purchaseOrder: {
+                        select: {
+                            id: true,
+                            orderNo: true,
+                            status: true,
+                            createdById: true,
+                            supplierCustomerId: true,
+                            releaseCode: true,
+                            salesOrderId: true,
+                            salesOrder: { select: { kind: true, approvedAt: true } },
+                        },
+                    },
                 },
             })
             if (!receipt) throw new BadRequestException('GOODS_RECEIPT_NOT_DRAFT')
             const line = receipt.lines[0]
             if (!line) throw new BadRequestException('GOODS_RECEIPT_LINE_REQUIRED')
+            const isApprovedDayTradeReceipt = Boolean(
+                receipt.purchaseOrder?.salesOrderId &&
+                    receipt.purchaseOrder.salesOrder?.kind === SalesOrderKind.DAY_TRADE &&
+                    receipt.purchaseOrder.salesOrder.approvedAt,
+            )
 
             await this.receiptPosting.postSingleLineReceipt({
                 tx,
@@ -380,6 +465,10 @@ export class GoodsReceiptsService {
                 ownerPartyId: line.ownerPartyId,
                 supplierPartyId: receipt.purchaseOrder?.supplierCustomerId,
                 releaseCode: receipt.purchaseOrder?.releaseCode,
+                // Đơn đối ứng được phép giao hàng trước khi NCC xuất hóa đơn. Hàng vừa
+                // nhập sẽ được giữ cho chính đơn bán liên kết ở bước reserveAndDispatch,
+                // không bị treo thêm ở trạng thái chờ hóa đơn NCC.
+                awaitingSupplierInvoice: !isApprovedDayTradeReceipt,
             })
 
             await tx.goodsReceipt.update({
@@ -392,6 +481,16 @@ export class GoodsReceiptsService {
                     where: { id: receipt.purchaseOrder.id },
                     data: { status: PurchaseOrderStatus.IN_PROGRESS },
                 })
+            }
+
+            if (isApprovedDayTradeReceipt && receipt.purchaseOrder?.salesOrderId) {
+                // Hàng mua đối ứng vừa về kho: thử giữ đúng lượng đã có và tự sinh
+                // công việc xuất kho khi toàn bộ đơn bán đã đủ hàng.
+                await this.salesOrderWorkflow.reserveAndDispatch(
+                    tx,
+                    receipt.purchaseOrder.salesOrderId,
+                    { userId: actorId ?? null },
+                )
             }
 
             await this.notificationOutbox.emit(

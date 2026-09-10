@@ -19,7 +19,7 @@ import {
 const boardInclude = Prisma.validator<Prisma.SalesDiscountBoardInclude>()({
     lines: {
         include: {
-            warehouse: { select: { id: true, code: true, name: true } },
+            warehouse: { select: { id: true, code: true, name: true, status: true } },
             product: { select: { id: true, code: true, name: true, uom: true } },
         },
         // Thứ tự này quyết định thứ tự trên bản copy gửi khách, nên phải ổn định.
@@ -172,12 +172,16 @@ export class SalesDiscountService {
                       include: boardInclude,
                   })
                 : await this.effectiveBoardAt()
-            lines = (source?.lines ?? []).map((line) => ({
-                warehouseId: line.warehouseId,
-                productId: line.productId,
-                discountPerUnit: Number(line.discountPerUnit),
-                note: line.note ?? undefined,
-            }))
+            // Bỏ kho đã ngừng dùng khi chép sang bản mới. Không lọc thì một kho đóng cửa
+            // vẫn được chép mãi từ bản này sang bản khác, và cứ thế lên thông báo gửi khách.
+            lines = (source?.lines ?? [])
+                .filter((line) => line.warehouse.status === MasterStatus.ACTIVE)
+                .map((line) => ({
+                    warehouseId: line.warehouseId,
+                    productId: line.productId,
+                    discountPerUnit: Number(line.discountPerUnit),
+                    note: line.note ?? undefined,
+                }))
         }
 
         const board = await this.prisma.salesDiscountBoard.create({
@@ -492,7 +496,7 @@ export class SalesDiscountService {
         announcerName: string | null
         lines: Array<{
             discountPerUnit: Prisma.Decimal
-            warehouse: { name: string }
+            warehouse: { name: string; status: MasterStatus }
             product: { name: string }
         }>
     }) {
@@ -502,6 +506,9 @@ export class SalesDiscountService {
 
         const byWarehouse = new Map<string, string[]>()
         for (const line of board.lines) {
+            // Bản đã phát hành từ trước có thể còn dòng của kho nay đã đóng — giữ trong dữ
+            // liệu để tra cứu, nhưng không đọc lên cho khách nữa.
+            if (line.warehouse.status !== MasterStatus.ACTIVE) continue
             const rows = byWarehouse.get(line.warehouse.name) ?? []
             rows.push(`    - ${line.product.name}: ${this.amountText(line.discountPerUnit)} đ/lít`)
             byWarehouse.set(line.warehouse.name, rows)

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common'
 import type { Request, Response } from 'express'
 import { SalesOrderKind } from '@prisma/client'
 import { LoggedInGuard } from 'src/modules/auth/guards/logged-in.guard'
@@ -55,8 +55,16 @@ export class SalesOrdersController {
     @RequirePermissions(PERMISSIONS.sales.create)
     create(@Body() dto: CreateSalesOrderDto, @Req() req: Request) {
         const actor = actorFrom(req)
-        if (dto.kind === SalesOrderKind.SINGLE || dto.kind === SalesOrderKind.LOT) {
-            return this.workflow.createInternal(dto, actor)
+        if (
+            !dto.kind ||
+            dto.kind === SalesOrderKind.SINGLE ||
+            dto.kind === SalesOrderKind.LOT ||
+            dto.kind === SalesOrderKind.DAY_TRADE
+        ) {
+            return this.workflow.createInternal(
+                { ...dto, kind: dto.kind ?? SalesOrderKind.DAY_TRADE },
+                actor,
+            )
         }
         return this.service.create(dto, actor.userId)
     }
@@ -132,10 +140,15 @@ export class SalesOrdersController {
     @Post('from-purchase-order/:purchaseOrderId')
     @RequirePermissions(PERMISSIONS.sales.create)
     createFromPurchaseOrder(
-        @Param('purchaseOrderId') purchaseOrderId: string,
-        @Body() dto: CreateSalesOrderFromPurchaseDto,
+        @Param('purchaseOrderId') _purchaseOrderId: string,
+        @Body() _dto: CreateSalesOrderFromPurchaseDto,
     ) {
-        return this.service.createFromPurchaseOrder(purchaseOrderId, dto)
+        // Kept only to return a clear error to older frontend builds. DAY_TRADE now
+        // always starts from an approved sales order, then purchasing creates linked POs.
+        throw new BadRequestException({
+            code: 'DAY_TRADE_SALES_FIRST_REQUIRED',
+            message: 'Đơn đối ứng phải tạo và duyệt đơn bán trước, sau đó tạo đơn mua từ danh sách chờ mua.',
+        })
     }
 
     @Post(':id/attach/:purchaseOrderId')

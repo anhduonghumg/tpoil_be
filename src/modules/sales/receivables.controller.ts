@@ -8,7 +8,10 @@ import { ReceivablesService } from './receivables.service'
 import { ScopedActor } from './sales-warehouse-scope.service'
 import {
     AllocateReceivableDto,
+    AllocateBankReceiptDto,
     ListReceivablesQueryDto,
+    ReceivableAgingQueryDto,
+    ReceivableCollectionKpiQueryDto,
     PartyDebtQueryDto,
 } from './dto/receivable.dto'
 
@@ -35,8 +38,15 @@ export class ReceivablesController {
     /** Aging buckets per customer. */
     @Get('aging')
     @RequirePermissions(PERMISSIONS.sales.receivableView)
-    aging(@Query('customerPartyId') customerPartyId?: string) {
-        return this.service.aging(customerPartyId)
+    aging(@Query() query: ReceivableAgingQueryDto) {
+        return this.service.aging(query.customerPartyId, query.asOf)
+    }
+
+    /** Collection metrics are based on the bank value date, not import date. */
+    @Get('collection-kpis')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    collectionKpis(@Query() query: ReceivableCollectionKpiQueryDto) {
+        return this.service.collectionKpis(query.fromDate, query.toDate)
     }
 
     /** Receivable and payable side by side for the same party. */
@@ -63,6 +73,23 @@ export class ReceivablesController {
     @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
     allocate(@Body() dto: AllocateReceivableDto, @Req() req: Request) {
         return this.service.allocate(dto, actorFrom(req))
+    }
+
+    /** Reconcile one inbound bank receipt against one or more customer debts. */
+    @Post('bank-transactions/:bankTransactionId/allocate')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    allocateBankReceipt(
+        @Param('bankTransactionId') bankTransactionId: string,
+        @Body() dto: AllocateBankReceiptDto,
+        @Req() req: Request,
+    ) {
+        return this.service.allocateBankReceipt(bankTransactionId, dto, actorFrom(req))
+    }
+
+    @Get('bank-transactions/:bankTransactionId/suggestions')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    receiptSuggestions(@Param('bankTransactionId') bankTransactionId: string) {
+        return this.service.receiptSuggestions(bankTransactionId)
     }
 
     @Post('allocations/:id/reverse')

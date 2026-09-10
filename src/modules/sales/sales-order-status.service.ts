@@ -59,7 +59,7 @@ export class SalesOrderStatusService {
         if (this.frozen.includes(order.status)) return null
         // Lot orders stay CONFIRMED ("đang hoạt động") — their stock movement happens on
         // withdrawal requests, not on the lot order itself (GĐ 5).
-        if (order.kind !== SalesOrderKind.SINGLE) return null
+        if (order.kind !== SalesOrderKind.SINGLE && order.kind !== SalesOrderKind.DAY_TRADE) return null
 
         const next = this.derive(order)
         if (next === order.status) return order.status

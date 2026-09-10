@@ -1,13 +1,13 @@
 import {
     BadRequestException,
     ConflictException,
-    ForbiddenException,
     Injectable,
     NotFoundException,
 } from '@nestjs/common'
 import {
     PaymentTermType,
     Prisma,
+    PurchaseOrderStatus,
     SalesDeliveryStatus,
     SalesInvoiceDocumentType,
     SalesInvoiceStatus,
@@ -17,6 +17,7 @@ import {
     InvoiceEnvironment,
     SalesWithdrawalStatus,
     SalesReconciliationStatus,
+    SupplierInvoiceStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { MisaClientService, isRetryableMisaError, vatRateName } from 'src/infra/misa/misa-client.service'
@@ -190,6 +191,7 @@ export class SalesInvoicesService {
             qty: Prisma.Decimal
             unitPrice: Prisma.Decimal
             discountAmount: Prisma.Decimal
+            transportFeeUnitPrice?: Prisma.Decimal | null
             taxRate: Prisma.Decimal | null
             vatRate?: VatRateSource | null
             productCode: string | null
@@ -200,7 +202,9 @@ export class SalesInvoicesService {
         const paymentUnitPrices = new Set<string>()
         const taxRateNames = new Set<string>()
         const total = lines.reduce((sum, line) => {
-            const netUnitPrice = new Prisma.Decimal(line.unitPrice).minus(line.discountAmount)
+            const netUnitPrice = new Prisma.Decimal(line.unitPrice)
+                .minus(line.discountAmount)
+                .plus(line.transportFeeUnitPrice ?? 0)
             const net = line.qty.mul(netUnitPrice)
             const { taxRate, taxRateName } = vatOf(line, fallbackVat)
             const tax = taxRate ? net.mul(taxRate) : new Prisma.Decimal(0)
@@ -219,7 +223,15 @@ export class SalesInvoicesService {
                 .reduce((sum, line) => sum.plus(line.qty), new Prisma.Decimal(0))
                 .toString(),
             // Giữ giá gốc để tương thích API cũ; UI dùng giá sau CK bên dưới.
-            estimatedUnitPrices: [...new Set(lines.map((line) => line.unitPrice.toString()))],
+            estimatedUnitPrices: [
+                ...new Set(
+                    lines.map((line) =>
+                        new Prisma.Decimal(line.unitPrice)
+                            .plus(line.transportFeeUnitPrice ?? 0)
+                            .toString(),
+                    ),
+                ),
+            ],
             // Không bình quân các dòng khác giá thành một con số không có thật trên chứng từ.
             estimatedNetUnitPrices: [...netUnitPrices],
             estimatedPaymentUnitPrices: [...paymentUnitPrices],
@@ -297,7 +309,9 @@ export class SalesInvoicesService {
         for (const orderLine of order.lines) {
             const qty = new Prisma.Decimal(orderLine.orderedActualQty)
             if (!qty.greaterThan(0)) continue
-            const unitPrice = new Prisma.Decimal(orderLine.unitPrice)
+            const unitPrice = new Prisma.Decimal(orderLine.unitPrice).plus(
+                orderLine.transportFeeUnitPrice ?? 0,
+            )
             const gross = qty.mul(unitPrice)
             const discount = new Prisma.Decimal(orderLine.discountAmount).mul(qty)
             const netAmount = gross.minus(discount)
@@ -339,6 +353,120 @@ export class SalesInvoicesService {
                 taxTotal,
                 grandTotal: subtotal.minus(discountTotal).plus(taxTotal),
             },
+        }
+    }
+
+    /**
+     * Đơn đối ứng chỉ cần đơn mua đã duyệt và khóa giá. Hóa đơn đầu vào có thể
+     * đến sau; khi đó kế toán được cảnh báo rằng giá vốn/lãi vẫn là tạm tính.
+     */
+    private async dayTradePurchaseReadiness(
+        db: Prisma.TransactionClient | PrismaService,
+        salesOrderId: string,
+    ) {
+        const activePurchaseStatuses: PurchaseOrderStatus[] = [
+            PurchaseOrderStatus.APPROVED,
+            PurchaseOrderStatus.IN_PROGRESS,
+            PurchaseOrderStatus.COMPLETED,
+        ]
+        const order = await db.salesOrder.findUnique({
+            where: { id: salesOrderId },
+            select: {
+                kind: true,
+                approvedAt: true,
+                lines: {
+                    orderBy: { lineNo: 'asc' },
+                    select: {
+                        lineNo: true,
+                        orderedActualQty: true,
+                        purchaseAllocations: {
+                            where: {
+                                purchaseOrderLine: {
+                                    purchaseOrder: { status: { in: activePurchaseStatuses } },
+                                },
+                            },
+                            select: {
+                                allocatedQty: true,
+                                purchaseOrderLine: {
+                                    select: {
+                                        orderedQty: true,
+                                        unitPrice: true,
+                                        supplierInvoiceLines: {
+                                            where: { invoice: { status: SupplierInvoiceStatus.POSTED } },
+                                            select: { actualQty: true },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        })
+        if (!order || order.kind !== SalesOrderKind.DAY_TRADE) return null
+        if (!order.approvedAt) {
+            throw new BadRequestException({
+                code: 'DAY_TRADE_NOT_APPROVED',
+                message: 'Đơn đối ứng phải được duyệt trước khi lập hóa đơn bán.',
+            })
+        }
+
+        const incompleteLines: number[] = []
+        const missingPriceLines: number[] = []
+        let allAllocatedQtyInvoiced = true
+        for (const line of order.lines) {
+            const allocated = line.purchaseAllocations.reduce(
+                (sum, row) => sum.plus(row.allocatedQty),
+                new Prisma.Decimal(0),
+            )
+            if (allocated.lessThan(line.orderedActualQty)) incompleteLines.push(line.lineNo)
+            if (line.purchaseAllocations.some((row) => !row.purchaseOrderLine.unitPrice?.greaterThan(0))) {
+                missingPriceLines.push(line.lineNo)
+            }
+            for (const allocation of line.purchaseAllocations) {
+                const invoicedQty = allocation.purchaseOrderLine.supplierInvoiceLines.reduce(
+                    (sum, invoiceLine) => sum.plus(invoiceLine.actualQty ?? 0),
+                    new Prisma.Decimal(0),
+                )
+                // Invoice line is tied to the purchase line, not to an individual sales
+                // allocation. Treat cost as final only when that whole purchase line is invoiced.
+                if (invoicedQty.lessThan(allocation.purchaseOrderLine.orderedQty)) {
+                    allAllocatedQtyInvoiced = false
+                }
+            }
+        }
+        if (incompleteLines.length) {
+            throw new BadRequestException({
+                code: 'DAY_TRADE_PURCHASE_NOT_FULLY_ALLOCATED',
+                message: `Đơn mua đối ứng chưa đặt đủ lượng cho dòng ${incompleteLines.join(', ')}.`,
+                detail: { lineNos: incompleteLines },
+            })
+        }
+        if (missingPriceLines.length) {
+            throw new BadRequestException({
+                code: 'DAY_TRADE_PURCHASE_PRICE_REQUIRED',
+                message: `Đơn mua đối ứng chưa chốt giá ở dòng ${missingPriceLines.join(', ')}.`,
+                detail: { lineNos: missingPriceLines },
+            })
+        }
+        return { hasPostedSupplierInvoice: allAllocatedQtyInvoiced }
+    }
+
+    private async buildDayTradeDraft(
+        db: Prisma.TransactionClient | PrismaService,
+        salesOrderId: string,
+    ) {
+        const readiness = await this.dayTradePurchaseReadiness(db, salesOrderId)
+        const draft = await this.buildWholeLotDraft(db, salesOrderId)
+        return {
+            ...draft,
+            warnings: readiness?.hasPostedSupplierInvoice
+                ? []
+                : [{
+                      code: 'PURCHASE_INVOICE_PENDING',
+                      message: 'Chưa có hóa đơn đầu vào đã ghi sổ. Giá vốn và lãi của đơn đối ứng hiện là tạm tính.',
+                      costStatus: 'PROVISIONAL',
+                  }],
         }
     }
 
@@ -471,7 +599,9 @@ export class SalesInvoicesService {
             }
 
             const qty = requested.qty
-            const unitPrice = new Prisma.Decimal(orderLine.unitPrice)
+            const unitPrice = new Prisma.Decimal(orderLine.unitPrice).plus(
+                orderLine.transportFeeUnitPrice ?? 0,
+            )
             const gross = qty.mul(unitPrice)
             const discount = new Prisma.Decimal(orderLine.discountAmount).mul(qty)
             const netAmount = gross.minus(discount)
@@ -537,6 +667,9 @@ export class SalesInvoicesService {
                 lotOrder.lotInvoiceMode === SalesLotInvoiceMode.ON_CONFIRMATION
             ) {
                 return this.buildWholeLotDraft(db, source.salesOrderId)
+            }
+            if (lotOrder?.kind === SalesOrderKind.DAY_TRADE) {
+                return this.buildDayTradeDraft(db, source.salesOrderId)
             }
         }
 
@@ -628,7 +761,9 @@ export class SalesInvoicesService {
                 const qty = new Prisma.Decimal(line.actualQty ?? 0)
                 if (!qty.greaterThan(0)) continue
                 const orderLine = line.orderLine
-                const unitPrice = new Prisma.Decimal(orderLine.unitPrice)
+                const unitPrice = new Prisma.Decimal(orderLine.unitPrice).plus(
+                    orderLine.transportFeeUnitPrice ?? 0,
+                )
                 const gross = qty.mul(unitPrice)
                 // discountAmount là chiết khấu TRÊN MỖI ĐƠN VỊ (Decimal(24,8) như đơn giá),
                 // đúng như đơn đặt hàng của kinh doanh: thành tiền = SL × (giá − chiết khấu).
@@ -905,6 +1040,7 @@ export class SalesInvoicesService {
                 taxTotal: draft.totals.taxTotal.toString(),
                 grandTotal: draft.totals.grandTotal.toString(),
             },
+            warnings: 'warnings' in draft ? draft.warnings : [],
         }
     }
 
@@ -997,49 +1133,13 @@ export class SalesInvoicesService {
     }
 
     /**
-     * Publishes to MISA. Safe to call again after a crash: it asks MISA about the transaction
-     * key first, so an invoice that already went out is recovered instead of duplicated.
-     */
-    /**
-     * Chặn tín dụng đúng ở đây chứ không phải ở bước đặt hàng: hóa đơn phát hành ra mới
-     * đẻ ra khoản phải thu, nên đây là mốc cuối cùng còn dừng lại được.
+     * Số liệu công nợ của khách tại thời điểm sắp xuất một hóa đơn.
      *
-     * Bỏ qua với hóa đơn điều chỉnh/thay thế: chúng sửa một hóa đơn đã ra, chặn lại chỉ
-     * làm kẹt việc sửa sai. Đặt SALES_CREDIT_LIMIT_CHECK=0 để tắt tạm.
+     * Chỉ để HIỂN THỊ (cột "Công nợ" ở tab Chưa xuất HĐ). Không còn dùng để chặn phát
+     * hành: bán rồi thì luật buộc phải lập hóa đơn, chặn ở đây vừa không cứu được đồng
+     * nào — xăng đã ra khỏi bồn — vừa đẩy công ty vào chỗ lập hóa đơn sai thời điểm.
+     * Chốt chặn tín dụng thuộc về bước duyệt đơn / giữ hàng.
      */
-    private async assertCreditAllows(invoice: {
-        id: string
-        customerPartyId: string
-        documentType: SalesInvoiceDocumentType
-        grandTotal: Prisma.Decimal
-    }) {
-        if (process.env.SALES_CREDIT_LIMIT_CHECK === '0') return
-        if (invoice.documentType !== SalesInvoiceDocumentType.ORIGINAL) return
-
-        const credit = await this.checks.creditStatus(this.prisma, invoice.customerPartyId, {
-            extraExposure: invoice.grandTotal,
-        })
-
-        if (credit.overdueAmount.greaterThan(0)) {
-            throw new BadRequestException({
-                code: 'CUSTOMER_HAS_OVERDUE_DEBT',
-                message: `Khách hàng đang có công nợ quá hạn ${credit.overdueAmount.toFixed(0)} — không phát hành được hóa đơn.`,
-                detail: { overdueAmount: credit.overdueAmount.toString() },
-            })
-        }
-        if (credit.limit != null && credit.exposure.greaterThan(new Prisma.Decimal(credit.limit))) {
-            throw new BadRequestException({
-                code: 'CREDIT_LIMIT_EXCEEDED',
-                message: `Phát hành hóa đơn này sẽ đưa công nợ lên ${credit.exposure.toFixed(0)}, vượt hạn mức ${new Prisma.Decimal(credit.limit).toFixed(0)}.`,
-                detail: {
-                    exposure: credit.exposure.toString(),
-                    creditLimit: String(credit.limit),
-                    invoiceAmount: invoice.grandTotal.toString(),
-                },
-            })
-        }
-    }
-
     private async invoiceCreditAssessment(invoice: {
         id: string
         customerPartyId: string
@@ -1090,52 +1190,28 @@ export class SalesInvoicesService {
         }
     }
 
-    private canOverrideCredit(actor: ScopedActor) {
-        const permissions = new Set(actor.permissions ?? [])
-        return permissions.has(PERMISSIONS.system.rbacAdmin) ||
-            permissions.has(PERMISSIONS.sales.invoiceCreditOverride)
-    }
-
-    private async confirmCreditRisk(
-        invoice: {
-            id: string
-            customerPartyId: string
-            documentType: SalesInvoiceDocumentType
-            grandTotal: Prisma.Decimal
-        },
+    private async confirmDayTradePurchaseInvoice(
+        invoice: { id: string; salesOrderId: string | null },
         actor: ScopedActor,
         dto: IssueSalesInvoiceDto,
     ) {
-        const assessment = await this.invoiceCreditAssessment(invoice)
-        if (!assessment?.riskCodes.length) return
-        if (!dto.overrideCredit) {
+        if (!invoice.salesOrderId) return
+        const readiness = await this.dayTradePurchaseReadiness(this.prisma, invoice.salesOrderId)
+        if (!readiness || readiness.hasPostedSupplierInvoice) return
+        if (!dto.overrideMissingPurchaseInvoice) {
             throw new ConflictException({
-                code: 'CREDIT_CONFIRMATION_REQUIRED',
-                message: 'Công nợ khách hàng đang có cảnh báo. Kế toán cần xác nhận trước khi phát hành hóa đơn.',
-                detail: assessment,
-            })
-        }
-        if (!this.canOverrideCredit(actor)) {
-            throw new ForbiddenException({
-                code: 'CREDIT_OVERRIDE_PERMISSION_REQUIRED',
-                message: 'Tài khoản chưa có quyền xác nhận phát hành hóa đơn vượt hạn mức công nợ.',
-                detail: assessment,
-            })
-        }
-        if (!dto.creditSnapshotHash || dto.creditSnapshotHash !== assessment.snapshotHash) {
-            throw new ConflictException({
-                code: 'CREDIT_CONFIRMATION_STALE',
-                message: 'Số liệu công nợ đã thay đổi. Vui lòng kiểm tra và xác nhận lại.',
-                detail: assessment,
+                code: 'PURCHASE_INVOICE_CONFIRMATION_REQUIRED',
+                message: 'Đơn đối ứng chưa có hóa đơn đầu vào đã ghi sổ. Kế toán cần xác nhận giá vốn đang tạm tính trước khi phát hành hóa đơn bán.',
+                detail: { salesOrderId: invoice.salesOrderId, costStatus: 'PROVISIONAL' },
             })
         }
         await this.prisma.$transaction((tx) =>
             this.events.record(tx, {
                 entityType: 'SALES_INVOICE',
                 entityId: invoice.id,
-                eventType: 'CREDIT_OVERRIDE_CONFIRMED',
+                eventType: 'PURCHASE_INVOICE_PENDING_CONFIRMED',
                 actorId: actor.userId,
-                metadata: assessment,
+                metadata: { salesOrderId: invoice.salesOrderId, costStatus: 'PROVISIONAL' },
             }),
         )
     }
@@ -1195,6 +1271,10 @@ export class SalesInvoicesService {
         }
     }
 
+    /**
+     * Publishes to MISA. Safe to call again after a crash: it asks MISA about the transaction
+     * key first, so an invoice that already went out is recovered instead of duplicated.
+     */
     async issue(invoiceId: string, actor: ScopedActor, dto: IssueSalesInvoiceDto = {}) {
         const invoice = await this.prisma.salesInvoice.findUnique({
             where: { id: invoiceId },
@@ -1210,7 +1290,7 @@ export class SalesInvoicesService {
         }
 
         // Kiểm trước khi động vào MISA: đã gửi đi rồi thì không rút lại được nữa.
-        await this.confirmCreditRisk(invoice, actor, dto)
+        await this.confirmDayTradePurchaseInvoice(invoice, actor, dto)
 
         const attempt =
             (await this.prisma.salesInvoiceIssuance.count({
@@ -1683,8 +1763,26 @@ export class SalesInvoicesService {
     async list(query: ListSalesInvoicesQueryDto) {
         const page = Math.max(query.page ?? 1, 1)
         const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
+        const selectedStatus = query.status as SalesInvoiceStatus | undefined
+        // Nháp bị bỏ trước khi gọi MISA vẫn giữ trong audit, nhưng không phải là
+        // hóa đơn hủy theo nghĩa nghiệp vụ. Không để chúng làm danh sách và số
+        // đếm xuất hiện một hóa đơn thứ hai giống hệt hóa đơn đã phát hành.
+        const visibility: Prisma.SalesInvoiceWhereInput =
+            selectedStatus === SalesInvoiceStatus.CANCELLED
+                ? {
+                      status: SalesInvoiceStatus.CANCELLED,
+                      issuedAt: { not: null },
+                  }
+                : selectedStatus
+                  ? { status: selectedStatus }
+                  : {
+                        NOT: {
+                            status: SalesInvoiceStatus.CANCELLED,
+                            issuedAt: null,
+                        },
+                    }
         const where: Prisma.SalesInvoiceWhereInput = {
-            status: query.status ? (query.status as SalesInvoiceStatus) : undefined,
+            ...visibility,
             customerPartyId: query.customerPartyId ?? undefined,
             accountantEmployeeId: query.accountantEmployeeId ?? undefined,
             salesOrderId: query.salesOrderId ?? undefined,
@@ -1776,6 +1874,22 @@ export class SalesInvoicesService {
                             lotInvoiceMode: SalesLotInvoiceMode.ON_CONFIRMATION,
                             status: { in: invoiceableLotStatuses },
                         },
+                        {
+                            kind: SalesOrderKind.DAY_TRADE,
+                            approvedAt: { not: null },
+                            status: { in: invoiceableLotStatuses },
+                            purchaseOrders: {
+                                some: {
+                                    status: {
+                                        in: [
+                                            PurchaseOrderStatus.APPROVED,
+                                            PurchaseOrderStatus.IN_PROGRESS,
+                                            PurchaseOrderStatus.COMPLETED,
+                                        ],
+                                    },
+                                },
+                            },
+                        },
                     ],
                 },
                 select: {
@@ -1799,6 +1913,52 @@ export class SalesInvoicesService {
                             taxRate: true,
                             vatRate: VAT_RATE_SELECT,
                             product: { select: { code: true } },
+                            purchaseAllocations: {
+                                where: {
+                                    purchaseOrderLine: {
+                                        purchaseOrder: {
+                                            status: {
+                                                in: [
+                                                    PurchaseOrderStatus.APPROVED,
+                                                    PurchaseOrderStatus.IN_PROGRESS,
+                                                    PurchaseOrderStatus.COMPLETED,
+                                                ],
+                                            },
+                                        },
+                                    },
+                                },
+                                select: {
+                                    allocatedQty: true,
+                                    purchaseOrderLine: {
+                                        select: {
+                                            orderedQty: true,
+                                            unitPrice: true,
+                                            supplierInvoiceLines: {
+                                                where: { invoice: { status: SupplierInvoiceStatus.POSTED } },
+                                                select: { actualQty: true },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    purchaseOrders: {
+                        where: {
+                            status: {
+                                in: [
+                                    PurchaseOrderStatus.APPROVED,
+                                    PurchaseOrderStatus.IN_PROGRESS,
+                                    PurchaseOrderStatus.COMPLETED,
+                                ],
+                            },
+                        },
+                        select: {
+                            supplierInvoices: {
+                                where: { status: SupplierInvoiceStatus.POSTED },
+                                select: { id: true },
+                                take: 1,
+                            },
                         },
                     },
                 },
@@ -1846,14 +2006,48 @@ export class SalesInvoicesService {
             }),
         ])
         const items = [
-            ...orders.map((order) => ({
+            ...orders.filter((order) =>
+                order.kind !== SalesOrderKind.DAY_TRADE ||
+                order.lines.every((line) => {
+                    const allocated = line.purchaseAllocations.reduce(
+                        (sum, allocation) => sum.plus(allocation.allocatedQty),
+                        new Prisma.Decimal(0),
+                    )
+                    return allocated.greaterThanOrEqualTo(line.orderedActualQty) &&
+                        line.purchaseAllocations.every((allocation) =>
+                            allocation.purchaseOrderLine.unitPrice?.greaterThan(0),
+                        )
+                }),
+            ).map((order) => ({
                 id: `order:${order.id}`,
                 source: { salesOrderId: order.id },
                 sourceNo: order.orderNo,
-                sourceType: order.kind === SalesOrderKind.LOT ? 'LOT_ORDER' : 'SALES_ORDER',
+                sourceType:
+                    order.kind === SalesOrderKind.LOT
+                        ? 'LOT_ORDER'
+                        : order.kind === SalesOrderKind.DAY_TRADE
+                          ? 'DAY_TRADE'
+                          : 'SALES_ORDER',
                 sourceDate: order.orderDate,
                 customer: order.customer,
                 accountantEmployee: order.customer.accountingOwnerEmp,
+                purchaseInvoiceWarning:
+                    order.kind === SalesOrderKind.DAY_TRADE &&
+                    order.lines.some((line) =>
+                        line.purchaseAllocations.some((allocation) => {
+                            const invoicedQty = allocation.purchaseOrderLine.supplierInvoiceLines.reduce(
+                                (sum, invoiceLine) => sum.plus(invoiceLine.actualQty ?? 0),
+                                new Prisma.Decimal(0),
+                            )
+                            return invoicedQty.lessThan(allocation.purchaseOrderLine.orderedQty)
+                        }),
+                    )
+                        ? {
+                              code: 'PURCHASE_INVOICE_PENDING',
+                              message: 'Chưa có hóa đơn đầu vào; giá vốn và lãi hiện là tạm tính.',
+                              costStatus: 'PROVISIONAL',
+                          }
+                        : undefined,
                 ...this.summarizeUnissuedLines(order.lines.map((line) => ({
                     qty: line.orderedActualQty,
                     unitPrice: line.unitPrice,
@@ -1882,8 +2076,8 @@ export class SalesInvoicesService {
             })),
         ].sort((a, b) => b.sourceDate.getTime() - a.sourceDate.getTime())
 
-        // Cảnh báo sớm cho kế toán ngay trên danh sách. Đây không thay thế bước
-        // confirmCreditRisk lúc phát hành vì số dư có thể thay đổi sau khi tải trang.
+        // Cảnh báo thuần hiển thị cho kế toán ngay trên danh sách, không chặn gì. Bán rồi
+        // thì luật buộc phải xuất hóa đơn; chốt chặn tín dụng thuộc về bước duyệt đơn.
         const pageItems = items.slice((page - 1) * limit, page * limit)
         const itemsWithCreditWarnings = await Promise.all(
             pageItems.map(async (item) => {

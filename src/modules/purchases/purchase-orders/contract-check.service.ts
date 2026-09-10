@@ -1,8 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common'
-import { ContractKind, ContractStatus } from '@prisma/client'
+import { ContractStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
-
-const PURCHASE_CONTRACT_TYPE_CODES = ['HDMBXD']
+import { TRADING_CONTRACT_TYPE_WHERE } from 'src/modules/contracts/contract-type.constants'
 
 export type ContractWarning = {
     level: 'info' | 'warning'
@@ -23,10 +22,9 @@ export class ContractCheckService {
         return this.prisma.contract.findFirst({
             where: {
                 customerId: args.supplierCustomerId,
-                OR: [
-                    { kind: ContractKind.PURCHASE },
-                    { contractType: { code: { in: PURCHASE_CONTRACT_TYPE_CODES } } },
-                ],
+                // Lọc theo LOẠI hợp đồng, không theo chiều: chiều được phép mua của đối
+                // tác này do loại thương nhân quyết định và assertCanTrade() đã chặn.
+                contractType: TRADING_CONTRACT_TYPE_WHERE,
                 status: ContractStatus.Active,
                 startDate: { lte: args.onDate },
                 endDate: { gte: args.onDate },

@@ -16,6 +16,10 @@ import { UpdateCustomerPurchaseDefaultsDto } from './dto/update-customer-purchas
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
 import { PartyMerchantService } from './party-merchant.service'
 import { SetMerchantRoleDto } from './dto/party-merchant.dto'
+import {
+    CreatePartyBankAccountDto,
+    UpdatePartyBankAccountDto,
+} from './dto/party-bank-account.dto'
 
 const getReqId = (req: Request) => (req.headers['x-request-id'] as string) || (req as any).requestId
 
@@ -123,6 +127,47 @@ export class CustomersController {
         )
         const rs = await this.merchants.merchantHistory(id)
         return success(rs, 'Đã cập nhật loại thương nhân', 200, getReqId(req))
+    }
+
+    // ---- Tài khoản ngân hàng ----
+
+    /** Một đối tác có thể có nhiều tài khoản; đề nghị thanh toán chọn tài khoản thụ hưởng từ đây. */
+    @Get(':id/bank-accounts')
+    async listBankAccounts(@Param('id') id: string, @Req() req: Request) {
+        const rs = await this.customersService.listBankAccounts(id)
+        return success(rs, 'OK', 200, getReqId(req))
+    }
+
+    @Post(':id/bank-accounts')
+    async createBankAccount(
+        @Param('id') id: string,
+        @Body() dto: CreatePartyBankAccountDto,
+        @Req() req: Request,
+    ) {
+        const rs = await this.customersService.createBankAccount(id, dto)
+        return success(rs, 'Created', 201, getReqId(req))
+    }
+
+    @Patch(':id/bank-accounts/:accountId')
+    async updateBankAccount(
+        @Param('id') id: string,
+        @Param('accountId') accountId: string,
+        @Body() dto: UpdatePartyBankAccountDto,
+        @Req() req: Request,
+    ) {
+        const rs = await this.customersService.updateBankAccount(id, accountId, dto)
+        return success(rs, 'Updated', 200, getReqId(req))
+    }
+
+    /** Tài khoản đã gắn đề nghị thanh toán chỉ được ngừng sử dụng chứ không xóa hẳn. */
+    @Delete(':id/bank-accounts/:accountId')
+    async removeBankAccount(
+        @Param('id') id: string,
+        @Param('accountId') accountId: string,
+        @Req() req: Request,
+    ) {
+        const rs = await this.customersService.removeBankAccount(id, accountId)
+        return success(rs, rs.message, 200, getReqId(req))
     }
 
     // ---- Overview ----

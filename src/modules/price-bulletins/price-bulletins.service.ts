@@ -18,6 +18,11 @@ import { PricePdfPreviewLine, PricePdfPreviewResult } from './types/price-pdf-pr
 import { BackgroundJobsService } from '../background-jobs/background-jobs.service'
 import * as fs from 'fs/promises'
 import { createHash } from 'crypto'
+import {
+    PRICE_DOC_PRODUCTS,
+    priceDocProductName,
+    priceDocUnit,
+} from './templates/price-doc-products'
 import pdf = require('pdf-parse')
 import Tesseract = require('tesseract.js')
 import { Decimal } from '@prisma/client/runtime/library'
@@ -226,6 +231,37 @@ export class PriceBulletinsService {
         }
     }
 
+    /**
+     * Mặt hàng được phép lên bảng giá bán lẻ, đúng thứ tự của mẫu văn bản.
+     *
+     * Không trả cả danh mục sản phẩm: danh mục còn giữ loại đã ngừng bán, mà bảng giá
+     * niêm yết thì không được có nó. Dùng chung nguồn với bản in nên lưới nhập và tờ
+     * thông báo không bao giờ lệch nhau về mặt hàng lẫn thứ tự.
+     */
+    async productsForPriceDoc() {
+        const codes = PRICE_DOC_PRODUCTS.map((item) => item.code)
+        const rows = await this.prisma.product.findMany({
+            where: { code: { in: codes } },
+            select: { id: true, code: true, name: true, uom: true },
+        })
+        const byCode = new Map(rows.map((row) => [row.code, row]))
+        // Duyệt theo codes để giữ thứ tự đã khai; mã chưa có trong danh mục thì bỏ qua.
+        return codes.flatMap((code) => {
+            const row = byCode.get(code)
+            if (!row) return []
+            return [
+                {
+                    id: row.id,
+                    code: row.code,
+                    name: row.name,
+                    uom: row.uom,
+                    label: priceDocProductName(code, row.name),
+                    priceUnit: priceDocUnit(row.uom),
+                },
+            ]
+        })
+    }
+
     async detail(id: string) {
         const row = await this.prisma.priceBulletin.findUnique({
             where: { id },
@@ -380,6 +416,18 @@ export class PriceBulletinsService {
         return new Date(`${s}T00:00:00.000+07:00`)
     }
 
+    /**
+     * Thời điểm áp dụng phải giữ được GIỜ: quyết định điều chỉnh giá luôn ghi "có hiệu lực
+     * từ 15 giờ 00 phút". Chuỗi chỉ có ngày thì vẫn hiểu là 00:00 giờ Việt Nam như cũ, nên
+     * dữ liệu và bản nhập từ PDF trước đây không đổi nghĩa.
+     */
+    private normalizeMoment(s: string) {
+        const value = s.trim()
+        return /^d{4}-d{2}-d{2}$/.test(value)
+            ? new Date(`${value}T00:00:00.000+07:00`)
+            : new Date(value)
+    }
+
     async create(dto: CreatePriceBulletinDto) {
         if (!dto.items?.length) throw new BadRequestException({ code: 'REQUIRED_ITEMS', message: 'Cần ít nhất 1 dòng giá' })
 
@@ -388,8 +436,8 @@ export class PriceBulletinsService {
         await this.assertProducts(productIds)
         await this.assertRegions(regionIds)
 
-        const effectiveFrom = this.normalizeDateOnly(dto.effectiveFrom)
-        const effectiveTo = dto.effectiveTo ? this.normalizeDateOnly(dto.effectiveTo) : null
+        const effectiveFrom = this.normalizeMoment(dto.effectiveFrom)
+        const effectiveTo = dto.effectiveTo ? this.normalizeMoment(dto.effectiveTo) : null
         if (effectiveTo && effectiveTo < effectiveFrom) {
             throw new BadRequestException({ code: 'INVALID_DATE_RANGE', message: 'effectiveTo phải >= effectiveFrom' })
         }
@@ -403,6 +451,9 @@ export class PriceBulletinsService {
                     note: dto.note?.trim() || null,
                     fileUrl: dto.fileUrl?.trim() || null,
                     fileChecksum: dto.fileChecksum?.trim() || null,
+                    decisionNo: dto.decisionNo?.trim() || null,
+                    basisDocNo: dto.basisDocNo?.trim() || null,
+                    basisDocDate: dto.basisDocDate ? this.normalizeMoment(dto.basisDocDate) : null,
                     publishedAt: effectiveFrom,
                 },
             })
@@ -429,11 +480,16 @@ export class PriceBulletinsService {
         }
 
         const patch: Prisma.PriceBulletinUpdateInput = {
-            ...(dto.effectiveFrom !== undefined ? { effectiveFrom: this.normalizeDateOnly(dto.effectiveFrom) } : {}),
-            ...(dto.effectiveTo !== undefined ? { effectiveTo: dto.effectiveTo ? this.normalizeDateOnly(dto.effectiveTo) : null } : {}),
+            ...(dto.effectiveFrom !== undefined ? { effectiveFrom: this.normalizeMoment(dto.effectiveFrom) } : {}),
+            ...(dto.effectiveTo !== undefined ? { effectiveTo: dto.effectiveTo ? this.normalizeMoment(dto.effectiveTo) : null } : {}),
             ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
             ...(dto.fileUrl !== undefined ? { fileUrl: dto.fileUrl?.trim() || null } : {}),
             ...(dto.fileChecksum !== undefined ? { fileChecksum: dto.fileChecksum?.trim() || null } : {}),
+            ...(dto.decisionNo !== undefined ? { decisionNo: dto.decisionNo?.trim() || null } : {}),
+            ...(dto.basisDocNo !== undefined ? { basisDocNo: dto.basisDocNo?.trim() || null } : {}),
+            ...(dto.basisDocDate !== undefined
+                ? { basisDocDate: dto.basisDocDate ? this.normalizeMoment(dto.basisDocDate) : null }
+                : {}),
         }
 
         const shouldReplaceItems = dto.items !== undefined

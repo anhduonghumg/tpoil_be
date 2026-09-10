@@ -1,6 +1,6 @@
-import { IsOptional, IsUUID, IsEnum, IsInt, IsDateString, IsString } from 'class-validator'
+import { IsArray, IsOptional, IsUUID, IsEnum, IsInt, IsDateString, IsString } from 'class-validator'
 import { ContractKind, ContractStatus, RiskLevel } from '@prisma/client'
-import { Type } from 'class-transformer'
+import { Transform, Type } from 'class-transformer'
 
 export class ContractListQueryDto {
     @IsOptional()
@@ -14,6 +14,19 @@ export class ContractListQueryDto {
     @IsOptional()
     @IsUUID()
     contractTypeId?: string
+
+    /**
+     * Loại hợp đồng KHÔNG muốn thấy trong danh sách.
+     *
+     * Màn hợp đồng chung dùng để loại hợp đồng thuê kho: loại đó có màn quản lý riêng
+     * (kèm gán kho) và bị chính form ở đây loại khỏi ô "Loại HĐ", nên nếu vẫn liệt kê thì
+     * bấm Sửa sẽ mở một form không chọn lại được đúng loại của nó.
+     */
+    @IsOptional()
+    @Transform(({ value }) => (value == null || Array.isArray(value) ? value : [value]))
+    @IsArray()
+    @IsString({ each: true })
+    excludeTypeCodes?: string[]
 
     @IsOptional()
     @IsEnum(ContractStatus)

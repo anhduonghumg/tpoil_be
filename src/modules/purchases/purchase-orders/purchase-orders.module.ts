@@ -3,7 +3,6 @@ import { Module } from '@nestjs/common'
 import { PurchaseOrdersController } from './purchase-orders.controller'
 import { PurchaseOrdersService } from './purchase-orders.service'
 import { ContractCheckService } from './contract-check.service'
-import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { BackgroundJobsModule } from 'src/modules/background-jobs/background-jobs.module'
 import { JobArtifactsModule } from 'src/modules/job-artifacts/job-artifacts.module'
 import { CustomersModule } from 'src/modules/customers/customers.module'
@@ -11,7 +10,7 @@ import { CustomersModule } from 'src/modules/customers/customers.module'
 @Module({
     imports: [BackgroundJobsModule, JobArtifactsModule, CustomersModule],
     controllers: [PurchaseOrdersController],
-    providers: [PurchaseOrdersService, ContractCheckService, PrismaService],
+    providers: [PurchaseOrdersService, ContractCheckService],
     exports: [PurchaseOrdersService],
 })
 export class PurchaseOrdersModule {}

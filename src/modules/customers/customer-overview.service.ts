@@ -2,10 +2,14 @@ import { Injectable, NotFoundException } from '@nestjs/common'
 import { ContractStatus } from '@prisma/client'
 import { CustomerOverviewResponseDto, CustomerOverviewContractMiniDto, CustomerOwnerMiniDto } from './dto/customer-overview.dto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { MERCHANT_LABELS, MerchantRole, PartyMerchantService } from './party-merchant.service'
 
 @Injectable()
 export class CustomerOverviewService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly merchants: PartyMerchantService,
+    ) {}
 
     async getOverview(customerId: string): Promise<CustomerOverviewResponseDto> {
         const customer = await this.prisma.party.findFirst({
@@ -159,12 +163,18 @@ export class CustomerOverviewService {
         const creditLimit = (customer.creditLimit as any)?.toNumber?.() ?? (customer.creditLimit as any)
         const tempLimit = (customer.tempLimit as any)?.toNumber?.() ?? (customer.tempLimit as any)
 
+        // Loại thương nhân đang áp dụng hôm nay; null = đối tác dịch vụ, không mua bán
+        // xăng dầu. Đây mới là phân loại quyết định chiều giao dịch, khác với `type`
+        // (B2B/B2C) vốn không còn được khai ở đâu.
+        const merchantRole = await this.merchants.merchantRoleAt(customerId)
+
         return {
             customer: {
                 id: customer.id,
                 code: customer.code,
                 name: customer.name,
-                type: customer.type,
+                merchantRole,
+                merchantLabel: merchantRole ? MERCHANT_LABELS[merchantRole as MerchantRole] : null,
                 status: customer.status,
                 taxCode: customer.taxCode,
                 billingAddress: customer.billingAddress,

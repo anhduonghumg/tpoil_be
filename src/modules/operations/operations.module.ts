@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
-import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { OperationsController } from './operations.controller'
 import { OperationsDashboardService } from './operations-dashboard.service'
 import { WarehouseDashboardService } from './warehouse-dashboard.service'
@@ -15,7 +14,6 @@ import { InventoryCoreService } from 'src/modules/inventory/inventory-core.servi
     imports: [CustomersModule],
     controllers: [OperationsController],
     providers: [
-        PrismaService,
         PermissionsGuard,
         InventoryCoreService,
         GoodsReceiptPostingService,

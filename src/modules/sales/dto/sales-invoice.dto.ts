@@ -88,16 +88,11 @@ export class CancelSalesInvoiceDto {
     reason!: string
 }
 
-/** Explicit confirmation after the server reports a live credit-risk snapshot. */
 export class IssueSalesInvoiceDto {
+    /** Kế toán xác nhận phát hành đầu ra khi hóa đơn đầu vào đối ứng chưa được ghi sổ. */
     @IsOptional()
     @IsBoolean()
-    overrideCredit?: boolean
-
-    @IsOptional()
-    @IsString()
-    @MaxLength(128)
-    creditSnapshotHash?: string
+    overrideMissingPurchaseInvoice?: boolean
 }
 
 /**

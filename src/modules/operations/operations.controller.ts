@@ -67,8 +67,8 @@ export class OperationsController {
     }
 
     @Get('warehouse-dashboard')
-    getWarehouseDashboard() {
-        return this.warehouseDashboard.get()
+    getWarehouseDashboard(@Query('warehouseId') warehouseId?: string) {
+        return this.warehouseDashboard.get(warehouseId)
     }
 
     @Get('ship-charters/dashboard')
@@ -601,6 +601,24 @@ export class OperationsController {
     @RequirePermissions(PERMISSIONS.operations.roadManage)
     updateDriverDocument(@Param('driverId') driverId: string, @Param('id') id: string, @Body() dto: UpsertDriverDocumentDto) {
         return this.road.saveDriverDocument(driverId, dto, id)
+    }
+
+    @Get('sales-transport-requests')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    salesTransportRequests(@Query() q: PageQueryDto) {
+        return this.road.listSalesTransportRequests(q)
+    }
+
+    @Get('sales-transport-requests/:id')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    salesTransportRequest(@Param('id') id: string) {
+        return this.road.salesTransportRequest(id)
+    }
+
+    @Patch('sales-transport-requests/:id/acknowledge')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    acknowledgeSalesTransportRequest(@Param('id') id: string) {
+        return this.road.acknowledgeSalesTransportRequest(id)
     }
 
     @Get('vehicle-dispatches')

@@ -4,6 +4,7 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { ScopedActor } from './sales-warehouse-scope.service'
 import { startOfToday } from './receivables.service'
 import { ListCreditCustomersQueryDto, UpdateCustomerCreditDto } from './dto/sales-credit.dto'
+import { salesLineNetAmount } from './sales-order-amount'
 
 const openStatuses: ReceivableOpenItemStatus[] = [
     ReceivableOpenItemStatus.OPEN,
@@ -58,10 +59,9 @@ export class SalesCreditService {
      * Giá trị chưa thuế của các dòng đơn — cùng công thức với bước kiểm tra khi gửi duyệt.
      * Chiết khấu tính trên mỗi đơn vị.
      */
-    private orderValue(lines: Array<{ orderedActualQty: Prisma.Decimal; unitPrice: Prisma.Decimal; discountAmount: Prisma.Decimal | null }>) {
+    private orderValue(lines: Array<{ orderedActualQty: Prisma.Decimal; unitPrice: Prisma.Decimal; discountAmount: Prisma.Decimal | null; transportFeeUnitPrice?: Prisma.Decimal | null }>) {
         return lines.reduce(
-            (sum, line) =>
-                sum.plus(line.orderedActualQty.mul(line.unitPrice.minus(this.decimal(line.discountAmount)))),
+            (sum, line) => sum.plus(salesLineNetAmount(line)),
             new Prisma.Decimal(0),
         )
     }
@@ -176,7 +176,7 @@ export class SalesCreditService {
                 select: {
                     customerPartyId: true,
                     lines: {
-                        select: { orderedActualQty: true, unitPrice: true, discountAmount: true },
+                        select: { orderedActualQty: true, unitPrice: true, discountAmount: true, transportFeeUnitPrice: true },
                     },
                 },
             }),

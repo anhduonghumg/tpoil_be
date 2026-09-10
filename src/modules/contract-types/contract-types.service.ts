@@ -75,6 +75,7 @@ export class ContractTypesService {
                 description: dto.description?.trim() || null,
                 isActive: dto.isActive ?? true,
                 sortOrder: dto.sortOrder,
+                allowsTrading: dto.allowsTrading ?? false,
             },
         })
     }
@@ -97,6 +98,7 @@ export class ContractTypesService {
         if (dto.description !== undefined) data.description = dto.description?.trim() || null
         if (dto.isActive !== undefined) data.isActive = dto.isActive
         if (dto.sortOrder !== undefined) data.sortOrder = dto.sortOrder
+        if (dto.allowsTrading !== undefined) data.allowsTrading = dto.allowsTrading
 
         return this.prisma.contractType.update({
             where: { id },

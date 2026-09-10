@@ -73,6 +73,13 @@ export class ConfirmQuickEntryLineDto {
     @IsNumber()
     discountAdjustmentAmount?: number
 
+    /** Cước vận chuyển thu khách trên từng đơn vị của dòng hàng. */
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    transportFeeUnitPrice?: number
+
     @IsOptional()
     @IsIn(['TP', 'NCC'])
     supplySource?: 'TP' | 'NCC'

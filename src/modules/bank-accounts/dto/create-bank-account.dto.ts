@@ -1,7 +1,11 @@
 import { Transform } from 'class-transformer'
-import { IsBoolean, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator'
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator'
 
 export class CreateBankAccountDto {
+    @IsOptional()
+    @IsUUID()
+    legalEntityId?: string
+
     @IsString()
     @IsNotEmpty()
     @MaxLength(50)

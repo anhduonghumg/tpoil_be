@@ -13,6 +13,7 @@ export type SalesOrderPrintLine = {
     unitPrice: number
     /** Chiết khấu trên mỗi đơn vị — bản in ghi đúng con số này. */
     discountPerUnit: number
+    transportFeePerUnit: number
     lineTotal: number
     vehiclePlate: string
     driverName: string

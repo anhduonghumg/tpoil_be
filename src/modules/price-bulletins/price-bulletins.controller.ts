@@ -1,7 +1,9 @@
 // src/modules/price-bulletins/price-bulletins.controller.ts
-import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
+import { BadRequestException, Body, Controller, Get, Header, Param, ParseIntPipe, Patch, Post, Query, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common'
+import type { Response } from 'express'
 import { ListPriceBulletinsDto, ListPriceItemsDto } from './dto/list-price-bulletins.dto'
 import { PriceBulletinsService } from './price-bulletins.service'
+import { PriceBulletinPrintService } from './price-bulletin-print.service'
 import { CreatePriceBulletinDto } from './dto/create-price-bulletin.dto'
 import { UpdatePriceBulletinDto } from './dto/update-price-bulletin.dto'
 import { QuoteBatchDto, QuotePriceQueryDto, RegionsSelectQueryDto } from './dto/price-bulletins.dto'
@@ -17,7 +19,37 @@ import { MODULE_CODES } from 'src/common/constants/modules'
 @ModuleName(MODULE_CODES.PRICE_BULLETIN)
 @Controller('price-bulletins')
 export class PriceBulletinsController {
-    constructor(private readonly service: PriceBulletinsService) {}
+    constructor(
+        private readonly service: PriceBulletinsService,
+        private readonly print: PriceBulletinPrintService,
+    ) {}
+
+    /**
+     * Ảnh thông báo giá để gửi khách và đại lý. Đặt TRƯỚC route ':id' vì Nest khớp theo
+     * thứ tự khai báo — để sau thì ':id' nuốt mất đường này.
+     */
+    @Get(':id/notice.png')
+    @Header('Content-Type', 'image/png')
+    async noticePng(@Param('id') id: string, @Res() res: Response) {
+        const { buffer, data } = await this.print.renderNoticePng(id)
+        res.setHeader(
+            'Content-Disposition',
+            `inline; filename="${this.print.fileStem(data, 'thong-bao-gia')}.png"`,
+        )
+        res.end(buffer)
+    }
+
+    /** Quyết định điều chỉnh giá, bản A4 để in ra ký và đóng dấu. */
+    @Get(':id/decision.pdf')
+    @Header('Content-Type', 'application/pdf')
+    async decisionPdf(@Param('id') id: string, @Res() res: Response) {
+        const { buffer, data } = await this.print.renderDecisionPdf(id)
+        res.setHeader(
+            'Content-Disposition',
+            `inline; filename="${this.print.fileStem(data, 'quyet-dinh-gia')}.pdf"`,
+        )
+        res.end(buffer)
+    }
 
     @Get()
     list(@Query() dto: ListPriceBulletinsDto) {
@@ -109,6 +141,12 @@ export class PriceBulletinsController {
     @Post(':id/void')
     void(@Param('id') id: string) {
         return this.service.void(id)
+    }
+
+    /** Mặt hàng được phép lên bảng giá, đúng thứ tự mẫu văn bản. */
+    @Get('products/select')
+    productsSelect() {
+        return this.service.productsForPriceDoc()
     }
 
     @Get('regions/select')

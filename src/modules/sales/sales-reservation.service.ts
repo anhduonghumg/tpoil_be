@@ -1,7 +1,9 @@
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common'
 import {
     Prisma,
+    PurchaseOrderStatus,
     ReservationStatus,
+    RestrictionEventType,
     SalesOrderKind,
     SalesOrderStatus,
     SalesOrderSupplySource,
@@ -85,6 +87,7 @@ export class SalesReservationService {
             ownerPartyId: string
             supplySource: SalesOrderSupplySource
             supplierPartyId?: string
+            purchaseOrderLineIds?: string[]
         },
         lock = true,
     ) {
@@ -102,6 +105,13 @@ export class SalesReservationService {
                 lot: {
                     releaseCode: key.supplySource,
                     supplierPartyId: key.supplierPartyId ?? { not: null },
+                    ...(key.purchaseOrderLineIds !== undefined
+                        ? {
+                              receiptLine: {
+                                  purchaseOrderLineId: { in: key.purchaseOrderLineIds },
+                              },
+                          }
+                        : {}),
                 },
             },
             include: {
@@ -354,6 +364,9 @@ export class SalesReservationService {
         orderId: string,
         actor: SalesActor,
     ): Promise<ReserveOutcome> {
+        // Một đơn có thể được duyệt/nhập từ nhiều cửa sổ cùng lúc. Khóa đầu đơn
+        // trước khi đọc lượng đã giữ để hai transaction không cùng giữ đủ một dòng.
+        await tx.$queryRaw`SELECT "id" FROM "SalesOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`
         const order = await tx.salesOrder.findUniqueOrThrow({
             where: { id: orderId },
             include: {
@@ -372,6 +385,14 @@ export class SalesReservationService {
                         },
                         receivingWarehouseArea: {
                             select: { id: true, name: true },
+                        },
+                        purchaseAllocations: {
+                            where: {
+                                purchaseOrderLine: {
+                                    purchaseOrder: { status: { not: PurchaseOrderStatus.CANCELLED } },
+                                },
+                            },
+                            select: { purchaseOrderLineId: true },
                         },
                     },
                 },
@@ -399,6 +420,42 @@ export class SalesReservationService {
                 },
             },
         })
+
+        // Earlier day-trade receipts were temporarily blocked with
+        // AWAITING_SUPPLIER_INVOICE, even though this flow may physically deliver before
+        // the supplier invoice arrives. Release only the restrictions tied to purchase
+        // lines allocated to this sales order, then immediately reserve those exact lots
+        // for the linked customer. This also repairs receipts posted before the rule was
+        // corrected, without releasing stock for any other order.
+        if (order.kind === SalesOrderKind.DAY_TRADE) {
+            const allocatedPurchaseLineIds = order.lines.flatMap((line) =>
+                line.purchaseAllocations.map((allocation) => allocation.purchaseOrderLineId),
+            )
+            if (allocatedPurchaseLineIds.length) {
+                const pendingRestrictions = await tx.inventoryPendingRelease.findMany({
+                    where: {
+                        status: { in: ['ACTIVE', 'PARTIALLY_RELEASED'] },
+                        reasonCode: 'AWAITING_SUPPLIER_INVOICE',
+                        receiptLine: { purchaseOrderLineId: { in: allocatedPurchaseLineIds } },
+                    },
+                    select: { id: true, activeActualQty: true, activeV15Qty: true },
+                })
+                for (const restriction of pendingRestrictions) {
+                    if (new Prisma.Decimal(restriction.activeActualQty).lessThanOrEqualTo(0)) continue
+                    await this.inventory.changeRestriction(tx, {
+                        kind: 'PENDING_RELEASE',
+                        restrictionId: restriction.id,
+                        type: RestrictionEventType.RELEASE,
+                        actualQty: restriction.activeActualQty,
+                        v15Qty: restriction.activeV15Qty,
+                        idempotencyKey: `sales-order:${orderId}:day-trade-release-pending:${restriction.id}`,
+                        occurredAt: new Date(),
+                        actorId: actor.userId,
+                        reason: `Giải phóng hàng đối ứng để giữ cho đơn bán ${order.orderNo}`,
+                    })
+                }
+            }
+        }
 
         const alreadyHeld = new Map<string, Prisma.Decimal>()
         const existingAllocations = new Map<string, ReserveLotOutcome[]>()
@@ -447,6 +504,10 @@ export class SalesReservationService {
                     ownerPartyId: order.legalEntity.partyId,
                     supplySource: orderLine.supplySource,
                     supplierPartyId: orderLine.preferredSupplierPartyId ?? undefined,
+                    purchaseOrderLineIds:
+                        order.kind === SalesOrderKind.DAY_TRADE
+                            ? orderLine.purchaseAllocations.map((allocation) => allocation.purchaseOrderLineId)
+                            : undefined,
                 })
                 for (const candidate of candidates) {
                     if (!missing.greaterThan(0)) break
@@ -588,7 +649,10 @@ export class SalesReservationService {
                 },
             },
         })
-        if (delivery.salesOrder.kind !== SalesOrderKind.SINGLE) return
+        if (
+            delivery.salesOrder.kind !== SalesOrderKind.SINGLE &&
+            delivery.salesOrder.kind !== SalesOrderKind.DAY_TRADE
+        ) return
 
         const inputByLine = new Map(inputs.map((line) => [line.salesDeliveryLineId, line]))
         const selectedLotIds = [...new Set(inputs.flatMap((line) => line.allocations.map((row) => row.inventoryLotId)))]

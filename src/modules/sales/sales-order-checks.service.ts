@@ -1,17 +1,19 @@
 import { Injectable } from '@nestjs/common'
+import { ContractTermsService } from '../contracts/contract-terms.service'
 import {
-    ContractKind,
     ContractStatus,
     CustomerStatus,
     MasterStatus,
     Prisma,
     RiskLevel,
     SalesApprovalType,
+    SalesOrderKind,
     SalesOrderStatus,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
 import { SalesDiscountService } from './sales-discount.service'
+import { salesLineNetAmount } from './sales-order-amount'
 import { startOfToday } from './receivables.service'
 
 export type SalesCheckViolation = {
@@ -60,6 +62,7 @@ export class SalesOrderChecksService {
         private readonly prisma: PrismaService,
         private readonly costLayers: PurchaseTermCostLayerService,
         private readonly discounts: SalesDiscountService,
+        private readonly contractTerms: ContractTermsService,
     ) {}
 
     /**
@@ -70,10 +73,11 @@ export class SalesOrderChecksService {
         orderedActualQty: Prisma.Decimal
         unitPrice: Prisma.Decimal
         discountAmount: Prisma.Decimal
+        transportFeeUnitPrice?: Prisma.Decimal | null
         taxRate: Prisma.Decimal | null
     }) {
         // Chiết khấu tính trên mỗi đơn vị: thành tiền = SL × (giá − chiết khấu).
-        const net = line.orderedActualQty.mul(line.unitPrice.minus(line.discountAmount))
+        const net = salesLineNetAmount(line)
         if (line.taxRate == null) return net
         return net.plus(net.mul(line.taxRate))
     }
@@ -104,7 +108,7 @@ export class SalesOrderChecksService {
                 where: {
                     customerPartyId,
                     ...(options.excludeOrderId ? { id: { not: options.excludeOrderId } } : {}),
-                    kind: { in: ['SINGLE', 'LOT'] },
+                    kind: { in: [SalesOrderKind.SINGLE, SalesOrderKind.LOT, SalesOrderKind.DAY_TRADE] },
                     status: { in: EXPOSURE_STATUSES },
                 },
                 select: {
@@ -113,6 +117,7 @@ export class SalesOrderChecksService {
                             orderedActualQty: true,
                             unitPrice: true,
                             discountAmount: true,
+                            transportFeeUnitPrice: true,
                             taxRate: true,
                         },
                     },
@@ -164,7 +169,7 @@ export class SalesOrderChecksService {
                         riskFlags: { where: { deletedAt: null, level: RiskLevel.High } },
                     },
                 },
-                contract: { include: { items: true } },
+                contract: { include: { items: true, contractType: { select: { code: true, allowsTrading: true } } } },
                 lines: {
                     include: {
                         product: { select: { id: true, code: true, name: true } },
@@ -227,7 +232,7 @@ export class SalesOrderChecksService {
         const orderDate = order.orderDate
         if (order.contract) {
             const contractInvalid =
-                order.contract.kind !== ContractKind.SALES ||
+                !order.contract.contractType.allowsTrading ||
                 order.contract.status !== ContractStatus.Active ||
                 order.contract.deletedAt != null ||
                 order.contract.startDate > orderDate ||
@@ -239,7 +244,7 @@ export class SalesOrderChecksService {
                     code: 'SALES_CONTRACT_INVALID',
                     message: `Hợp đồng ${order.contract.code} không hợp lệ cho đơn này (loại/hiệu lực/khách hàng).`,
                     detail: {
-                        contractKind: order.contract.kind,
+                        contractType: order.contract.contractType.code,
                         contractStatus: order.contract.status,
                         startDate: order.contract.startDate,
                         endDate: order.contract.endDate,
@@ -260,10 +265,14 @@ export class SalesOrderChecksService {
             })
         }
 
-        // ===== 2) Giá & chiết khấu (ContractItem.price = giá sàn, D4) =====
-        if (order.contract && order.contract.kind === ContractKind.SALES) {
+        // ===== 2) Giá & chiết khấu (giá sàn hợp đồng, D4) =====
+        if (order.contract && order.contract.contractType.allowsTrading) {
+            // Giá sàn lấy theo NGÀY ĐƠN, không lấy bản mới nhất: phụ lục điều chỉnh giá có
+            // ngày hiệu lực riêng, nên đơn cũ phải được chấm theo mức đúng tại thời điểm
+            // của nó, không phải mức vừa điều chỉnh tháng này.
+            const terms = await this.contractTerms.resolveAt(order.contract.id, orderDate)
             for (const line of order.lines) {
-                const item = order.contract.items.find((row) => row.productId === line.productId)
+                const item = terms?.items.get(line.productId)
                 if (!item) continue
                 const floor = new Prisma.Decimal(item.price)
                 if (line.unitPrice.lessThan(floor)) {
@@ -276,6 +285,7 @@ export class SalesOrderChecksService {
                             productId: line.productId,
                             unitPrice: line.unitPrice.toString(),
                             floorPrice: floor.toString(),
+                            theoPhuLuc: item.fromAppendixCode,
                         },
                     })
                 }
@@ -346,7 +356,7 @@ export class SalesOrderChecksService {
         // Ngưỡng mặc định 0 nghĩa là chỉ chặn khi bán DƯỚI giá vốn — bán lỗ luôn phải có
         // người duyệt, còn đặt ngưỡng cao hơn thì cấu hình bằng SALES_MIN_MARGIN_PERCENT.
         const minMarginPercent = new Prisma.Decimal(process.env.SALES_MIN_MARGIN_PERCENT ?? '0')
-        for (const line of order.lines) {
+        for (const line of order.kind === SalesOrderKind.DAY_TRADE ? [] : order.lines) {
             if (!line.issueWarehouse || line.issueWarehouse.status !== MasterStatus.ACTIVE) continue
             const estimate = await this.costLayers.estimateFifoCostInTx(db, {
                 warehouseId: line.issueWarehouse.id,
@@ -364,7 +374,7 @@ export class SalesOrderChecksService {
                 })
                 continue
             }
-            const netRevenue = line.orderedActualQty.mul(line.unitPrice.minus(line.discountAmount))
+            const netRevenue = salesLineNetAmount(line)
             if (!netRevenue.greaterThan(0)) continue
             const marginPercent = netRevenue.minus(estimate.cost).div(netRevenue).mul(100)
             if (marginPercent.lessThan(minMarginPercent)) {
@@ -389,7 +399,7 @@ export class SalesOrderChecksService {
         // kiểm, không cảnh báo, và cũng không truy vấn dư nợ để khỏi tốn 3 query mỗi lần.
 
         // ===== 4) Tồn khả dụng (chỉ cảnh báo — chặn thật ở bước giữ hàng, D2 owner pháp nhân) =====
-        for (const line of order.lines) {
+        for (const line of order.kind === SalesOrderKind.DAY_TRADE ? [] : order.lines) {
             if (!line.issueWarehouse && !line.receivingWarehouseArea) continue
             if (
                 (line.issueWarehouse && line.issueWarehouse.status !== MasterStatus.ACTIVE) ||

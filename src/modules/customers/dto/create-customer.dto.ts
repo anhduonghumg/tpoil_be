@@ -1,6 +1,19 @@
 import { Transform, Type } from 'class-transformer'
-import { IsArray, IsBoolean, IsDate, IsEmail, IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator'
-import { CustomerRole, CustomerStatus, CustomerType, PartyRoleType, PartyType, TaxSource } from '@prisma/client'
+import {
+    IsArray,
+    IsBoolean,
+    IsDate,
+    IsDateString,
+    IsEmail,
+    IsEnum,
+    IsIn,
+    IsOptional,
+    IsString,
+    MaxLength,
+    ValidateNested,
+} from 'class-validator'
+import { CustomerRole, CustomerStatus, PartyRoleType, PartyType, TaxSource } from '@prisma/client'
+import { PartyBankAccountInputDto } from './party-bank-account.dto'
 
 export class CreateCustomerDto {
     @IsOptional()
@@ -30,8 +43,10 @@ export class CreateCustomerDto {
     @IsDate()
     taxSyncedAt?: Date
 
-    // Backward compatible with clients that submit a single selected role.
-    // The database and service layer always receive an array.
+    /**
+     * @deprecated Bộ vai trò Đại lý/Bán lẻ/Bán buôn đã bị loại thương nhân xăng dầu thay thế.
+     * Vẫn nhận để client cũ không vỡ, nhưng không còn được ghi xuống DB.
+     */
     @Transform(({ value }) => (value == null || Array.isArray(value) ? value : [value]))
     @IsOptional()
     @IsArray()
@@ -49,9 +64,6 @@ export class CreateCustomerDto {
     @IsEnum(PartyRoleType, { each: true })
     partnerRoles?: PartyRoleType[]
 
-    @IsEnum(CustomerType)
-    type!: CustomerType
-
     @IsOptional()
     @IsString()
     billingAddress?: string
@@ -68,36 +80,15 @@ export class CreateCustomerDto {
     @IsString()
     contactPhone?: string
 
+    /**
+     * Danh sách tài khoản ngân hàng của đối tác. Thay cho ô số tài khoản đơn lẻ cũ:
+     * đề nghị thanh toán chọn tài khoản thụ hưởng từ đây.
+     */
     @IsOptional()
-    @IsString()
-    @MaxLength(100)
-    bankAccountNo?: string
-
-    @IsOptional()
-    @Type(() => Number)
-    @IsNumber()
-    creditLimit?: number
-
-    @IsOptional()
-    @Type(() => Number)
-    @IsNumber()
-    tempLimit?: number
-
-    @IsOptional()
-    @Type(() => Date)
-    @IsDate()
-    tempFrom?: Date
-
-    @IsOptional()
-    @Type(() => Date)
-    @IsDate()
-    tempTo?: Date
-
-    @IsOptional()
-    @Type(() => Number)
-    @IsInt()
-    @Min(0)
-    paymentTermDays?: number
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => PartyBankAccountInputDto)
+    bankAccounts?: PartyBankAccountInputDto[]
 
     @IsOptional()
     @IsEnum(CustomerStatus)
@@ -130,6 +121,15 @@ export class CreateCustomerDto {
     @IsOptional()
     @IsIn([PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] as string[])
     merchantRole?: 'TNPP' | 'TNDM' | 'TNDL' | null
+
+    /**
+     * Ngày loại thương nhân bắt đầu có hiệu lực. Phân loại đổi theo từng năm và chứng từ
+     * cũ phải đọc theo loại tại thời điểm của nó, nên kỳ mới cần ngày riêng chứ không
+     * mặc định là hôm nay. Bỏ trống = áp dụng từ hôm nay.
+     */
+    @IsOptional()
+    @IsDateString()
+    merchantEffectiveFrom?: string
 
     @IsOptional()
     @IsBoolean()

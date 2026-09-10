@@ -25,7 +25,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
             status = exception.getStatus()
             code = body?.code ?? exception.code ?? ErrCode.INTERNAL
             message = body?.message ?? message
-            details = body?.details
+            // Chấp nhận cả `detail` lẫn `details`: phần lớn service trong repo ném ra
+            // `detail` (số ít), bỏ sót là mất sạch dữ liệu kèm lỗi ở phía client.
+            details = body?.details ?? body?.detail
         }
         // 2) HttpException (bao gồm UnauthorizedException, BadRequestException, ...)
         else if (exception instanceof HttpException) {
@@ -70,7 +72,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
                                   : status === 429
                                     ? ErrCode.RATE_LIMIT
                                     : ErrCode.BAD_REQUEST)
-                    details = r.details ?? r.errors ?? undefined
+                    details = r.details ?? r.detail ?? r.errors ?? undefined
                 }
             }
         }

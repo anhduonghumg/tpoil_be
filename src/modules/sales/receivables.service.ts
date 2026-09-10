@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import {
     BankTxnDirection,
+    BankTxnMatchStatus,
+    BankTxnReconciliationStatus,
     PayableOpenItemStatus,
     Prisma,
     ReceivableAllocationStatus,
@@ -12,6 +14,7 @@ import { SalesWorkflowEventsService } from './sales-workflow-events.service'
 import { ScopedActor } from './sales-warehouse-scope.service'
 import {
     AllocateReceivableDto,
+    AllocateBankReceiptDto,
     ListReceivablesQueryDto,
     PartyDebtQueryDto,
 } from './dto/receivable.dto'
@@ -157,7 +160,10 @@ export class ReceivablesService {
                     id: true,
                     direction: true,
                     amount: true,
+                    txnDate: true,
+                    valueDate: true,
                     counterpartyType: true,
+                    bankAccount: { select: { currency: true, legalEntityId: true } },
                 },
             })
             if (!bankTransaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
@@ -166,6 +172,21 @@ export class ReceivablesService {
                 throw new BadRequestException({
                     code: 'BANK_TRANSACTION_NOT_INBOUND',
                     message: 'Chỉ giao dịch tiền về mới đối trừ được công nợ phải thu.',
+                })
+            }
+            if (
+                bankTransaction.bankAccount.legalEntityId &&
+                bankTransaction.bankAccount.legalEntityId !== openItem.legalEntityId
+            ) {
+                throw new BadRequestException({
+                    code: 'BANK_ACCOUNT_LEGAL_ENTITY_MISMATCH',
+                    message: 'Tài khoản nhận tiền không thuộc cùng pháp nhân với khoản phải thu.',
+                })
+            }
+            if (bankTransaction.bankAccount.currency !== openItem.currency) {
+                throw new BadRequestException({
+                    code: 'RECEIVABLE_CURRENCY_MISMATCH',
+                    message: 'Loại tiền của giao dịch ngân hàng và khoản phải thu không khớp.',
                 })
             }
 
@@ -209,6 +230,7 @@ export class ReceivablesService {
                     fxRate: null,
                     idempotencyKey,
                     allocatedById: actor.userId,
+                    effectiveAt: bankTransaction.valueDate ?? bankTransaction.txnDate,
                     allocatedAt: new Date(),
                 },
             })
@@ -219,7 +241,7 @@ export class ReceivablesService {
                     amountDelta: amount.negated(),
                     allocationId: allocation.id,
                     idempotencyKey: `receivable-receipt:${allocation.id}`,
-                    effectiveAt: new Date(),
+                        effectiveAt: bankTransaction.valueDate ?? bankTransaction.txnDate,
                 },
             })
             const outstandingAmount = new Prisma.Decimal(openItem.outstandingAmount).minus(amount)
@@ -253,6 +275,268 @@ export class ReceivablesService {
                 select: { openItemId: true },
             })).openItemId,
         )
+    }
+
+    /**
+     * Confirms a customer receipt in one atomic operation.  This is deliberately
+     * separate from import: imported money remains untouched until an accountant
+     * chooses the customer debts it settles.
+     */
+    async allocateBankReceipt(bankTransactionId: string, dto: AllocateBankReceiptDto, actor: ScopedActor) {
+        const seen = new Set<string>()
+        for (const row of dto.allocations) {
+            if (seen.has(row.openItemId)) {
+                throw new BadRequestException({
+                    code: 'DUPLICATE_RECEIVABLE_ALLOCATION',
+                    message: 'Mỗi khoản phải thu chỉ được phân bổ một lần trong cùng thao tác.',
+                })
+            }
+            seen.add(row.openItemId)
+        }
+
+        const total = dto.allocations.reduce((sum, row) => sum.plus(new Prisma.Decimal(row.amount)), new Prisma.Decimal(0))
+        if (!total.greaterThan(0)) {
+            throw new BadRequestException({ code: 'ALLOCATION_AMOUNT_INVALID', message: 'Số tiền phân bổ phải lớn hơn 0.' })
+        }
+
+        const batchKey = `receivable-batch:${bankTransactionId}:${dto.allocations
+            .slice()
+            .sort((a, b) => a.openItemId.localeCompare(b.openItemId))
+            .map((row) => `${row.openItemId}:${row.amount}`)
+            .join('|')}`
+        const allocationKeys = dto.allocations.map((row) => `${batchKey}:${row.openItemId}`)
+
+        return this.prisma.$transaction(async (tx) => {
+            const lockKeys = [`bank:${bankTransactionId}`, ...[...seen].map((id) => `receivable:${id}`)].sort()
+            for (const key of lockKeys) {
+                // pg_advisory_xact_lock returns PostgreSQL `void`.  This is a
+                // command used only for serialization, so do not ask Prisma to
+                // deserialize its return value through $queryRaw.
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
+            }
+
+            const bankTransaction = await tx.bankTransaction.findUnique({
+                where: { id: bankTransactionId },
+                include: {
+                    bankAccount: { select: { currency: true, legalEntityId: true } },
+                    receivableAllocations: { where: { status: ReceivableAllocationStatus.ACTIVE } },
+                },
+            })
+            if (!bankTransaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+            if (bankTransaction.direction !== BankTxnDirection.IN) {
+                throw new BadRequestException({
+                    code: 'BANK_TRANSACTION_NOT_INBOUND',
+                    message: 'Chỉ giao dịch tiền vào mới phân bổ được vào công nợ phải thu.',
+                })
+            }
+            if (bankTransaction.reconciliationStatus === BankTxnReconciliationStatus.IGNORED) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_IGNORED', message: 'Giao dịch này đã được bỏ qua.' })
+            }
+
+            const alreadyAllocated = bankTransaction.receivableAllocations.reduce(
+                (sum, row) => sum.plus(row.amountInBankCurrency),
+                new Prisma.Decimal(0),
+            )
+            const remaining = new Prisma.Decimal(bankTransaction.amount).abs().minus(alreadyAllocated)
+            const existingBatch = await tx.receivableAllocation.findMany({
+                where: { idempotencyKey: { in: allocationKeys } },
+                select: { id: true },
+            })
+            if (existingBatch.length === allocationKeys.length) {
+                return { bankTransactionId, allocatedAmount: '0', remainingAmount: remaining.toString(), idempotent: true }
+            }
+            if (existingBatch.length > 0) {
+                throw new BadRequestException({
+                    code: 'RECEIPT_ALLOCATION_RETRY_CONFLICT',
+                    message: 'Giao dịch đối soát đang được xử lý. Hãy làm mới dữ liệu trước khi thao tác lại.',
+                })
+            }
+            if (total.greaterThan(remaining)) {
+                throw new BadRequestException({
+                    code: 'BANK_TRANSACTION_OVER_ALLOCATED',
+                    message: `Giao dịch chỉ còn ${remaining.toString()} chưa phân bổ.`,
+                })
+            }
+
+            const openItems = await tx.receivableOpenItem.findMany({ where: { id: { in: [...seen] } } })
+            if (openItems.length !== seen.size) throw new BadRequestException('RECEIVABLE_OPEN_ITEM_NOT_FOUND')
+            const byId = new Map(openItems.map((item) => [item.id, item]))
+            const effectiveAt = bankTransaction.valueDate ?? bankTransaction.txnDate
+            for (const row of dto.allocations) {
+                const openItem = byId.get(row.openItemId)!
+                const amount = new Prisma.Decimal(row.amount)
+                if (!openStatuses.includes(openItem.status)) {
+                    throw new BadRequestException({ code: 'RECEIVABLE_NOT_OPEN', message: `Khoản phải thu ${openItem.id} không còn mở.` })
+                }
+                if (amount.greaterThan(openItem.outstandingAmount)) {
+                    throw new BadRequestException({
+                        code: 'ALLOCATION_EXCEEDS_OUTSTANDING',
+                        message: `Phân bổ vượt số tiền còn phải thu của khoản ${openItem.id}.`,
+                    })
+                }
+                if (openItem.currency !== bankTransaction.bankAccount.currency) {
+                    throw new BadRequestException({ code: 'RECEIVABLE_CURRENCY_MISMATCH', message: 'Loại tiền không khớp.' })
+                }
+                if (
+                    bankTransaction.bankAccount.legalEntityId &&
+                    bankTransaction.bankAccount.legalEntityId !== openItem.legalEntityId
+                ) {
+                    throw new BadRequestException({
+                        code: 'BANK_ACCOUNT_LEGAL_ENTITY_MISMATCH',
+                        message: 'Tài khoản nhận tiền không thuộc cùng pháp nhân với khoản phải thu.',
+                    })
+                }
+
+                const idempotencyKey = `${batchKey}:${openItem.id}`
+                const allocation = await tx.receivableAllocation.create({
+                    data: {
+                        bankTransactionId,
+                        openItemId: openItem.id,
+                        amountInBankCurrency: amount,
+                        amountInItemCurrency: amount,
+                        fxRate: 1,
+                        idempotencyKey,
+                        allocatedById: actor.userId,
+                        effectiveAt,
+                        allocatedAt: new Date(),
+                    },
+                })
+                await tx.receivableLedgerEntry.create({
+                    data: {
+                        openItemId: openItem.id,
+                        type: ReceivableEntryType.RECEIPT,
+                        amountDelta: amount.negated(),
+                        allocationId: allocation.id,
+                        idempotencyKey: `receivable-receipt:${allocation.id}`,
+                        effectiveAt,
+                    },
+                })
+                const outstandingAmount = new Prisma.Decimal(openItem.outstandingAmount).minus(amount)
+                await tx.receivableOpenItem.update({
+                    where: { id: openItem.id },
+                    data: {
+                        outstandingAmount,
+                        status: outstandingAmount.isZero()
+                            ? ReceivableOpenItemStatus.SETTLED
+                            : ReceivableOpenItemStatus.PARTIALLY_SETTLED,
+                        version: { increment: 1 },
+                    },
+                })
+                await this.events.record(tx, {
+                    entityType: 'SALES_ORDER',
+                    entityId: openItem.salesOrderId ?? openItem.withdrawalRequestId ?? openItem.id,
+                    eventType: 'RECEIVABLE_RECEIPT',
+                    actorId: actor.userId,
+                    metadata: { openItemId: openItem.id, allocationId: allocation.id, amount: amount.toString(), bankTransactionId },
+                })
+            }
+
+            const finalAllocated = alreadyAllocated.plus(total)
+            const fullyAllocated = finalAllocated.greaterThanOrEqualTo(new Prisma.Decimal(bankTransaction.amount).abs())
+            await tx.bankTransaction.update({
+                where: { id: bankTransactionId },
+                data: {
+                    matchStatus: fullyAllocated ? BankTxnMatchStatus.MANUAL_MATCHED : BankTxnMatchStatus.PARTIAL_MATCHED,
+                    reconciliationStatus: fullyAllocated
+                        ? BankTxnReconciliationStatus.ALLOCATED
+                        : BankTxnReconciliationStatus.PARTIALLY_ALLOCATED,
+                    isConfirmed: true,
+                    confirmedAt: new Date(),
+                    confirmedBy: actor.userId,
+                    note: dto.note?.trim() || bankTransaction.note,
+                },
+            })
+
+            return { bankTransactionId, allocatedAmount: total.toString(), remainingAmount: remaining.minus(total).toString() }
+        })
+    }
+
+    /** Candidate debts for an inbound bank transaction; suggestions never post a receipt. */
+    async receiptSuggestions(bankTransactionId: string) {
+        const transaction = await this.prisma.bankTransaction.findUnique({
+            where: { id: bankTransactionId },
+            include: {
+                bankAccount: { select: { currency: true, legalEntityId: true } },
+                receivableAllocations: { where: { status: ReceivableAllocationStatus.ACTIVE } },
+            },
+        })
+        if (!transaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        if (transaction.direction !== BankTxnDirection.IN) {
+            throw new BadRequestException({ code: 'BANK_TRANSACTION_NOT_INBOUND', message: 'Chỉ gợi ý cho giao dịch tiền vào.' })
+        }
+        const allocatedAmount = transaction.receivableAllocations.reduce(
+            (sum, item) => sum.plus(item.amountInBankCurrency),
+            new Prisma.Decimal(0),
+        )
+        const remainingAmount = new Prisma.Decimal(transaction.amount).abs().minus(allocatedAmount)
+        const candidates = await this.prisma.receivableOpenItem.findMany({
+            where: {
+                status: { in: openStatuses },
+                settlementType: 'RECEIVABLE',
+                currency: transaction.bankAccount.currency,
+                ...(transaction.bankAccount.legalEntityId ? { legalEntityId: transaction.bankAccount.legalEntityId } : {}),
+            },
+            include: {
+                customer: { select: { id: true, code: true, name: true, bankAccounts: { where: { isActive: true }, select: { accountNo: true } } } },
+                salesOrder: { select: { id: true, orderNo: true, orderDate: true } },
+                salesInvoice: { select: { id: true, invoiceNoInternal: true, misaInvoiceNo: true, dueDate: true } },
+            },
+            orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+            take: 100,
+        })
+        const text = this.normalizeForMatch([transaction.description, transaction.externalRef, transaction.documentCode].filter(Boolean).join(' '))
+        const payerAccount = this.normalizeForMatch(transaction.counterpartyAcc ?? '')
+        const payerName = this.normalizeForMatch(transaction.counterpartyName ?? '')
+        const suggestions = candidates
+            .map((item) => {
+                let score = 0
+                const references = [item.salesOrder?.orderNo, item.salesInvoice?.invoiceNoInternal, item.salesInvoice?.misaInvoiceNo]
+                    .filter(Boolean)
+                    .map((value) => this.normalizeForMatch(value!))
+                if (references.some((reference) => reference && text.includes(reference))) score += 85
+                if (transaction.documentCode && references.includes(this.normalizeForMatch(transaction.documentCode))) score += 20
+                if (item.customer.bankAccounts.some((account) => this.normalizeForMatch(account.accountNo) === payerAccount)) score += 75
+                const customerName = this.normalizeForMatch(item.customer.name)
+                if (payerName && (payerName.includes(customerName) || customerName.includes(payerName))) score += 35
+                const outstanding = new Prisma.Decimal(item.outstandingAmount)
+                if (outstanding.equals(remainingAmount)) score += 20
+                else if (outstanding.greaterThanOrEqualTo(remainingAmount)) score += 8
+                return {
+                    openItemId: item.id,
+                    customer: { id: item.customer.id, code: item.customer.code, name: item.customer.name },
+                    salesOrder: item.salesOrder,
+                    salesInvoice: item.salesInvoice,
+                    dueDate: item.dueDate,
+                    outstandingAmount: outstanding.toString(),
+                    suggestedAmount: (outstanding.lessThan(remainingAmount) ? outstanding : remainingAmount).toString(),
+                    score,
+                }
+            })
+            .filter((item) => item.score > 0)
+            .sort((a, b) => b.score - a.score || String(a.dueDate ?? '').localeCompare(String(b.dueDate ?? '')))
+            .slice(0, 20)
+        return {
+            transaction: {
+                id: transaction.id,
+                amount: transaction.amount.toString(),
+                allocatedAmount: allocatedAmount.toString(),
+                remainingAmount: remainingAmount.toString(),
+                txnDate: transaction.txnDate,
+                valueDate: transaction.valueDate ?? transaction.txnDate,
+                description: transaction.description,
+                counterpartyName: transaction.counterpartyName,
+                counterpartyAcc: transaction.counterpartyAcc,
+            },
+            suggestions,
+        }
+    }
+
+    private normalizeForMatch(value: string) {
+        return value
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-zA-Z0-9]/g, '')
+            .toUpperCase()
     }
 
     /** Undoes an allocation with a counter-entry; the original rows stay untouched. */
@@ -432,9 +716,9 @@ export class ReceivablesService {
     }
 
     /** Aging buckets for the AR report. */
-    private bucketOf(dueDate: Date | null) {
+    private bucketOf(dueDate: Date | null, asOf: Date) {
         if (!dueDate) return 'NO_DUE_DATE'
-        const days = Math.floor((startOfToday().getTime() - dueDate.getTime()) / 86_400_000)
+        const days = Math.floor((asOf.getTime() - dueDate.getTime()) / 86_400_000)
         if (days <= 0) return 'CURRENT'
         if (days <= 30) return 'D1_30'
         if (days <= 60) return 'D31_60'
@@ -442,17 +726,29 @@ export class ReceivablesService {
         return 'D90_PLUS'
     }
 
-    async aging(customerPartyId?: string) {
+    async aging(customerPartyId?: string, asOfText?: string) {
+        const asOfDay = asOfText ? new Date(`${asOfText}T00:00:00`) : startOfToday()
+        if (Number.isNaN(asOfDay.getTime())) {
+            throw new BadRequestException({ code: 'AGING_AS_OF_INVALID', message: 'Ngày báo cáo không hợp lệ.' })
+        }
+        const asOfEnd = new Date(asOfDay)
+        asOfEnd.setHours(23, 59, 59, 999)
         const items = await this.prisma.receivableOpenItem.findMany({
             where: {
-                status: { in: openStatuses },
                 customerPartyId: customerPartyId ?? undefined,
                 settlementType: 'RECEIVABLE',
             },
-            include: { customer: { select: { id: true, code: true, name: true } } },
+            include: {
+                customer: { select: { id: true, code: true, name: true } },
+                entries: { where: { effectiveAt: { lte: asOfEnd } }, select: { amountDelta: true } },
+            },
         })
         const byCustomer = new Map<string, Record<string, Prisma.Decimal> & { customer: any }>()
         for (const item of items) {
+            // Current outstandingAmount cannot be used for a historical report:
+            // payments made after the report date must still appear as outstanding.
+            const balanceAtAsOf = item.entries.reduce((sum, entry) => sum.plus(entry.amountDelta), new Prisma.Decimal(0))
+            if (!balanceAtAsOf.greaterThan(0)) continue
             const key = item.customerPartyId
             const row =
                 byCustomer.get(key) ??
@@ -466,21 +762,104 @@ export class ReceivablesService {
                     NO_DUE_DATE: new Prisma.Decimal(0),
                     total: new Prisma.Decimal(0),
                 } as any)
-            const bucket = this.bucketOf(item.dueDate)
-            row[bucket] = row[bucket].plus(item.outstandingAmount)
-            row.total = row.total.plus(item.outstandingAmount)
+            const bucket = this.bucketOf(item.dueDate, asOfDay)
+            row[bucket] = row[bucket].plus(balanceAtAsOf)
+            row.total = row.total.plus(balanceAtAsOf)
             byCustomer.set(key, row)
         }
-        return [...byCustomer.values()].map((row) => ({
-            customer: row.customer,
-            CURRENT: row.CURRENT.toString(),
-            D1_30: row.D1_30.toString(),
-            D31_60: row.D31_60.toString(),
-            D61_90: row.D61_90.toString(),
-            D90_PLUS: row.D90_PLUS.toString(),
-            NO_DUE_DATE: row.NO_DUE_DATE.toString(),
-            total: row.total.toString(),
-        }))
+        return {
+            asOf: asOfDay.toISOString().slice(0, 10),
+            items: [...byCustomer.values()].map((row) => ({
+                customer: row.customer,
+                CURRENT: row.CURRENT.toString(),
+                D1_30: row.D1_30.toString(),
+                D31_60: row.D31_60.toString(),
+                D61_90: row.D61_90.toString(),
+                D90_PLUS: row.D90_PLUS.toString(),
+                NO_DUE_DATE: row.NO_DUE_DATE.toString(),
+                total: row.total.toString(),
+            })),
+        }
+    }
+
+    /**
+     * Collection KPIs deliberately use allocation.effectiveAt (the bank value time).
+     * Therefore late Excel imports are attributed to the day cash was actually received,
+     * and no employee is rewarded twice when one receipt covers many invoices.
+     */
+    async collectionKpis(fromDateText?: string, toDateText?: string) {
+        const now = new Date()
+        const defaultFrom = new Date(now.getFullYear(), now.getMonth(), 1)
+        const fromDate = fromDateText ? new Date(`${fromDateText}T00:00:00`) : defaultFrom
+        const toDate = toDateText ? new Date(`${toDateText}T23:59:59.999`) : now
+        if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime()) || fromDate > toDate) {
+            throw new BadRequestException({ code: 'KPI_PERIOD_INVALID', message: 'Khoảng thời gian KPI không hợp lệ.' })
+        }
+        const [allocations, openItems] = await Promise.all([
+            this.prisma.receivableAllocation.findMany({
+                where: { status: ReceivableAllocationStatus.ACTIVE, effectiveAt: { gte: fromDate, lte: toDate } },
+                include: {
+                    openItem: {
+                        include: {
+                            salesOrder: { include: { salesOwner: { select: { id: true, code: true, fullName: true } } } },
+                            salesInvoice: { include: { accountantEmployee: { select: { id: true, code: true, fullName: true } } } },
+                        },
+                    },
+                },
+            }),
+            this.prisma.receivableOpenItem.findMany({
+                where: { status: { in: openStatuses }, settlementType: 'RECEIVABLE' },
+                include: {
+                    salesOrder: { include: { salesOwner: { select: { id: true, code: true, fullName: true } } } },
+                    salesInvoice: { include: { accountantEmployee: { select: { id: true, code: true, fullName: true } } } },
+                },
+            }),
+        ])
+        type OwnerRow = { owner: { id: string; code: string; fullName: string | null }; collected: Prisma.Decimal; overdueOutstanding: Prisma.Decimal }
+        const sales = new Map<string, OwnerRow>()
+        const accountants = new Map<string, OwnerRow>()
+        const add = (map: Map<string, OwnerRow>, owner: any, field: 'collected' | 'overdueOutstanding', amount: Prisma.Decimal) => {
+            if (!owner) return
+            const row = map.get(owner.id) ?? { owner, collected: new Prisma.Decimal(0), overdueOutstanding: new Prisma.Decimal(0) }
+            row[field] = row[field].plus(amount)
+            map.set(owner.id, row)
+        }
+        for (const allocation of allocations) {
+            const amount = new Prisma.Decimal(allocation.amountInItemCurrency)
+            add(sales, allocation.openItem.salesOrder?.salesOwner, 'collected', amount)
+            add(accountants, allocation.openItem.salesInvoice?.accountantEmployee, 'collected', amount)
+        }
+        const today = startOfToday()
+        for (const item of openItems) {
+            if (!item.dueDate || item.dueDate >= today) continue
+            const amount = new Prisma.Decimal(item.outstandingAmount)
+            add(sales, item.salesOrder?.salesOwner, 'overdueOutstanding', amount)
+            add(accountants, item.salesInvoice?.accountantEmployee, 'overdueOutstanding', amount)
+        }
+        const serialize = (map: Map<string, OwnerRow>) =>
+            [...map.values()]
+                .map((row) => ({
+                    owner: row.owner,
+                    collectedAmount: row.collected.toString(),
+                    overdueOutstandingAmount: row.overdueOutstanding.toString(),
+                }))
+                .sort((a, b) => Number(b.collectedAmount) - Number(a.collectedAmount))
+        const totalCollected = allocations.reduce((sum, row) => sum.plus(row.amountInItemCurrency), new Prisma.Decimal(0))
+        const totalOutstanding = openItems.reduce((sum, row) => sum.plus(row.outstandingAmount), new Prisma.Decimal(0))
+        const totalOverdue = openItems
+            .filter((item) => item.dueDate && item.dueDate < today)
+            .reduce((sum, row) => sum.plus(row.outstandingAmount), new Prisma.Decimal(0))
+        return {
+            fromDate: fromDate.toISOString().slice(0, 10),
+            toDate: toDate.toISOString().slice(0, 10),
+            totals: {
+                collectedAmount: totalCollected.toString(),
+                outstandingAmount: totalOutstanding.toString(),
+                overdueOutstandingAmount: totalOverdue.toString(),
+            },
+            bySalesOwner: serialize(sales),
+            byAccountant: serialize(accountants),
+        }
     }
 
     /**

@@ -20,8 +20,12 @@ export class QueryBankTransactionsDto extends PaginationQueryDto {
     keyword?: string
 
     @IsOptional()
-    @IsIn(['UNMATCHED', 'AUTO_MATCHED', 'MANUAL_MATCHED', 'PARTIAL_MATCHED'])
-    matchStatus?: 'UNMATCHED' | 'AUTO_MATCHED' | 'MANUAL_MATCHED' | 'PARTIAL_MATCHED'
+    @IsIn(['UNMATCHED', 'AUTO_MATCHED', 'MANUAL_MATCHED', 'PARTIAL_MATCHED', 'IGNORED'])
+    matchStatus?: 'UNMATCHED' | 'AUTO_MATCHED' | 'MANUAL_MATCHED' | 'PARTIAL_MATCHED' | 'IGNORED'
+
+    @IsOptional()
+    @IsIn(['PENDING', 'SUGGESTED', 'PARTIALLY_ALLOCATED', 'ALLOCATED', 'IGNORED'])
+    reconciliationStatus?: 'PENDING' | 'SUGGESTED' | 'PARTIALLY_ALLOCATED' | 'ALLOCATED' | 'IGNORED'
 
     @IsOptional()
     @IsIn(['IN', 'OUT'])

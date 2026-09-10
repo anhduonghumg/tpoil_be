@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
 import {
     BankImportStatus,
+    BankTransactionSource,
     BankTxnDirection,
     BankTxnMatchStatus,
     PayableAllocationStatus,
@@ -66,15 +67,21 @@ export class BankingService {
     }
 
     private transactionResponse(item: any) {
-        const allocations = (item.payableAllocations ?? []).map((allocation: any) =>
-            this.legacyAllocation(allocation),
-        )
+        const payableAllocations = (item.payableAllocations ?? []).map((allocation: any) => this.legacyAllocation(allocation))
+        const receivableAllocations = item.receivableAllocations ?? []
+        const allocations = item.direction === BankTxnDirection.IN ? receivableAllocations : payableAllocations
         const allocatedAmount = allocations
-            .filter((allocation: any) => allocation.status === PayableAllocationStatus.ACTIVE)
-            .reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedAmount), 0)
+            .filter((allocation: any) => allocation.status === PayableAllocationStatus.ACTIVE || allocation.status === 'ACTIVE')
+            .reduce(
+                (sum: number, allocation: any) =>
+                    sum + Number(allocation.allocatedAmount ?? allocation.amountInBankCurrency ?? 0),
+                0,
+            )
         return {
             ...item,
             allocations,
+            payableAllocations,
+            receivableAllocations,
             amount: Number(item.amount),
             allocatedAmount,
             remainingAmount: Number(item.amount) - allocatedAmount,
@@ -95,6 +102,7 @@ export class BankingService {
             ...(query.bankAccountId ? { bankAccountId: query.bankAccountId } : {}),
             ...(query.direction ? { direction: query.direction as BankTxnDirection } : {}),
             ...(query.matchStatus ? { matchStatus: query.matchStatus as BankTxnMatchStatus } : {}),
+            ...(query.reconciliationStatus ? { reconciliationStatus: query.reconciliationStatus as any } : {}),
             ...(query.confirmed === 'true' ? { isConfirmed: true } : query.confirmed === 'false' ? { isConfirmed: false } : {}),
             ...(query.fromDate || query.toDate
                 ? {
@@ -155,6 +163,18 @@ export class BankingService {
                         },
                         orderBy: { allocatedAt: 'asc' },
                     },
+                    receivableAllocations: {
+                        include: {
+                            openItem: {
+                                include: {
+                                    customer: { select: { id: true, code: true, name: true } },
+                                    salesOrder: { select: { id: true, orderNo: true } },
+                                    salesInvoice: { select: { id: true, invoiceNoInternal: true, misaInvoiceNo: true } },
+                                },
+                            },
+                        },
+                        orderBy: { allocatedAt: 'asc' },
+                    },
                 },
             }),
             this.prisma.bankTransaction.count({ where }),
@@ -181,6 +201,10 @@ export class BankingService {
                     select: { id: true },
                     take: 1,
                 },
+                receivableAllocations: {
+                    select: { id: true },
+                    take: 1,
+                },
             },
         })
 
@@ -188,8 +212,14 @@ export class BankingService {
             throw new NotFoundException('Không tìm thấy giao dịch ngân hàng')
         }
 
-        if (item.matchStatus !== BankTxnMatchStatus.UNMATCHED || item.isConfirmed || item.payableAllocations.length > 0) {
-            throw new BadRequestException('Chỉ được xóa giao dịch chưa khớp và chưa xác nhận')
+        if (
+            item.source !== BankTransactionSource.MANUAL ||
+            item.matchStatus !== BankTxnMatchStatus.UNMATCHED ||
+            item.isConfirmed ||
+            item.payableAllocations.length > 0 ||
+            item.receivableAllocations.length > 0
+        ) {
+            throw new BadRequestException('Chỉ được xóa giao dịch nhập tay, chưa khớp và chưa xác nhận')
         }
 
         await this.prisma.bankTransaction.delete({
@@ -204,9 +234,14 @@ export class BankingService {
             where: { id: { in: dto.ids } },
             select: {
                 id: true,
+                source: true,
                 matchStatus: true,
                 isConfirmed: true,
                 payableAllocations: {
+                    select: { id: true },
+                    take: 1,
+                },
+                receivableAllocations: {
                     select: { id: true },
                     take: 1,
                 },
@@ -221,7 +256,9 @@ export class BankingService {
             (x) =>
                 x.matchStatus !== BankTxnMatchStatus.UNMATCHED ||
                 x.isConfirmed ||
-                x.payableAllocations.length > 0,
+                x.source !== BankTransactionSource.MANUAL ||
+                x.payableAllocations.length > 0 ||
+                x.receivableAllocations.length > 0,
         )
 
         if (invalid.length > 0) {
@@ -260,6 +297,18 @@ export class BankingService {
                                 supplier: {
                                     select: { id: true, code: true, name: true },
                                 },
+                            },
+                        },
+                    },
+                    orderBy: { allocatedAt: 'asc' },
+                },
+                receivableAllocations: {
+                    include: {
+                        openItem: {
+                            include: {
+                                customer: { select: { id: true, code: true, name: true } },
+                                salesOrder: { select: { id: true, orderNo: true } },
+                                salesInvoice: { select: { id: true, invoiceNoInternal: true, misaInvoiceNo: true } },
                             },
                         },
                     },
@@ -439,6 +488,7 @@ export class BankingService {
                         code: true,
                         name: true,
                         taxCode: true,
+                        bankAccounts: { where: { isActive: true }, select: { accountNo: true } },
                     },
                 },
                 invoice: {
@@ -474,6 +524,7 @@ export class BankingService {
                     txnCounterpartyAcc: txn.counterpartyAcc,
                     settlementRemainingAmount: remainingSettlement,
                     supplierName: s.supplier?.name,
+                    supplierBankAccounts: s.supplier?.bankAccounts.map((a) => a.accountNo) ?? [],
                     invoices: s.invoice
                         ? [
                               {
@@ -627,6 +678,31 @@ export class BankingService {
         return this.getTransactionDetail(id)
     }
 
+    /** Keep the immutable bank row, but explicitly exclude a non-business receipt from AR/AP. */
+    async ignoreTransaction(id: string, reason?: string) {
+        const item = await this.prisma.bankTransaction.findUnique({
+            where: { id },
+            include: {
+                payableAllocations: { where: { status: PayableAllocationStatus.ACTIVE }, select: { id: true } },
+                receivableAllocations: { where: { status: 'ACTIVE' }, select: { id: true } },
+            },
+        })
+        if (!item) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        if (item.payableAllocations.length || item.receivableAllocations.length) {
+            throw new BadRequestException('BANK_TRANSACTION_HAS_ALLOCATIONS')
+        }
+        return this.prisma.bankTransaction.update({
+            where: { id },
+            data: {
+                matchStatus: BankTxnMatchStatus.IGNORED,
+                reconciliationStatus: 'IGNORED',
+                ignoredReason: this.cleanOptionalText(reason) ?? null,
+                isConfirmed: true,
+                confirmedAt: new Date(),
+            },
+        })
+    }
+
     async listTemplates(bankCode?: string) {
         return this.bankImportTemplatesService.listActive(bankCode)
     }
@@ -679,8 +755,11 @@ export class BankingService {
             data: {
                 bankAccountId: body.bankAccountId,
                 txnDate,
+                valueDate: txnDate,
                 direction,
                 amount: new Prisma.Decimal(amount),
+                source: BankTransactionSource.MANUAL,
+                receivedAt: new Date(),
                 description,
                 counterpartyName: this.cleanOptionalText(body.counterpartyName) ?? null,
                 counterpartyAcc: counterpartyAcc ?? null,
@@ -904,8 +983,11 @@ export class BankingService {
                         bankAccountId: body.bankAccountId,
                         importId: importJob.id,
                         txnDate: row.txnDate,
+                        valueDate: row.txnDate,
                         direction: row.direction,
                         amount: new Prisma.Decimal(row.amount),
+                        source: BankTransactionSource.EXCEL,
+                        receivedAt: new Date(),
                         description: row.description,
                         counterpartyName: row.counterpartyName ?? null,
                         counterpartyAcc: row.counterpartyAcc ?? null,
@@ -1296,6 +1378,16 @@ export class BankingService {
             .toLowerCase()
     }
 
+    /**
+     * Số tài khoản trên sao kê hay kèm khoảng trắng, dấu chấm hoặc gạch ngang tùy ngân
+     * hàng, nên chỉ giữ lại chữ và số trước khi so sánh.
+     */
+    private normalizeAccountNo(input?: string | null): string {
+        return String(input ?? '')
+            .replace(/[^0-9a-zA-Z]/g, '')
+            .toLowerCase()
+    }
+
     private sha256(buffer: Buffer): string {
         return crypto.createHash('sha256').update(buffer).digest('hex')
     }
@@ -1354,6 +1446,8 @@ export class BankingService {
         txnCounterpartyAcc?: string | null
         settlementRemainingAmount: number
         supplierName?: string | null
+        /** Số tài khoản đã khai của nhà cung cấp, để đối chiếu với người chuyển/nhận tiền. */
+        supplierBankAccounts?: string[]
         invoices: Array<{
             invoiceNo?: string | null
             invoiceSymbol?: string | null
@@ -1401,6 +1495,19 @@ export class BankingService {
             } else if (counterpartyName.includes(supplierName) || supplierName.includes(counterpartyName)) {
                 score += 12
             }
+        }
+
+        // Số tài khoản đối tác là bằng chứng chắc chắn hơn tên rất nhiều: tên trên sao kê
+        // hay bị viết tắt, bỏ dấu hay thêm bớt "CTY TNHH", còn số tài khoản thì trùng là
+        // trùng. Cùng thang điểm với phía phải thu (receivables.service).
+        const counterpartyAcc = this.normalizeAccountNo(input.txnCounterpartyAcc)
+        if (
+            counterpartyAcc &&
+            (input.supplierBankAccounts ?? []).some(
+                (accountNo) => this.normalizeAccountNo(accountNo) === counterpartyAcc,
+            )
+        ) {
+            score += 75
         }
 
         // =========================

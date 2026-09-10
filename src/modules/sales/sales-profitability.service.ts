@@ -8,6 +8,7 @@ import {
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
+import { salesLineNetUnitPrice } from './sales-order-amount'
 
 export type CostStatus = 'FINAL' | 'PROVISIONAL' | 'NO_COST_BASIS'
 
@@ -70,7 +71,12 @@ export class SalesProfitabilityService {
     /** Revenue billed for a delivery line — the invoice if issued, otherwise the order price. */
     private revenueOfDeliveryLine(line: {
         actualQty: Prisma.Decimal | null
-        orderLine: { orderedActualQty: Prisma.Decimal; unitPrice: Prisma.Decimal; discountAmount: Prisma.Decimal }
+        orderLine: {
+            orderedActualQty: Prisma.Decimal
+            unitPrice: Prisma.Decimal
+            discountAmount: Prisma.Decimal
+            transportFeeUnitPrice?: Prisma.Decimal | null
+        }
         invoiceLines: Array<{ netAmount: Prisma.Decimal }>
     }) {
         const invoiced = line.invoiceLines.reduce(
@@ -82,7 +88,7 @@ export class SalesProfitabilityService {
         // Not invoiced yet: value it at the order price. discountAmount là chiết khấu trên
         // mỗi đơn vị, nên nhân thẳng với lượng đã xuất.
         const qty = this.decimal(line.actualQty)
-        return qty.mul(this.decimal(line.orderLine.unitPrice).minus(this.decimal(line.orderLine.discountAmount)))
+        return qty.mul(salesLineNetUnitPrice(line.orderLine))
     }
 
     /**
@@ -105,6 +111,7 @@ export class SalesProfitabilityService {
                                 orderedActualQty: true,
                                 unitPrice: true,
                                 discountAmount: true,
+                                transportFeeUnitPrice: true,
                             },
                         },
                         invoiceLines: { select: { netAmount: true } },
@@ -326,6 +333,7 @@ export class SalesProfitabilityService {
                                         orderedActualQty: true,
                                         unitPrice: true,
                                         discountAmount: true,
+                                        transportFeeUnitPrice: true,
                                         product: { select: { id: true, code: true, name: true } },
                                     },
                                 },
@@ -498,9 +506,7 @@ export class SalesProfitabilityService {
             const undrawn = this.decimal(line.orderedActualQty).minus(drawn)
             if (!undrawn.greaterThan(0)) continue
 
-            const revenue = undrawn.mul(
-                this.decimal(line.unitPrice).minus(this.decimal(line.discountAmount)),
-            )
+            const revenue = undrawn.mul(salesLineNetUnitPrice(line))
             let cost = new Prisma.Decimal(0)
             if (line.issueWarehouse) {
                 const estimate = await this.costLayers.estimateFifoCostInTx(this.prisma, {

@@ -1,6 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import {
-    ContractKind,
     ContractStatus,
     MasterStatus,
     PaymentTermType,
@@ -12,10 +11,14 @@ import {
     SalesOrderSupplySource,
     SalesOrderStatus,
 } from '@prisma/client'
+import { TRADING_CONTRACT_TYPE_WHERE } from 'src/modules/contracts/contract-type.constants'
 import { createHash } from 'crypto'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
-import { SALES_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import {
+    PURCHASE_NOTIFICATION_EVENTS,
+    SALES_NOTIFICATION_EVENTS,
+} from 'src/modules/notifications/notification-events'
 import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import { SalesOrderChecksService, SalesOrderCheckResult } from './sales-order-checks.service'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
@@ -49,7 +52,22 @@ export const APPROVAL_TYPE_PERMISSIONS: Record<SalesApprovalType, string> = {
     EXCEPTION: PERMISSIONS.sales.approveException,
 }
 
-const INTERNAL_KINDS: SalesOrderKind[] = [SalesOrderKind.SINGLE, SalesOrderKind.LOT]
+const WORKFLOW_KINDS: SalesOrderKind[] = [
+    SalesOrderKind.SINGLE,
+    SalesOrderKind.LOT,
+    SalesOrderKind.DAY_TRADE,
+]
+
+type TransportLineInput = {
+    transportFeeUnitPrice?: number | Prisma.Decimal | null
+    isTransportFeeApplicable?: boolean | null
+}
+
+type TransportConfiguration = {
+    hasTransportFee: boolean
+    vehiclePlate: string | null
+    driverName: string | null
+}
 
 /** Draft lifecycle + submit/recall/cancel for the internal SINGLE/LOT sales flow (spec v1.2 §4). */
 @Injectable()
@@ -71,10 +89,10 @@ export class SalesOrderWorkflowService {
     ) {}
 
     private assertInternalKind(kind: SalesOrderKind) {
-        if (!INTERNAL_KINDS.includes(kind)) {
+        if (!WORKFLOW_KINDS.includes(kind)) {
             throw new BadRequestException({
                 code: 'SALES_ORDER_KIND_NOT_INTERNAL',
-                message: 'Thao tác này chỉ áp dụng cho đơn bán nội bộ (SINGLE/LOT).',
+                message: 'Loại đơn bán không hỗ trợ quy trình kiểm duyệt này.',
             })
         }
     }
@@ -92,7 +110,8 @@ export class SalesOrderWorkflowService {
         const where: Prisma.ContractWhereInput = {
             id: requestedContractId ?? undefined,
             customerId: customerPartyId,
-            kind: ContractKind.SALES,
+            // Chiều bán do loại thương nhân quyết định, hợp đồng chỉ nói loại thỏa thuận.
+            contractType: TRADING_CONTRACT_TYPE_WHERE,
             status: ContractStatus.Active,
             deletedAt: null,
             startDate: { lte: orderDate },
@@ -124,9 +143,58 @@ export class SalesOrderWorkflowService {
         return contracts[0].id
     }
 
+    private resolveTransportConfiguration(
+        dto: CreateSalesOrderDto | UpdateSalesOrderDto,
+        kind: SalesOrderKind,
+        lines: TransportLineInput[],
+        fallback: Partial<TransportConfiguration> = {},
+    ): TransportConfiguration {
+        const feeLines = lines.filter((line) =>
+            new Prisma.Decimal(line.transportFeeUnitPrice ?? 0).greaterThan(0),
+        )
+        const explicitCheckedWithoutFee = lines.some(
+            (line) => line.isTransportFeeApplicable === true &&
+                !new Prisma.Decimal(line.transportFeeUnitPrice ?? 0).greaterThan(0),
+        )
+        if (explicitCheckedWithoutFee) {
+            throw new BadRequestException({
+                code: 'TRANSPORT_FEE_LINE_RATE_REQUIRED',
+                message: 'Dòng được tính cước phải có đơn giá cước lớn hơn 0.',
+            })
+        }
+
+        const hasTransportFee = dto.hasTransportFee ?? (feeLines.length > 0)
+        if (hasTransportFee !== (feeLines.length > 0)) {
+            throw new BadRequestException({
+                code: hasTransportFee ? 'TRANSPORT_FEE_LINE_REQUIRED' : 'TRANSPORT_FEE_FLAG_MISMATCH',
+                message: hasTransportFee
+                    ? 'Đơn có cước phải có ít nhất một dòng hàng có đơn giá cước lớn hơn 0.'
+                    : 'Có đơn giá cước trên dòng hàng thì phải bật cờ đơn có cước vận chuyển.',
+            })
+        }
+        if (hasTransportFee && kind === SalesOrderKind.LOT) {
+            throw new BadRequestException({
+                code: 'TRANSPORT_FEE_LOT_NOT_SUPPORTED',
+                message: 'Giai đoạn này chỉ hỗ trợ cước vận chuyển cho đơn bán lẻ, không áp dụng đơn lô.',
+            })
+        }
+
+        const vehiclePlate =
+            dto.transportVehiclePlate?.trim() || fallback.vehiclePlate?.trim() || null
+        const driverName = dto.transportDriverName?.trim() || fallback.driverName?.trim() || null
+        if (hasTransportFee && (!vehiclePlate || !driverName)) {
+            throw new BadRequestException({
+                code: 'TRANSPORT_VEHICLE_DRIVER_REQUIRED',
+                message: 'Đơn có cước vận chuyển phải có biển số xe và lái xe do Sale khai báo.',
+            })
+        }
+        return { hasTransportFee, vehiclePlate, driverName }
+    }
+
     private linesCreateInput(
         dto: CreateSalesOrderDto | UpdateSalesOrderDto,
         orderKind?: SalesOrderKind,
+        transport?: TransportConfiguration,
     ) {
         return (dto.lines ?? []).map((line, index) => {
             // Các client cũ chỉ gửi discountAmount; coi đó là CK gốc để vẫn đọc được
@@ -143,11 +211,21 @@ export class SalesOrderWorkflowService {
                 })
             }
 
+            const dayTradeWarehouseId =
+                orderKind === SalesOrderKind.DAY_TRADE
+                    ? (line.issueWarehouseId ?? line.receivingWarehouseId ?? null)
+                    : null
+            const transportFeeUnitPrice = new Prisma.Decimal(line.transportFeeUnitPrice ?? 0)
             return {
                 lineNo: index + 1,
                 productId: line.productId,
-                issueWarehouseId: line.issueWarehouseId ?? null,
-                receivingWarehouseId: line.receivingWarehouseId ?? null,
+                // Đối ứng vẫn là đơn giao một lần. Cùng một kho vừa là nơi hàng mua về,
+                // vừa là kho sẽ xuất cho khách sau khi hàng đối ứng được nhận.
+                issueWarehouseId: dayTradeWarehouseId ?? line.issueWarehouseId ?? null,
+                receivingWarehouseId:
+                    orderKind === SalesOrderKind.DAY_TRADE
+                        ? dayTradeWarehouseId
+                        : (line.receivingWarehouseId ?? null),
                 receivingWarehouseAreaId: line.receivingWarehouseAreaId ?? null,
                 orderedActualQty: new Prisma.Decimal(line.orderedActualQty),
                 orderedV15Qty: line.orderedV15Qty == null ? null : new Prisma.Decimal(line.orderedV15Qty),
@@ -158,9 +236,15 @@ export class SalesOrderWorkflowService {
                 supplySource: line.supplySource ?? SalesOrderSupplySource.TP,
                 // Đơn đặt lô chỉ chốt hàng và điều khoản; xe/lái xe được khai ở từng phiếu rút.
                 vehiclePlate:
-                    orderKind === SalesOrderKind.LOT ? null : line.vehiclePlate?.trim() || null,
+                    orderKind === SalesOrderKind.LOT
+                        ? null
+                        : line.vehiclePlate?.trim() || transport?.vehiclePlate || null,
                 driverName:
-                    orderKind === SalesOrderKind.LOT ? null : line.driverName?.trim() || null,
+                    orderKind === SalesOrderKind.LOT
+                        ? null
+                        : line.driverName?.trim() || transport?.driverName || null,
+                isTransportFeeApplicable: transportFeeUnitPrice.greaterThan(0),
+                transportFeeUnitPrice,
                 taxRate: line.taxRate == null ? null : new Prisma.Decimal(line.taxRate),
                 note: line.note?.trim() || null,
             }
@@ -279,7 +363,8 @@ export class SalesOrderWorkflowService {
                 const discount = new Prisma.Decimal(
                     line.discountBaseAmount ?? line.discountAmount ?? 0,
                 ).plus(line.discountAdjustmentAmount ?? 0)
-                return sum.plus(qty.mul(price.minus(discount)))
+                const transportFee = new Prisma.Decimal(line.transportFeeUnitPrice ?? 0)
+                return sum.plus(qty.mul(price.minus(discount).plus(transportFee)))
             }, new Prisma.Decimal(0))
             if (!amountTotal.equals(orderTotal)) {
                 throw new BadRequestException({
@@ -301,7 +386,15 @@ export class SalesOrderWorkflowService {
      */
     private async resolveLegalEntityId(dto: CreateSalesOrderDto) {
         const warehouseIds = [
-            ...new Set((dto.lines ?? []).map((line) => line.issueWarehouseId).filter(Boolean)),
+            ...new Set(
+                (dto.lines ?? [])
+                    .map((line) =>
+                        dto.kind === SalesOrderKind.DAY_TRADE
+                            ? (line.issueWarehouseId ?? line.receivingWarehouseId)
+                            : line.issueWarehouseId,
+                    )
+                    .filter(Boolean),
+            ),
         ] as string[]
         const areaIds = [
             ...new Set(
@@ -309,7 +402,11 @@ export class SalesOrderWorkflowService {
             ),
         ] as string[]
         for (const [index, line] of (dto.lines ?? []).entries()) {
-            if (Boolean(line.issueWarehouseId) === Boolean(line.receivingWarehouseAreaId)) {
+            const warehouseId =
+                dto.kind === SalesOrderKind.DAY_TRADE
+                    ? (line.issueWarehouseId ?? line.receivingWarehouseId)
+                    : line.issueWarehouseId
+            if (Boolean(warehouseId) === Boolean(line.receivingWarehouseAreaId)) {
                 throw new BadRequestException({
                     code: 'RECEIVING_SCOPE_REQUIRED',
                     message: `Dòng ${index + 1} phải chọn đúng một kho nhận: khu vực hoặc kho cụ thể.`,
@@ -372,7 +469,7 @@ export class SalesOrderWorkflowService {
         const [customer, legalEntity] = await Promise.all([
             this.prisma.party.findUnique({
                 where: { id: dto.customerPartyId },
-                select: { id: true, name: true },
+                select: { id: true, name: true, salesOwnerEmpId: true },
             }),
             this.prisma.legalEntity.findUnique({
                 where: { id: legalEntityId },
@@ -385,6 +482,7 @@ export class SalesOrderWorkflowService {
         const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
         if (!dto.lines?.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+        const transport = this.resolveTransportConfiguration(dto, kind, dto.lines)
         // Chặn ngay, không để đơn lưu xong rồi mới kẹt im ở nháp vì thiếu công bố giá.
         await this.assertDiscountsAnnounced(
             dto.lines.map((line, index) => ({ lineNo: index + 1, ...line })),
@@ -410,6 +508,9 @@ export class SalesOrderWorkflowService {
                     orderDate,
                     currency: legalEntity.baseCurrency || 'VND',
                     note: dto.note?.trim() || null,
+                    hasTransportFee: transport.hasTransportFee,
+                    transportVehiclePlate: transport.vehiclePlate,
+                    transportDriverName: transport.driverName,
                     contractId,
                     // DB CHECK: chỉ đơn lô mới có trường này, và đơn lô thì bắt buộc có.
                     lotInvoiceMode:
@@ -423,7 +524,8 @@ export class SalesOrderWorkflowService {
                         ? { create: paymentSchedule.plans }
                         : undefined,
                     createdById: actor.userId,
-                    lines: { create: this.linesCreateInput(dto, kind) },
+                    salesOwnerEmpId: customer.salesOwnerEmpId,
+                    lines: { create: this.linesCreateInput(dto, kind, transport) },
                 },
                 select: { id: true, status: true },
             })
@@ -477,6 +579,15 @@ export class SalesOrderWorkflowService {
                     legalEntityId: true,
                     paymentTermType: true,
                     paymentTermDays: true,
+                    hasTransportFee: true,
+                    transportVehiclePlate: true,
+                    transportDriverName: true,
+                    lines: {
+                        select: {
+                            transportFeeUnitPrice: true,
+                            isTransportFeeApplicable: true,
+                        },
+                    },
                 },
             })
             if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
@@ -498,6 +609,19 @@ export class SalesOrderWorkflowService {
                 status: SalesOrderStatus.DRAFT,
                 version: { increment: 1 },
             }
+            const transport = this.resolveTransportConfiguration(
+                dto,
+                order.kind,
+                dto.lines ?? order.lines,
+                {
+                    hasTransportFee: order.hasTransportFee,
+                    vehiclePlate: order.transportVehiclePlate,
+                    driverName: order.transportDriverName,
+                },
+            )
+            data.hasTransportFee = transport.hasTransportFee
+            data.transportVehiclePlate = transport.vehiclePlate
+            data.transportDriverName = transport.driverName
             if (dto.orderDate !== undefined) {
                 const orderDate = new Date(dto.orderDate)
                 if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
@@ -557,7 +681,7 @@ export class SalesOrderWorkflowService {
                 )
                 await tx.salesOrderLine.deleteMany({ where: { salesOrderId: id } })
                 await tx.salesOrderLine.createMany({
-                    data: this.linesCreateInput(dto, order.kind).map((line) => ({
+                    data: this.linesCreateInput(dto, order.kind, transport).map((line) => ({
                         ...line,
                         salesOrderId: id,
                     })),
@@ -784,6 +908,9 @@ export class SalesOrderWorkflowService {
             legalEntityId: string
             customerPartyId: string
             orderDate: Date
+            hasTransportFee: boolean
+            transportVehiclePlate: string | null
+            transportDriverName: string | null
             lines: Array<{
                 lineNo: number
                 productId: string
@@ -792,10 +919,19 @@ export class SalesOrderWorkflowService {
                 unitPrice: Prisma.Decimal
                 vehiclePlate: string | null
                 driverName: string | null
+                isTransportFeeApplicable: boolean
+                transportFeeUnitPrice: Prisma.Decimal
             }>
         },
     ) {
         if (!order.lines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
+        const transportFeeLines = order.lines.filter((line) => line.transportFeeUnitPrice.greaterThan(0))
+        if (order.hasTransportFee !== (transportFeeLines.length > 0)) {
+            throw new BadRequestException('TRANSPORT_FEE_FLAG_MISMATCH')
+        }
+        if (order.hasTransportFee && (!order.transportVehiclePlate || !order.transportDriverName)) {
+            throw new BadRequestException('TRANSPORT_VEHICLE_DRIVER_REQUIRED')
+        }
         for (const line of order.lines) {
             if (Boolean(line.issueWarehouseId) === Boolean(line.receivingWarehouseAreaId)) {
                 throw new BadRequestException({
@@ -809,7 +945,10 @@ export class SalesOrderWorkflowService {
                     message: `Dòng ${line.lineNo} chưa có giá bán.`,
                 })
             }
-            if (order.kind === SalesOrderKind.SINGLE && (!line.vehiclePlate || !line.driverName)) {
+            if (
+                (order.kind === SalesOrderKind.SINGLE || order.kind === SalesOrderKind.DAY_TRADE) &&
+                (!line.vehiclePlate || !line.driverName)
+            ) {
                 throw new BadRequestException({
                     code: 'VEHICLE_DRIVER_REQUIRED',
                     message: `Đơn lấy 1 lần: dòng ${line.lineNo} phải có BKS và lái xe.`,
@@ -961,6 +1100,45 @@ export class SalesOrderWorkflowService {
                 },
             })
 
+            // Vận tải là work queue độc lập: tạo và thông báo ngay khi Sale gửi đơn,
+            // tuyệt đối không đợi quản lý xe nhập chi phí hay đổi trạng thái chuyến.
+            if (order.hasTransportFee) {
+                const request = await tx.salesOrderTransportRequest.upsert({
+                    where: { salesOrderId: id },
+                    create: {
+                        salesOrderId: id,
+                        plannedVehiclePlate: order.transportVehiclePlate,
+                        plannedDriverName: order.transportDriverName,
+                    },
+                    update: {
+                        plannedVehiclePlate: order.transportVehiclePlate,
+                        plannedDriverName: order.transportDriverName,
+                    },
+                    select: { id: true },
+                })
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: SALES_NOTIFICATION_EVENTS.TRANSPORT_REQUESTED,
+                        aggregateType: 'SALES_TRANSPORT_REQUEST',
+                        aggregateId: request.id,
+                        dedupeKey: `${SALES_NOTIFICATION_EVENTS.TRANSPORT_REQUESTED}:${id}`,
+                        payload: {
+                            entityType: 'SALES_TRANSPORT_REQUEST',
+                            entityId: request.id,
+                            workItemSourceType: 'SALES_TRANSPORT_REQUEST',
+                            workItemSourceId: request.id,
+                            actionRequired: true,
+                            orderNo: order.orderNo,
+                            customerName: order.customer.name,
+                            vehiclePlate: order.transportVehiclePlate,
+                            driverName: order.transportDriverName,
+                            recipientPermissionCodes: [PERMISSIONS.operations.roadManage],
+                        },
+                    },
+                    tx,
+                )
+            }
+
             await this.events.record(tx, {
                 entityType: 'SALES_ORDER',
                 entityId: id,
@@ -1050,8 +1228,41 @@ export class SalesOrderWorkflowService {
     async onApproved(tx: Prisma.TransactionClient, orderId: string, actor: SalesActor) {
         const order = await tx.salesOrder.findUniqueOrThrow({
             where: { id: orderId },
-            select: { kind: true },
+            select: {
+                kind: true,
+                orderNo: true,
+                version: true,
+                customer: { select: { name: true } },
+            },
         })
+        if (order.kind === SalesOrderKind.DAY_TRADE) {
+            // Đối ứng mua-bán trong ngày không lấy tồn sẵn có lúc duyệt. Bộ phận mua
+            // phải chốt một hoặc nhiều PO; hàng chỉ được giữ khi phiếu nhập được xác nhận.
+            await tx.salesOrder.update({
+                where: { id: orderId },
+                data: { status: SalesOrderStatus.AWAITING_STOCK, version: { increment: 1 } },
+            })
+            await this.notificationOutbox.emit(
+                {
+                    eventType: PURCHASE_NOTIFICATION_EVENTS.SALES_ORDER_REQUESTED,
+                    aggregateType: 'SALES_ORDER',
+                    aggregateId: orderId,
+                    dedupeKey: `${PURCHASE_NOTIFICATION_EVENTS.SALES_ORDER_REQUESTED}:${orderId}:v${order.version + 1}`,
+                    payload: {
+                        entityType: 'SALES_ORDER',
+                        entityId: orderId,
+                        workItemSourceType: 'SALES_ORDER',
+                        workItemSourceId: orderId,
+                        orderNo: order.orderNo,
+                        customerName: order.customer.name,
+                        actionRequired: true,
+                        recipientPermissionPrefixes: ['purchases.'],
+                    },
+                },
+                tx,
+            )
+            return { reservationId: null, fullyReserved: false, lines: [] }
+        }
         // Duyệt là cam kết thực hiện đơn, nên thiếu tồn phải chặn ngay tại đây. Việc kiểm
         // tra lại khi giữ hàng phía dưới vẫn cần thiết để chống trường hợp hai đơn duyệt sát nhau.
         const stockWarnings = (await this.checks.run(tx, orderId)).warnings.filter(
@@ -1153,7 +1364,18 @@ export class SalesOrderWorkflowService {
     async returnApprovedOrderToReview(tx: Prisma.TransactionClient, orderId: string, actor: SalesActor) {
         const order = await tx.salesOrder.findUnique({
             where: { id: orderId },
-            select: { id: true, orderNo: true, kind: true, status: true, approvalCycle: true, version: true },
+            select: {
+                id: true,
+                orderNo: true,
+                kind: true,
+                status: true,
+                approvalCycle: true,
+                version: true,
+                purchaseOrders: {
+                    where: { status: { not: 'CANCELLED' } },
+                    select: { id: true, orderNo: true },
+                },
+            },
         })
         if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
         this.assertInternalKind(order.kind)
@@ -1174,6 +1396,12 @@ export class SalesOrderWorkflowService {
             throw new BadRequestException({
                 code: 'SALES_ORDER_HAS_POSTED_DELIVERY',
                 message: 'Đơn đã có phiếu xuất kho thành công — phải xử lý bằng chứng từ điều chỉnh.',
+            })
+        }
+        if (order.kind === SalesOrderKind.DAY_TRADE && order.purchaseOrders.length) {
+            throw new BadRequestException({
+                code: 'DAY_TRADE_HAS_ACTIVE_PURCHASE_ORDER',
+                message: `Đơn đối ứng đang gắn với đơn mua ${order.purchaseOrders.map((row) => row.orderNo).join(', ')} nên không thể trả về chờ duyệt.`,
             })
         }
         if (order.kind === SalesOrderKind.LOT) {
@@ -1345,11 +1573,18 @@ export class SalesOrderWorkflowService {
             SalesOrderStatus.WAREHOUSE_PROCESSING,
         ]
         await this.prisma.$transaction(async (tx) => {
+            // Đồng bộ với transaction tạo đơn mua đối ứng. Nếu hai thao tác diễn ra
+            // cùng lúc thì một bên phải nhìn thấy kết quả của bên kia trước khi quyết định.
+            await tx.$queryRaw`SELECT "id" FROM "SalesOrder" WHERE "id" = ${id}::uuid FOR UPDATE`
             const order = await tx.salesOrder.findUnique({
                 where: { id },
                 include: {
                     customer: { select: { name: true } },
                     approvalRequests: { where: { status: SalesApprovalStatus.PENDING } },
+                    purchaseOrders: {
+                        where: { status: { not: 'CANCELLED' } },
+                        select: { id: true, orderNo: true },
+                    },
                 },
             })
             if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
@@ -1364,6 +1599,13 @@ export class SalesOrderWorkflowService {
                 throw new BadRequestException({
                     code: 'SALES_ORDER_HAS_POSTED_DELIVERY',
                     message: 'Đơn đã có lệnh xuất kho thành công — phải xử lý bằng chứng từ điều chỉnh.',
+                })
+            }
+            if (order.kind === SalesOrderKind.DAY_TRADE && order.purchaseOrders.length) {
+                throw new BadRequestException({
+                    code: 'DAY_TRADE_HAS_ACTIVE_PURCHASE_ORDER',
+                    message: `Đơn đối ứng đang gắn với đơn mua ${order.purchaseOrders.map((row) => row.orderNo).join(', ')}. Hãy hủy hoặc bỏ liên kết đơn mua trước.`,
+                    detail: { purchaseOrders: order.purchaseOrders },
                 })
             }
             const liveInvoices = await tx.salesInvoice.findMany({
@@ -1412,6 +1654,34 @@ export class SalesOrderWorkflowService {
                     version: { increment: 1 },
                 },
             })
+            const transportRequest = await tx.salesOrderTransportRequest.findUnique({
+                where: { salesOrderId: id },
+                select: { id: true },
+            })
+            if (transportRequest) {
+                await tx.salesOrderTransportRequest.update({
+                    where: { id: transportRequest.id },
+                    data: { status: 'CANCELLED' },
+                })
+                await this.notificationOutbox.emit(
+                    {
+                        eventType: SALES_NOTIFICATION_EVENTS.TRANSPORT_CANCELLED,
+                        aggregateType: 'SALES_TRANSPORT_REQUEST',
+                        aggregateId: transportRequest.id,
+                        dedupeKey: `${SALES_NOTIFICATION_EVENTS.TRANSPORT_CANCELLED}:${id}`,
+                        payload: {
+                            entityType: 'SALES_TRANSPORT_REQUEST',
+                            entityId: transportRequest.id,
+                            workItemSourceType: 'SALES_TRANSPORT_REQUEST',
+                            workItemSourceId: transportRequest.id,
+                            orderNo: order.orderNo,
+                            resolvedActions: ['VIEW_SALES_TRANSPORT_REQUEST'],
+                            recipientPermissionCodes: [PERMISSIONS.operations.roadManage],
+                        },
+                    },
+                    tx,
+                )
+            }
             await this.events.record(tx, {
                 entityType: 'SALES_ORDER',
                 entityId: id,

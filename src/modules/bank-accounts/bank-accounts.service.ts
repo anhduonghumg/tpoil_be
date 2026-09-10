@@ -11,6 +11,7 @@ export class BankAccountsService {
 
     async list(query: QueryBankAccountsDto) {
         const where: Prisma.BankAccountWhereInput = {
+            ...(query.legalEntityId ? { legalEntityId: query.legalEntityId } : {}),
             ...(query.isActive === 'true' ? { isActive: true } : query.isActive === 'false' ? { isActive: false } : {}),
             ...(query.keyword
                 ? {
@@ -46,12 +47,11 @@ export class BankAccountsService {
         const bankCode = body.bankCode.trim()
         const accountNo = body.accountNo.trim()
 
-        const existed = await this.prisma.bankAccount.findUnique({
+        const existed = await this.prisma.bankAccount.findFirst({
             where: {
-                bankCode_accountNo: {
-                    bankCode,
-                    accountNo,
-                },
+                legalEntityId: body.legalEntityId ?? null,
+                bankCode,
+                accountNo,
             },
         })
 
@@ -61,6 +61,7 @@ export class BankAccountsService {
 
         return this.prisma.bankAccount.create({
             data: {
+                legalEntityId: body.legalEntityId ?? null,
                 bankCode,
                 bankName: body.bankName?.trim() || null,
                 accountNo,
@@ -82,10 +83,12 @@ export class BankAccountsService {
 
         const nextBankCode = body.bankCode?.trim() ?? existed.bankCode
         const nextAccountNo = body.accountNo?.trim() ?? existed.accountNo
+        const nextLegalEntityId = body.legalEntityId !== undefined ? body.legalEntityId || null : existed.legalEntityId
 
         const duplicated = await this.prisma.bankAccount.findFirst({
             where: {
                 id: { not: id },
+                legalEntityId: nextLegalEntityId,
                 bankCode: nextBankCode,
                 accountNo: nextAccountNo,
             },
@@ -99,6 +102,7 @@ export class BankAccountsService {
             where: { id },
             data: {
                 ...(body.bankCode !== undefined ? { bankCode: nextBankCode } : {}),
+                ...(body.legalEntityId !== undefined ? { legalEntityId: nextLegalEntityId } : {}),
                 ...(body.bankName !== undefined ? { bankName: body.bankName?.trim() || null } : {}),
                 ...(body.accountNo !== undefined ? { accountNo: nextAccountNo } : {}),
                 ...(body.accountName !== undefined ? { accountName: body.accountName?.trim() || null } : {}),

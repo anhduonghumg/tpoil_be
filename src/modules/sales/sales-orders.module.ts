@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common'
-import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { ContractsModule } from '../contracts/contracts.module'
 import { InventoryCoreService } from 'src/modules/inventory/inventory-core.service'
 import { AccountingInventoryService } from 'src/modules/inventory/accounting-inventory.service'
 import { SalesIssuePostingService } from 'src/modules/inventory/sales-issue-posting.service'
@@ -48,8 +48,11 @@ import { SalesOrderAdjustmentsController } from './sales-order-adjustments.contr
 import { SalesOrderAdjustmentsService } from './sales-order-adjustments.service'
 import { SalesDashboardController } from './sales-dashboard.controller'
 import { SalesDashboardService } from './sales-dashboard.service'
+import { SalesManagementReportController } from './sales-management-report.controller'
+import { SalesManagementReportService } from './sales-management-report.service'
 
 @Module({
+    imports: [ContractsModule],
     controllers: [
         SalesOrdersController,
         SalesApprovalsController,
@@ -67,9 +70,9 @@ import { SalesDashboardService } from './sales-dashboard.service'
         SalesDiscountController,
         SalesOrderAdjustmentsController,
         SalesDashboardController,
+        SalesManagementReportController,
     ],
     providers: [
-        PrismaService,
         InventoryCoreService,
         AccountingInventoryService,
         PurchaseTermCostLayerService,
@@ -100,6 +103,7 @@ import { SalesDashboardService } from './sales-dashboard.service'
         SalesApprovalsService,
         SalesOrderAdjustmentsService,
         SalesDashboardService,
+        SalesManagementReportService,
     ],
     exports: [
         SalesOrdersService,

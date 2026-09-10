@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { Prisma, VehicleDispatchStatus } from '@prisma/client'
+import { Prisma, SalesTransportRequestStatus, VehicleDispatchStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import {
     PageQueryDto,
@@ -200,6 +200,111 @@ export class RoadOperationsService {
             page: q.page,
             pageSize: q.pageSize,
         }
+    }
+
+    /**
+     * Queue created from retail sales orders that charge transport. This is deliberately
+     * separate from VehicleDispatchOrder: the latter is a concrete trip and may later
+     * combine several orders/lines.
+     */
+    async listSalesTransportRequests(q: PageQueryDto) {
+        const where: Prisma.SalesOrderTransportRequestWhereInput = {
+            ...(q.status
+                ? { status: q.status as SalesTransportRequestStatus }
+                : { status: { not: SalesTransportRequestStatus.CANCELLED } }),
+            ...(q.keyword
+                ? {
+                      OR: [
+                          { plannedVehiclePlate: { contains: q.keyword, mode: 'insensitive' } },
+                          { plannedDriverName: { contains: q.keyword, mode: 'insensitive' } },
+                          { salesOrder: { orderNo: { contains: q.keyword, mode: 'insensitive' } } },
+                          { salesOrder: { customer: { name: { contains: q.keyword, mode: 'insensitive' } } } },
+                      ],
+                  }
+                : {}),
+        }
+        const [items, total] = await this.prisma.$transaction([
+            this.prisma.salesOrderTransportRequest.findMany({
+                where,
+                ...this.page(q),
+                orderBy: [{ status: 'asc' }, { requestedAt: 'desc' }],
+                include: {
+                    salesOrder: {
+                        select: {
+                            id: true,
+                            orderNo: true,
+                            orderDate: true,
+                            status: true,
+                            customer: { select: { id: true, code: true, name: true } },
+                            lines: {
+                                where: { isTransportFeeApplicable: true },
+                                orderBy: { lineNo: 'asc' },
+                                select: {
+                                    id: true,
+                                    lineNo: true,
+                                    orderedActualQty: true,
+                                    transportFeeUnitPrice: true,
+                                    product: { select: { id: true, code: true, name: true, uom: true } },
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+            this.prisma.salesOrderTransportRequest.count({ where }),
+        ])
+        return {
+            items: items.map((request) => {
+                const transportFeeAmount = request.salesOrder.lines.reduce(
+                    (sum, line) =>
+                        sum.plus(
+                            new Prisma.Decimal(line.orderedActualQty).mul(line.transportFeeUnitPrice),
+                        ),
+                    new Prisma.Decimal(0),
+                )
+                return { ...request, transportFeeAmount: transportFeeAmount.toString() }
+            }),
+            total,
+            page: q.page,
+            pageSize: q.pageSize,
+        }
+    }
+
+    async salesTransportRequest(id: string) {
+        const request = await this.prisma.salesOrderTransportRequest.findUniqueOrThrow({
+            where: { id },
+            include: {
+                salesOrder: {
+                    include: {
+                        customer: { select: { id: true, code: true, name: true } },
+                        lines: {
+                            where: { isTransportFeeApplicable: true },
+                            orderBy: { lineNo: 'asc' },
+                            include: { product: { select: { id: true, code: true, name: true, uom: true } } },
+                        },
+                    },
+                },
+            },
+        })
+        const transportFeeAmount = request.salesOrder.lines.reduce(
+            (sum, line) =>
+                sum.plus(new Prisma.Decimal(line.orderedActualQty).mul(line.transportFeeUnitPrice)),
+            new Prisma.Decimal(0),
+        )
+        return { ...request, transportFeeAmount: transportFeeAmount.toString() }
+    }
+
+    async acknowledgeSalesTransportRequest(id: string) {
+        const request = await this.prisma.salesOrderTransportRequest.findUnique({ where: { id } })
+        if (!request) throw new NotFoundException('SALES_TRANSPORT_REQUEST_NOT_FOUND')
+        if (request.status === SalesTransportRequestStatus.CANCELLED) {
+            throw new BadRequestException('SALES_TRANSPORT_REQUEST_CANCELLED')
+        }
+        if (request.status === SalesTransportRequestStatus.ACKNOWLEDGED) return request
+        return this.prisma.salesOrderTransportRequest.update({
+            where: { id },
+            data: { status: SalesTransportRequestStatus.ACKNOWLEDGED, acknowledgedAt: new Date() },
+        })
     }
 
     async dispatch(id: string) {

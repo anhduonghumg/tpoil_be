@@ -3,7 +3,7 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { CreateContractDto } from './dto/create-contract.dto'
 import { UpdateContractDto } from './dto/update-contract.dto'
 import { ContractListQueryDto } from './dto/contract-list-query.dto'
-import { ContractKind, ContractStatus, Prisma } from '@prisma/client'
+import { ContractKind, ContractStatus, PartyRoleType, Prisma } from '@prisma/client'
 import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
 import { AssignCustomerToContractDto } from './dto/assign-customer.dto'
 import { addDays, diffInDays, startOfDay, subDays, formatDate } from 'src/common/utils/date.utils'
@@ -17,15 +17,6 @@ import { ImportContractsDto, ImportContractsResult, ImportContractsResultItem } 
 import dayjs from 'dayjs'
 import { DocumentStorageService } from '../uploads/document-storage.service'
 import { UploadService } from '../uploads/uploads.service'
-
-/**
- * Loại hợp đồng mà chiều luôn là MUA, bất kể người nhập chọn gì: mình đi thuê kho thì
- * không có chiều bán nào cả.
- *
- * HDMBXD ("hợp đồng mua bán xăng dầu") KHÔNG nằm ở đây: cùng một loại được dùng cả khi
- * mình mua của PVOIL lẫn khi mình bán cho khách, nên chiều phải do người nhập quyết.
- */
-const ALWAYS_PURCHASE_CONTRACT_TYPE_CODES = new Set(['WAREHOUSE_RENTAL'])
 
 @Injectable()
 export class ContractsService {
@@ -69,13 +60,69 @@ export class ContractsService {
         return type.code === 'WAREHOUSE_RENTAL'
     }
 
-    private async isPurchaseContractType(tx: Prisma.TransactionClient | PrismaService, contractTypeId: string) {
-        const type = await tx.contractType.findFirst({
-            where: { id: contractTypeId, deletedAt: null },
-            select: { code: true },
+    /**
+     * Chiều hợp đồng KHÔNG còn được hỏi trên form: nó suy ra từ loại thương nhân của đối
+     * tác, vốn là nơi thật sự quyết định chiều được phép giao dịch (TNPP mua và bán, TNDM
+     * chỉ mua của họ, TNDL chỉ bán cho họ).
+     *
+     * Cột `kind` chỉ còn phục vụ báo cáo cũ. Với TNPP nó không nói được gì — hợp đồng đó
+     * dùng cho cả hai chiều — nên đừng dùng cột này để kiểm tra nghiệp vụ; hãy lọc theo
+     * loại hợp đồng và để PartyMerchantService.assertCanTrade() chặn chiều.
+     */
+    private async deriveContractKind(
+        tx: Prisma.TransactionClient | PrismaService,
+        customerId?: string | null,
+    ): Promise<ContractKind> {
+        // Không gắn đối tác = hợp đồng thuê kho / dịch vụ: mình luôn là bên đi mua.
+        if (!customerId) return ContractKind.PURCHASE
+
+        const today = new Date()
+        today.setUTCHours(0, 0, 0, 0)
+        const role = await tx.partyRole.findFirst({
+            where: {
+                partyId: customerId,
+                role: { in: [PartyRoleType.TNPP, PartyRoleType.TNDM, PartyRoleType.TNDL] },
+                validFrom: { lte: today },
+                OR: [{ validTo: null }, { validTo: { gte: today } }],
+            },
+            orderBy: { validFrom: 'desc' },
+            select: { role: true },
         })
-        if (!type) throw new NotFoundException('Không tìm thấy loại hợp đồng')
-        return ALWAYS_PURCHASE_CONTRACT_TYPE_CODES.has(type.code)
+
+        // TNDM: chỉ mua của họ. Còn lại (TNPP hai chiều, TNDL chỉ bán, đối tác dịch vụ)
+        // để SALES cho khớp với dữ liệu cũ.
+        return role?.role === PartyRoleType.TNDM ? ContractKind.PURCHASE : ContractKind.SALES
+    }
+
+    /**
+     * Điều kiện lọc hợp đồng theo phân hệ. Phân hệ mua nhìn hợp đồng của đối tác mà mình
+     * mua được (TNPP, TNDM) cộng hợp đồng không gắn đối tác (thuê kho); phân hệ bán nhìn
+     * đối tác mình bán được (TNPP, TNDL).
+     *
+     * Lọc theo loại thương nhân chứ không theo Contract.kind, nhờ vậy hợp đồng với TNPP
+     * hiện ở CẢ HAI phân hệ — trước đây nó chỉ nằm một bên và bên kia không thấy.
+     */
+    private workspaceContractWhere(kind: ContractKind): Prisma.ContractWhereInput {
+        const today = new Date()
+        today.setUTCHours(0, 0, 0, 0)
+        const roles =
+            kind === ContractKind.PURCHASE
+                ? [PartyRoleType.TNPP, PartyRoleType.TNDM]
+                : [PartyRoleType.TNPP, PartyRoleType.TNDL]
+        const partyMatches: Prisma.ContractWhereInput = {
+            customer: {
+                roles: {
+                    some: {
+                        role: { in: roles },
+                        validFrom: { lte: today },
+                        OR: [{ validTo: null }, { validTo: { gte: today } }],
+                    },
+                },
+            },
+        }
+        return kind === ContractKind.PURCHASE
+            ? { OR: [partyMatches, { customerId: null }] }
+            : partyMatches
     }
 
     private async replaceWarehouseRentalLinks(tx: Prisma.TransactionClient, contractId: string, warehouseIds: string[]) {
@@ -266,7 +313,7 @@ export class ContractsService {
 
     // LIST
     async list(query: ContractListQueryDto) {
-        const { keyword, customerId, contractTypeId, kind, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
+        const { keyword, customerId, contractTypeId, excludeTypeCodes, kind, status, riskLevel, startFrom, startTo, endFrom, endTo, page = 1, pageSize = 20 } = query
 
         const startFromDate = startFrom ? new Date(startFrom) : undefined
         const startToDate = startTo ? new Date(startTo) : undefined
@@ -281,8 +328,9 @@ export class ContractsService {
                 : {}),
             ...(customerId ? { customerId } : {}),
             ...(contractTypeId ? { contractTypeId } : {}),
+            ...(excludeTypeCodes?.length ? { contractType: { code: { notIn: excludeTypeCodes } } } : {}),
             // Bán hay mua: workspace nào chỉ nhìn hợp đồng của chiều đó.
-            ...(kind ? { kind } : {}),
+            ...(kind ? this.workspaceContractWhere(kind) : {}),
             ...(status ? { status } : {}),
             ...(riskLevel ? { riskLevel } : {}),
             ...(startFromDate || startToDate
@@ -365,7 +413,6 @@ export class ContractsService {
     async create(dto: CreateContractDto) {
         return this.prisma.$transaction(async (tx) => {
             const isWarehouseRental = await this.isWarehouseRentalContractType(tx, dto.contractTypeId)
-            const isPurchaseContract = await this.isPurchaseContractType(tx, dto.contractTypeId)
             if (dto.warehouseIds !== undefined && !isWarehouseRental) {
                 throw new BadRequestException('Chá»‰ há»£p Ä‘á»“ng thuÃª kho má»›i Ä‘Æ°á»£c phÃ©p gÃ¡n kho')
             }
@@ -410,7 +457,7 @@ export class ContractsService {
                     deliveryScope: dto.deliveryScope ?? null,
                     renewalOfId: dto.renewalOfId ?? null,
                     approvalRequestId: dto.approvalRequestId ?? null,
-                    kind: isPurchaseContract ? ContractKind.PURCHASE : dto.kind ?? ContractKind.SALES,
+                    kind: await this.deriveContractKind(tx, dto.customerId),
                 },
             })
 
@@ -471,7 +518,6 @@ export class ContractsService {
 
             const contractTypeId = dto.contractTypeId ?? existing.contractTypeId
             const isWarehouseRental = await this.isWarehouseRentalContractType(tx, contractTypeId)
-            const isPurchaseContract = await this.isPurchaseContractType(tx, contractTypeId)
             if (dto.warehouseIds !== undefined && !isWarehouseRental) {
                 throw new BadRequestException('Chá»‰ há»£p Ä‘á»“ng thuÃª kho má»›i Ä‘Æ°á»£c phÃ©p gÃ¡n kho')
             }
@@ -544,7 +590,7 @@ export class ContractsService {
                     deliveryScope: dto.deliveryScope ?? existing.deliveryScope,
                     renewalOfId: newRenewalOfId,
                     approvalRequestId: dto.approvalRequestId ?? existing.approvalRequestId,
-                    kind: isPurchaseContract ? ContractKind.PURCHASE : dto.kind ?? existing.kind,
+                    kind: await this.deriveContractKind(tx, dto.customerId ?? existing.customerId),
                 },
             })
 

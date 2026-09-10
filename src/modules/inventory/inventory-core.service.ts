@@ -666,6 +666,21 @@ export class InventoryCoreService {
             where: { id: balance.id },
             data: { reservedActualQty, reservedV15Qty, version: { increment: 1 } },
         })
+        const remainingActiveLines = await tx.inventoryReservationLine.count({
+            where: { reservationId: line.reservationId, activeActualQty: { gt: 0 } },
+        })
+        // A sales issue consumes reservation lines one by one. Once none remains,
+        // close the parent hold as CONSUMED as well; otherwise the reservation screen
+        // misleadingly keeps showing it as active and exposes obsolete actions.
+        if (remainingActiveLines === 0) {
+            await tx.inventoryReservation.updateMany({
+                where: {
+                    id: line.reservationId,
+                    status: { in: [ReservationStatus.ACTIVE, ReservationStatus.PARTIALLY_RELEASED] },
+                },
+                data: { status: ReservationStatus.CONSUMED, version: { increment: 1 } },
+            })
+        }
         return event
     }
 

@@ -587,6 +587,25 @@ enum BankTxnMatchStatus {
   AUTO_MATCHED
   MANUAL_MATCHED
   PARTIAL_MATCHED
+  IGNORED
+}
+
+/// The channel which delivered a bank transaction. All channels are normalized
+/// before they touch AP/AR, so Excel and webhook transactions reconcile alike.
+enum BankTransactionSource {
+  MANUAL
+  EXCEL
+  SEPAY
+  JETPAY
+}
+
+/// Workflow state for receipt reconciliation; distinct from how it was matched.
+enum BankTxnReconciliationStatus {
+  PENDING
+  SUGGESTED
+  PARTIALLY_ALLOCATED
+  ALLOCATED
+  IGNORED
 }
 
 enum SettlementType {
@@ -749,6 +768,14 @@ enum VehicleDispatchStatus {
   IN_TRANSIT
   DELIVERED
   CLOSED
+  CANCELLED
+}
+
+/// Trạng thái hàng đợi vận chuyển sinh từ đơn bán có thu cước.
+/// Chi tiết điều xe và chi phí sẽ ở vòng triển khai tiếp theo.
+enum SalesTransportRequestStatus {
+  NEW
+  ACKNOWLEDGED
   CANCELLED
 }
 
@@ -1308,6 +1335,7 @@ model Employee {
   customersLegalOwner      Party[]        @relation("customer_legal_owner_emp")
   customersDocumentOwner   Party[]        @relation("customer_document_owner_emp")
   salesInvoicesAccountant  SalesInvoice[] @relation("SalesInvoiceAccountant")
+  salesOrdersOwned         SalesOrder[]   @relation("SalesOrderSalesOwner")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1589,6 +1617,13 @@ model ContractType {
   isActive    Boolean @default(true)
   sortOrder   Int?
 
+  /// Loại hợp đồng này có cho phép mua bán xăng dầu không.
+  /// Đơn mua/đơn bán đòi đối tác phải có hợp đồng còn hiệu lực thuộc một loại có cờ này.
+  /// Là DỮ LIỆU chứ không phải danh sách mã cứng trong code, để thêm loại hợp đồng mới
+  /// (vd "hợp đồng mua bán trực tiếp") không cần sửa và deploy lại backend.
+  /// Chiều giao dịch KHÔNG nằm ở đây — nó do loại thương nhân của đối tác quyết định.
+  allowsTrading Boolean @default(false)
+
   contracts Contract[]
 
   createdAt DateTime  @default(now())
@@ -1634,15 +1669,54 @@ model ContractItem {
   note      String?
 }
 
+/// Phụ lục hợp đồng: văn bản điều chỉnh điều khoản của hợp đồng gốc kể từ một ngày.
+///
+/// Phụ lục KHÔNG sửa đè lên hợp đồng gốc. Điều khoản áp cho một chứng từ được tính bằng
+/// cách chồng các phụ lục có hiệu lực tính đến ngày của chứng từ đó lên hợp đồng gốc
+/// (xem ContractTermsService). Nhờ vậy đơn cũ vẫn được chấm theo giá sàn và kỳ thanh
+/// toán đúng tại thời điểm của nó, thay vì theo điều khoản mới nhất.
 model ContractAppendix {
   id         String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   contractId String   @db.Uuid
   contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   code          String
-  effectiveDate DateTime
+  effectiveDate DateTime  @db.Date
   changeSummary String?
   docUrl        String?
+
+  /// null = phụ lục này không đụng tới điều khoản đó.
+  paymentTermDays     Int?
+  creditLimitOverride Decimal? @db.Decimal(24, 4)
+
+  items ContractAppendixItem[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([contractId, code])
+  @@index([contractId, effectiveDate])
+}
+
+/// Giá sàn và điều kiện của một sản phẩm do phụ lục điều chỉnh, cùng cấu trúc ContractItem.
+/// Có dòng cho sản phẩm nào thì sản phẩm đó đổi điều khoản kể từ ngày hiệu lực của phụ lục.
+model ContractAppendixItem {
+  id         String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  appendixId String           @db.Uuid
+  appendix   ContractAppendix @relation(fields: [appendixId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Không khai quan hệ tới Product, giữ đúng kiểu của ContractItem để hai bảng đối xứng.
+  productId String   @db.Uuid
+  uom       String
+  price     Decimal
+  minQty    Decimal?
+  maxQty    Decimal?
+  discount  Decimal?
+  taxRate   Decimal?
+  note      String?
+
+  @@unique([appendixId, productId])
+  @@index([productId])
 }
 
 model CreditLimitHistory {
@@ -1914,6 +1988,7 @@ model PurchaseOrderLine {
   receiptLines              GoodsReceiptLine[]
   supplierInvoiceLines      SupplierInvoiceLine[]
   commercialLotPosition     CommercialLotPosition?
+  salesAllocations          SalesPurchaseAllocation[]
 
   @@unique([purchaseOrderId, lineNo])
   @@index([purchaseOrderId])
@@ -2391,6 +2466,12 @@ model SalesOrder {
   currency        String           @db.Char(3)
   note            String?
 
+  /// Cờ nghiệp vụ của đơn bán lẻ: đơn có ít nhất một dòng thu cước vận chuyển.
+  /// Không dùng trạng thái của chuyến xe để chặn luồng bán hàng.
+  hasTransportFee       Boolean @default(false)
+  transportVehiclePlate String?
+  transportDriverName   String?
+
   contractId      String?         @db.Uuid
   paymentTermType PaymentTermType @default(SAME_DAY)
   paymentTermDays Int?
@@ -2407,6 +2488,8 @@ model SalesOrder {
   approvalCycle  Int       @default(0)
   policySnapshot Json?
   createdById    String?   @db.Uuid
+  /// Snapshot Sale phụ trách khi tạo đơn; đổi người phụ trách trên khách hàng không làm sai báo cáo lịch sử.
+  salesOwnerEmpId String?  @db.Uuid
   submittedById  String?   @db.Uuid
   submittedAt    DateTime? @db.Timestamptz(6)
   approvedById   String?   @db.Uuid
@@ -2421,6 +2504,7 @@ model SalesOrder {
 
   legalEntity        LegalEntity                 @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   customer           Party                       @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  salesOwner         Employee?                    @relation("SalesOrderSalesOwner", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   contract           Contract?                   @relation("SalesOrderContract", fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   lines              SalesOrderLine[]
   reservations       InventoryReservation[]
@@ -2433,11 +2517,13 @@ model SalesOrder {
   invoices           SalesInvoice[]
   adjustments        SalesOrderAdjustment[]
   warehouseTransfers InventoryMovement[]         @relation("SalesOrderWarehouseTransfers")
+  transportRequest   SalesOrderTransportRequest?
 
   @@unique([legalEntityId, orderNo])
   @@index([customerPartyId, status, orderDate])
   @@index([kind, status])
   @@index([contractId])
+  @@index([salesOwnerEmpId, orderDate])
 }
 
 /// Lịch thanh toán của đơn bán trả chậm theo ngày đến hạn thực tế. percent và amount loại trừ nhau:
@@ -2505,6 +2591,11 @@ model SalesOrderLine {
   vehiclePlate String?
   driverName   String?
 
+  /// Cước thu khách trên đúng dòng hàng. Giá hàng, chiết khấu và cước tách riêng
+  /// để báo cáo vận tải không phải suy ngược từ đơn giá bán.
+  isTransportFeeApplicable Boolean @default(false)
+  transportFeeUnitPrice    Decimal @default(0) @db.Decimal(24, 8)
+
   salesOrder             SalesOrder                      @relation(fields: [salesOrderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   product                Product                         @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   receivingWarehouse     Warehouse?                      @relation("SalesOrderLineWarehouse", fields: [receivingWarehouseId], references: [id], onDelete: SetNull, onUpdate: Cascade)
@@ -2521,6 +2612,7 @@ model SalesOrderLine {
   effectiveDeliveryLine SalesDeliveryLine?         @relation("SalesOrderLineEffectiveDelivery", fields: [effectiveDeliveryLineId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   reservationLines      InventoryReservationLine[]
   adjustmentLines       SalesOrderAdjustmentLine[]
+  purchaseAllocations   SalesPurchaseAllocation[]
 
   @@unique([salesOrderId, lineNo])
   @@index([productId])
@@ -2528,6 +2620,46 @@ model SalesOrderLine {
   @@index([receivingWarehouseAreaId])
   @@index([issueWarehouseId])
   @@index([preferredSupplierPartyId])
+  @@index([isTransportFeeApplicable])
+}
+
+/// Công việc vận chuyển được tạo song song khi Sale gửi đơn có cước.
+/// Nó chỉ là hàng đợi của quản lý xe ở giai đoạn đầu, không chi phối trạng thái đơn bán.
+model SalesOrderTransportRequest {
+  id           String                      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesOrderId String                      @unique @db.Uuid
+  status       SalesTransportRequestStatus @default(NEW)
+
+  /// Snapshot Sale khai báo lúc gửi đơn; quản lý xe sẽ xác nhận/thay bằng thực tế ở giai đoạn chuyến xe.
+  plannedVehiclePlate String?
+  plannedDriverName   String?
+  requestedAt         DateTime @default(now()) @db.Timestamptz(6)
+  acknowledgedAt      DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  salesOrder SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([status, requestedAt])
+}
+
+/// Phân bổ từng dòng mua cho từng dòng bán đối ứng. Một dòng bán có thể được mua
+/// nhiều lần/từ nhiều NCC; một dòng mua cũng có thể được chia cho nhiều dòng bán.
+model SalesPurchaseAllocation {
+  id                  String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  salesOrderLineId    String   @db.Uuid
+  purchaseOrderLineId String   @db.Uuid
+  allocatedQty        Decimal  @db.Decimal(24, 6)
+  createdById         String?  @db.Uuid
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+
+  salesOrderLine    SalesOrderLine    @relation(fields: [salesOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  purchaseOrderLine PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([salesOrderLineId, purchaseOrderLineId])
+  @@index([salesOrderLineId])
+  @@index([purchaseOrderLineId])
 }
 
 /// Parallel per-department approval request for a sales order (spec v1.2 §3.5).
@@ -3068,6 +3200,8 @@ model ReceivableAllocation {
   reversalOfId         String?                    @unique @db.Uuid
   idempotencyKey       String                     @unique
   allocatedById        String?                    @db.Uuid
+  /// Bank value time for aging/KPI. allocatedAt remains the confirmation audit time.
+  effectiveAt          DateTime?                  @db.Timestamptz(6)
   allocatedAt          DateTime                   @db.Timestamptz(6)
 
   bankTransaction BankTransaction        @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -3855,6 +3989,8 @@ model BankTransactionPurpose {
 
 model BankAccount {
   id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  /// Legacy accounts may be unmapped during migration; all new accounts are mapped.
+  legalEntityId String? @db.Uuid
   bankCode    String
   bankName    String?
   accountNo   String
@@ -3869,8 +4005,10 @@ model BankAccount {
   transactions           BankTransaction[]
   termPaymentBatches     TermPaymentBatch[]
   paymentRequestPayments PaymentRequestPayment[]
+  legalEntity            LegalEntity?             @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
-  @@unique([bankCode, accountNo])
+  @@unique([legalEntityId, bankCode, accountNo])
+  @@index([legalEntityId, isActive])
   @@index([isActive])
 }
 
@@ -3931,8 +4069,15 @@ model BankTransaction {
   importId      String? @db.Uuid
 
   txnDate   DateTime
+  /// Value date from the bank; reports fall back to txnDate when it is absent.
+  valueDate DateTime?
   direction BankTxnDirection
   amount    Decimal          @db.Decimal(18, 2)
+
+  source                BankTransactionSource             @default(MANUAL)
+  providerCode          String?
+  providerTransactionId String?
+  receivedAt            DateTime?                          @db.Timestamptz(6)
 
   description      String
   counterpartyName String?
@@ -3948,7 +4093,9 @@ model BankTransaction {
   counterpartyId   String?           @db.Uuid
   note             String?
 
-  matchStatus BankTxnMatchStatus @default(UNMATCHED)
+  matchStatus            BankTxnMatchStatus          @default(UNMATCHED)
+  reconciliationStatus   BankTxnReconciliationStatus @default(PENDING)
+  ignoredReason          String?
 
   raw Json?
 
@@ -3972,7 +4119,9 @@ model BankTransaction {
 
   @@unique([bankAccountId, externalRef])
   @@unique([bankAccountId, fingerprint])
+  @@unique([bankAccountId, source, providerTransactionId])
   @@index([bankAccountId, txnDate])
+  @@index([bankAccountId, reconciliationStatus, txnDate])
   @@index([matchStatus])
   @@index([externalRef])
   @@index([fingerprint])
@@ -4328,6 +4477,15 @@ model PriceBulletin {
   fileChecksum String?
   note         String?
 
+  /// Số quyết định in trên văn bản, ví dụ "03.09.2026/TP". Do người lập tự đặt vì đây là
+  /// số văn thư của công ty, không suy ra được từ dữ liệu giá.
+  decisionNo String?
+
+  /// Công văn của Bộ Công Thương làm căn cứ điều chỉnh, ví dụ "7010/BCT-TTTN". Mỗi kỳ
+  /// một số khác nhau nên phải nhập; không có thì phần "Căn cứ" trên quyết định bỏ trống.
+  basisDocNo   String?
+  basisDocDate DateTime? @db.Date
+
   createdBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4609,6 +4767,7 @@ model LegalEntity {
   payableOpenItems    PayableOpenItem[]
   receivableOpenItems ReceivableOpenItem[]
   salesInvoices       SalesInvoice[]
+  bankAccounts        BankAccount[]
 
   @@index([partyId])
 }

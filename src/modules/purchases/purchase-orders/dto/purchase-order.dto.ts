@@ -26,6 +26,11 @@ export enum PurchaseOrderBusinessState {
 }
 
 export class CreatePurchaseOrderLineDto {
+    /** Dòng bán đối ứng được dòng mua này đáp ứng. */
+    @IsOptional()
+    @IsUUID()
+    salesOrderLineId?: string
+
     @IsString()
     productId!: string
 
@@ -126,6 +131,11 @@ export class PurchaseOrderPaymentPlanDto {
 }
 
 export class CreatePurchaseOrderDto {
+    /** Đơn bán đối ứng nguồn; liên kết được tạo cùng transaction với đơn mua. */
+    @IsOptional()
+    @IsUUID()
+    salesOrderId?: string
+
     @IsOptional()
     @IsString()
     orderNo?: string

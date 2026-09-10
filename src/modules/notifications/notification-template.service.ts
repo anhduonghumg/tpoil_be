@@ -188,6 +188,22 @@ const TEMPLATES: Record<string, TemplateDefinition> = {
         body: 'Đơn bán cho khách {{customerName}} đã bị hủy. {{reasonSummary}}',
         action: 'VIEW_SALES_ORDER',
     },
+    'sales.transport.requested': {
+        moduleCode: 'operations',
+        category: 'SALES_TRANSPORT',
+        severity: 'WARNING',
+        title: 'Đơn {{orderNo}} có cước vận chuyển',
+        body: 'Khách {{customerName}} — xe {{vehiclePlate}}, lái xe {{driverName}}. Cần kiểm tra kế hoạch vận chuyển.',
+        action: 'VIEW_SALES_TRANSPORT_REQUEST',
+    },
+    'sales.transport.cancelled': {
+        moduleCode: 'operations',
+        category: 'SALES_TRANSPORT',
+        severity: 'INFO',
+        title: 'Yêu cầu vận chuyển đơn {{orderNo}} đã hủy',
+        body: 'Đơn bán đã hủy nên yêu cầu vận chuyển không còn hiệu lực.',
+        action: 'VIEW_SALES_TRANSPORT_REQUEST',
+    },
     'sales.order.stock_insufficient': {
         moduleCode: 'sales',
         category: 'SALES_ORDER',

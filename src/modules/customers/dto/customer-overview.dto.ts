@@ -1,4 +1,4 @@
-import { CustomerStatus, CustomerType, RiskLevel, ContractStatus } from '@prisma/client'
+import { CustomerStatus, RiskLevel, ContractStatus } from '@prisma/client'
 
 export class CustomerOwnerMiniDto {
     id!: string
@@ -57,7 +57,9 @@ export class CustomerOverviewResponseDto {
         id: string
         code: string
         name: string
-        type: CustomerType
+        /** Loại thương nhân xăng dầu đang áp dụng; null = đối tác dịch vụ. */
+        merchantRole: 'TNPP' | 'TNDM' | 'TNDL' | null
+        merchantLabel: string | null
         status: CustomerStatus
         taxCode?: string | null
         billingAddress?: string | null

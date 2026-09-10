@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common'
-import { ContractKind, ContractStatus, Prisma, SalesAliasEntityType, SalesOrderKind } from '@prisma/client'
+import { ContractStatus, Prisma, SalesAliasEntityType, SalesOrderKind } from '@prisma/client'
+import { TRADING_CONTRACT_TYPE_WHERE } from 'src/modules/contracts/contract-type.constants'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { DeepSeekClientService } from 'src/infra/deepseek/deepseek-client.service'
 import { SalesAliasService, AliasCandidate } from '../sales-alias.service'
@@ -57,7 +58,9 @@ export class SalesQuickEntryService {
         const contract = await this.prisma.contract.findFirst({
             where: {
                 customerId: customerPartyId,
-                kind: ContractKind.SALES,
+                // Loại hợp đồng nói hợp đồng này để làm gì; chiều bán được cho ai thì do
+                // loại thương nhân quyết định (assertCanTrade), không phải Contract.kind.
+                contractType: TRADING_CONTRACT_TYPE_WHERE,
                 status: ContractStatus.Active,
                 deletedAt: null,
                 startDate: { lte: orderDate },
@@ -324,6 +327,12 @@ export class SalesQuickEntryService {
                     message: 'Phiếu rút tồn phải chọn kho cụ thể, không nhận khu vực.',
                 })
             }
+            if (dto.orderKind === 'DAY_TRADE' && !line.warehouseId) {
+                throw new BadRequestException({
+                    code: 'QUICK_ENTRY_DAY_TRADE_WAREHOUSE_REQUIRED',
+                    message: 'Đơn đối ứng phải chọn kho nhận cụ thể, không nhận khu vực.',
+                })
+            }
         }
         const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date()
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
@@ -333,46 +342,54 @@ export class SalesQuickEntryService {
         // đồng ý ghi nhớ. learnAliases=false vẫn là công tắc tổng để tắt hết.
         const learnedAliases = dto.learnAliases === false ? [] : await this.learnFrom(dto, actor)
 
-        const created =
-            dto.orderKind === 'WITHDRAWAL'
-                ? await this.withdrawals.create(
-                      {
-                          customerPartyId: dto.customerPartyId,
-                          requestDate: dto.orderDate,
-                          vehiclePlate: dto.vehiclePlate ?? '',
-                          driverName: dto.driverName ?? '',
-                          lines: dto.lines.map((line) => ({
-                              productId: line.productId,
-                              warehouseId: line.warehouseId!,
-                              requestedQty: line.quantity,
-                          })),
-                      } as never,
-                      actor,
-                  )
-                : await this.workflow.createInternal(
-                      {
-                          customerPartyId: dto.customerPartyId,
-                          kind: this.orderKindOf(dto.orderKind as ParsedOrderKind)!,
-                          orderDate: dto.orderDate,
-                          lotInvoiceMode: dto.lotInvoiceMode,
-                          paymentTermType: dto.paymentTermType,
-                          paymentTermDays: dto.paymentTermDays,
-                          paymentPlans: dto.paymentPlans,
-                          lines: dto.lines.map((line) => ({
-                              productId: line.productId,
-                              issueWarehouseId: line.warehouseId,
-                              receivingWarehouseAreaId: line.warehouseAreaId,
-                              orderedActualQty: line.quantity,
-                              unitPrice: line.unitPrice ?? 0,
-                              discountBaseAmount: line.discountBaseAmount ?? line.discountAmount ?? 0,
-                              discountAdjustmentAmount: line.discountAdjustmentAmount ?? 0,
-                              supplySource: line.supplySource,
-                              vehiclePlate: dto.vehiclePlate,
-                              driverName: dto.driverName,
-                          })),
-                      } as never,
-                      actor,
-                  )
+        let created
+        if (dto.orderKind === 'WITHDRAWAL') {
+            created = await this.withdrawals.create(
+                {
+                    customerPartyId: dto.customerPartyId,
+                    requestDate: dto.orderDate,
+                    vehiclePlate: dto.vehiclePlate ?? '',
+                    driverName: dto.driverName ?? '',
+                    lines: dto.lines.map((line) => ({
+                        productId: line.productId,
+                        warehouseId: line.warehouseId!,
+                        requestedQty: line.quantity,
+                    })),
+                } as never,
+                actor,
+            )
+        } else {
+            created = await this.workflow.createInternal(
+                {
+                    customerPartyId: dto.customerPartyId,
+                    kind: this.orderKindOf(dto.orderKind as ParsedOrderKind)!,
+                    orderDate: dto.orderDate,
+                    lotInvoiceMode: dto.lotInvoiceMode,
+                    paymentTermType: dto.paymentTermType,
+                    paymentTermDays: dto.paymentTermDays,
+                    paymentPlans: dto.paymentPlans,
+                    lines: dto.lines.map((line) => ({
+                        productId: line.productId,
+                        issueWarehouseId: line.warehouseId,
+                        receivingWarehouseId:
+                            dto.orderKind === 'DAY_TRADE' ? line.warehouseId : undefined,
+                        receivingWarehouseAreaId: line.warehouseAreaId,
+                        orderedActualQty: line.quantity,
+                        unitPrice: line.unitPrice ?? 0,
+                        discountBaseAmount: line.discountBaseAmount ?? line.discountAmount ?? 0,
+                        discountAdjustmentAmount: line.discountAdjustmentAmount ?? 0,
+                        transportFeeUnitPrice: line.transportFeeUnitPrice ?? 0,
+                        supplySource: line.supplySource,
+                        vehiclePlate: dto.vehiclePlate,
+                        driverName: dto.driverName,
+                    })),
+                    hasTransportFee: dto.lines.some((line) => Number(line.transportFeeUnitPrice ?? 0) > 0),
+                    transportVehiclePlate: dto.vehiclePlate,
+                    transportDriverName: dto.driverName,
+                } as never,
+                actor,
+            )
+        }
 
         if (dto.logId) {
             await this.prisma.salesQuickEntryLog.update({

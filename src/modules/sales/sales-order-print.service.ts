@@ -62,8 +62,9 @@ export class SalesOrderPrintService {
             const qty = this.decimal(line.orderedActualQty)
             const unitPrice = this.decimal(line.unitPrice)
             const discountPerUnit = this.decimal(line.discountAmount)
+            const transportFeePerUnit = this.decimal(line.transportFeeUnitPrice)
             // Đúng như đơn giấy: thành tiền = SL × (giá bán − chiết khấu mỗi đơn vị).
-            const lineTotal = qty.mul(unitPrice.minus(discountPerUnit))
+            const lineTotal = qty.mul(unitPrice.minus(discountPerUnit).plus(transportFeePerUnit))
             totalAmount = totalAmount.plus(lineTotal)
             return {
                 index: index + 1,
@@ -71,6 +72,7 @@ export class SalesOrderPrintService {
                 qty: qty.toNumber(),
                 unitPrice: unitPrice.toNumber(),
                 discountPerUnit: discountPerUnit.toNumber(),
+                transportFeePerUnit: transportFeePerUnit.toNumber(),
                 lineTotal: lineTotal.toNumber(),
                 vehiclePlate: line.vehiclePlate ?? '',
                 driverName: line.driverName ?? '',

@@ -6,6 +6,8 @@ import {
     MasterStatus,
     Prisma,
     PurchaseOrderStatus,
+    PurchaseOrderType,
+    SalesOrderKind,
     SalesOrderSupplySource,
     SupplierInvoiceStatus,
     WarehousePartyRole,
@@ -365,6 +367,7 @@ export class PurchaseOrdersService {
     private mapPurchaseOrder<T extends Record<string, any>>(order: T) {
         const lines = (order.lines ?? []).map((line: any) => ({
             ...line,
+            salesOrderLineId: line.salesAllocations?.[0]?.salesOrderLineId ?? undefined,
             supplierLocationId: line.receivingWarehouseId,
             supplierLocationAreaId: line.plannedReceivingAreaId,
             supplierLocationType: line.plannedReceivingAreaId ? 'AREA' : 'WAREHOUSE',
@@ -564,6 +567,7 @@ export class PurchaseOrdersService {
 
     async create(dto: {
         orderNo?: string
+        salesOrderId?: string
         supplierCustomerId: string
         supplierLocationId?: string
         orderType: any
@@ -584,6 +588,7 @@ export class PurchaseOrdersService {
             sortOrder?: number
         }>
         lines: Array<{
+            salesOrderLineId?: string
             productId: string
             orderedQty: number
             supplierLocationId?: string
@@ -646,6 +651,7 @@ export class PurchaseOrdersService {
 
         const lines = rawLines
             .map((l) => ({
+                salesOrderLineId: l.salesOrderLineId,
                 productId: l.productId,
                 orderedQty: Number(l.orderedQty) || 0,
                 supplierLocationId: l.supplierLocationId ?? undefined,
@@ -724,11 +730,103 @@ export class PurchaseOrdersService {
 
         // 8) create PO
         const po = await this.prisma.$transaction(async (tx) => {
+            const allocationLineIds = new Map<number, string>()
+            if (dto.salesOrderId) {
+                if (dto.orderType !== PurchaseOrderType.SINGLE) {
+                    throw new BadRequestException({
+                        code: 'DAY_TRADE_PURCHASE_MUST_BE_SINGLE',
+                        message: 'Đơn mua đối ứng phải là đơn mua lẻ.',
+                    })
+                }
+                // Khóa đơn bán để hai người mua không thể đồng thời phân bổ vượt lượng khách đặt.
+                await tx.$queryRaw`SELECT "id" FROM "SalesOrder" WHERE "id" = ${dto.salesOrderId}::uuid FOR UPDATE`
+                const salesOrder = await tx.salesOrder.findUnique({
+                    where: { id: dto.salesOrderId },
+                    include: {
+                        lines: {
+                            include: {
+                                purchaseAllocations: {
+                                    where: { purchaseOrderLine: { purchaseOrder: { status: { not: PurchaseOrderStatus.CANCELLED } } } },
+                                    select: { allocatedQty: true },
+                                },
+                            },
+                        },
+                    },
+                })
+                if (!salesOrder || salesOrder.kind !== SalesOrderKind.DAY_TRADE) {
+                    throw new BadRequestException({
+                        code: 'DAY_TRADE_SALES_ORDER_REQUIRED',
+                        message: 'Đơn mua đối ứng phải gắn với một đơn bán đối ứng hợp lệ.',
+                    })
+                }
+                if (!salesOrder.approvedAt) {
+                    throw new BadRequestException({
+                        code: 'DAY_TRADE_SALES_ORDER_NOT_APPROVED',
+                        message: 'Đơn bán đối ứng phải được duyệt trước khi tạo đơn mua.',
+                    })
+                }
+                if (salesOrder.legalEntityId !== legalEntityId) {
+                    throw new BadRequestException({
+                        code: 'DAY_TRADE_LEGAL_ENTITY_MISMATCH',
+                        message: 'Đơn mua và đơn bán đối ứng phải thuộc cùng một pháp nhân.',
+                    })
+                }
+
+                const allocatingNow = new Map<string, Prisma.Decimal>()
+                lines.forEach((line, index) => {
+                    const receivingWarehouseId = line.supplierLocationId ?? headerLocId
+                    if (!receivingWarehouseId || line.plannedReceivingAreaId) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_PURCHASE_WAREHOUSE_REQUIRED',
+                            message: `Dòng mua ${index + 1} phải chọn đúng kho cụ thể của đơn bán đối ứng.`,
+                        })
+                    }
+                    const candidates = salesOrder.lines.filter((salesLine) => {
+                        if (line.salesOrderLineId && salesLine.id !== line.salesOrderLineId) return false
+                        return salesLine.productId === line.productId &&
+                            salesLine.supplySource === dto.releaseCode &&
+                            (!salesLine.preferredSupplierPartyId ||
+                                salesLine.preferredSupplierPartyId === dto.supplierCustomerId) &&
+                            (salesLine.receivingWarehouseId === receivingWarehouseId ||
+                                salesLine.issueWarehouseId === receivingWarehouseId)
+                    })
+                    if (candidates.length !== 1) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_SALES_LINE_AMBIGUOUS',
+                            message: `Dòng mua ${index + 1} không xác định được duy nhất dòng bán đối ứng.`,
+                            detail: { salesOrderId: dto.salesOrderId, salesOrderLineId: line.salesOrderLineId },
+                        })
+                    }
+                    const target = candidates[0]
+                    const alreadyAllocated = target.purchaseAllocations.reduce(
+                        (sum, allocation) => sum.plus(allocation.allocatedQty),
+                        new Prisma.Decimal(0),
+                    )
+                    const current = allocatingNow.get(target.id) ?? new Prisma.Decimal(0)
+                    const next = current.plus(line.orderedQty)
+                    if (alreadyAllocated.plus(next).greaterThan(target.orderedActualQty)) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_PURCHASE_QTY_EXCEEDS_SALES_QTY',
+                            message: `Tổng lượng mua cho dòng ${target.lineNo} vượt lượng khách đặt.`,
+                            detail: {
+                                salesOrderLineId: target.id,
+                                orderedQty: target.orderedActualQty.toString(),
+                                allocatedQty: alreadyAllocated.toString(),
+                                requestedQty: next.toString(),
+                            },
+                        })
+                    }
+                    allocatingNow.set(target.id, next)
+                    allocationLineIds.set(index + 1, target.id)
+                })
+            }
+
             const created = await tx.purchaseOrder.create({
                 data: {
                 orderNo,
                 legalEntityId,
                 supplierCustomerId: dto.supplierCustomerId,
+                salesOrderId: dto.salesOrderId ?? null,
                 contractId: contract.id,
                 contractNo: contract.code,
                 paymentTermType,
@@ -779,6 +877,16 @@ export class PurchaseOrdersService {
                     },
                 },
             })
+            if (allocationLineIds.size) {
+                await tx.salesPurchaseAllocation.createMany({
+                    data: created.lines.map((line) => ({
+                        salesOrderLineId: allocationLineIds.get(line.lineNo)!,
+                        purchaseOrderLineId: line.id,
+                        allocatedQty: line.orderedQty,
+                        createdById: actorId ?? null,
+                    })),
+                })
+            }
             await this.createExpectedSupplies(tx, {
                 purchaseOrderId: created.id,
                 legalEntityId,
@@ -805,7 +913,7 @@ export class PurchaseOrdersService {
                 )
             }
             return created
-        })
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
 
         return { po: this.mapPurchaseOrder(po), warnings: { contract: warning } }
     }
@@ -824,6 +932,7 @@ export class PurchaseOrdersService {
             })
         }
         const lines = (dto.lines ?? []).map((line: any) => ({
+            salesOrderLineId: line.salesOrderLineId as string | undefined,
             productId: line.productId,
             orderedQty: Number(line.orderedQty) || 0,
             supplierLocationId: line.supplierLocationId,
@@ -848,7 +957,75 @@ export class PurchaseOrdersService {
         if (dto.paymentMode === 'POSTPAID' && !plans.length) throw new BadRequestException('PAYMENT_PLANS_REQUIRED')
 
         await this.prisma.$transaction(async (tx) => {
+            const allocationLineIds = new Map<number, string>()
+            if (current.salesOrderId) {
+                await tx.$queryRaw`SELECT "id" FROM "SalesOrder" WHERE "id" = ${current.salesOrderId}::uuid FOR UPDATE`
+                const salesOrder = await tx.salesOrder.findUnique({
+                    where: { id: current.salesOrderId },
+                    include: {
+                        lines: {
+                            include: {
+                                purchaseAllocations: {
+                                    where: {
+                                        purchaseOrderLine: {
+                                            purchaseOrder: {
+                                                id: { not: id },
+                                                status: { not: PurchaseOrderStatus.CANCELLED },
+                                            },
+                                        },
+                                    },
+                                    select: { allocatedQty: true },
+                                },
+                            },
+                        },
+                    },
+                })
+                if (!salesOrder || salesOrder.kind !== SalesOrderKind.DAY_TRADE) {
+                    throw new BadRequestException('DAY_TRADE_SALES_ORDER_REQUIRED')
+                }
+                const allocatingNow = new Map<string, Prisma.Decimal>()
+                lines.forEach((line: any, index: number) => {
+                    if (!line.supplierLocationId || line.plannedReceivingAreaId) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_PURCHASE_WAREHOUSE_REQUIRED',
+                            message: `Dòng mua ${index + 1} phải chọn đúng kho cụ thể của đơn bán đối ứng.`,
+                        })
+                    }
+                    const candidates = salesOrder.lines.filter((salesLine) =>
+                        (!line.salesOrderLineId || salesLine.id === line.salesOrderLineId) &&
+                        salesLine.productId === line.productId &&
+                        salesLine.supplySource === dto.releaseCode &&
+                        (!salesLine.preferredSupplierPartyId ||
+                            salesLine.preferredSupplierPartyId === dto.supplierCustomerId) &&
+                        (salesLine.receivingWarehouseId === line.supplierLocationId ||
+                            salesLine.issueWarehouseId === line.supplierLocationId),
+                    )
+                    if (candidates.length !== 1) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_SALES_LINE_AMBIGUOUS',
+                            message: `Dòng mua ${index + 1} không khớp duy nhất với dòng bán đối ứng.`,
+                        })
+                    }
+                    const target = candidates[0]
+                    const allocatedElsewhere = target.purchaseAllocations.reduce(
+                        (sum, allocation) => sum.plus(allocation.allocatedQty),
+                        new Prisma.Decimal(0),
+                    )
+                    const next = (allocatingNow.get(target.id) ?? new Prisma.Decimal(0)).plus(line.orderedQty)
+                    if (allocatedElsewhere.plus(next).greaterThan(target.orderedActualQty)) {
+                        throw new BadRequestException({
+                            code: 'DAY_TRADE_PURCHASE_QTY_EXCEEDS_SALES_QTY',
+                            message: `Tổng lượng mua cho dòng ${target.lineNo} vượt lượng khách đặt.`,
+                        })
+                    }
+                    allocatingNow.set(target.id, next)
+                    allocationLineIds.set(index + 1, target.id)
+                })
+            }
             await tx.expectedSupply.deleteMany({ where: { purchaseOrderLine: { purchaseOrderId: id } } })
+            await tx.salesPurchaseAllocation.deleteMany({
+                where: { purchaseOrderLine: { purchaseOrderId: id } },
+            })
             await tx.purchaseOrderLine.deleteMany({ where: { purchaseOrderId: id } })
             await tx.purchaseOrderPaymentPlan.deleteMany({ where: { purchaseOrderId: id } })
             const updated = await tx.purchaseOrder.update({ where: { id }, data: {
@@ -867,7 +1044,16 @@ export class PurchaseOrdersService {
                 expectedAt: expectedDate ?? orderDate,
                 lines: updated.lines,
             })
-        })
+            if (allocationLineIds.size) {
+                await tx.salesPurchaseAllocation.createMany({
+                    data: updated.lines.map((line) => ({
+                        salesOrderLineId: allocationLineIds.get(line.lineNo)!,
+                        purchaseOrderLineId: line.id,
+                        allocatedQty: line.orderedQty,
+                    })),
+                })
+            }
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
         return this.detail(id)
     }
 
@@ -1313,6 +1499,7 @@ export class PurchaseOrdersService {
                     include: {
                         product: { select: { id: true, code: true, name: true, uom: true } },
                         receivingWarehouse: { select: { id: true, code: true, name: true } },
+                        salesAllocations: { select: { salesOrderLineId: true }, take: 1 },
                     },
                 },
             },
