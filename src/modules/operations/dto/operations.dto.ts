@@ -1289,6 +1289,245 @@ export class UpsertVehicleDispatchDto {
     note?: string
 }
 
+/** Chi phí thực tế của một đơn bán lẻ có thu cước vận chuyển. */
+export class UpsertSalesTransportActualDto {
+    @IsOptional()
+    @IsString()
+    actualVehiclePlate?: string
+
+    @IsOptional()
+    @IsString()
+    actualDriverName?: string
+
+    @IsOptional()
+    @IsDateString()
+    actualTripDate?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    tripDistanceKm?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    fuelConsumptionPer100?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    fuelConsumedQty?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    fuelUnitPrice?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    warehouseEntryFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    tollAndTerminalFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    portDeliverySurcharge?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    stationAgencyDutyFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    portTicketFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    invoiceIssuanceFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    driverAllowance?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    loadingUnloadingFee?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    otherExpense?: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+
+    /** Lưu nháp khi false/không gửi; chỉ hoàn tất khi form đủ các số liệu chính. */
+    @IsOptional()
+    @Type(() => Boolean)
+    @IsBoolean()
+    complete?: boolean
+}
+
+export class UpsertTransportVehicleSettingDto {
+    @IsString()
+    @IsNotEmpty()
+    vehiclePlate!: string
+
+    @IsDateString()
+    effectiveFrom!: string
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    fuelConsumptionPer100!: number
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    fuelUnitPrice!: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    defaultTripAllowance?: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+export class UpsertVehicleFuelLogDto {
+    @IsString()
+    @IsNotEmpty()
+    vehiclePlate!: string
+
+    @IsDateString()
+    fueledAt!: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    odometerKm?: number
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    liters!: number
+
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    unitPrice!: number
+
+    @IsOptional()
+    @IsString()
+    fueledBy?: string
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+export class UpsertVehicleMaintenanceExpenseDto {
+    @IsString()
+    @IsNotEmpty()
+    vehiclePlate!: string
+
+    @IsDateString()
+    documentDate!: string
+
+    @IsString()
+    @IsNotEmpty()
+    description!: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    amountBeforeTax?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    taxAmount?: number
+
+    @IsOptional()
+    @IsString()
+    invoiceStatus?: string
+
+    @IsOptional()
+    @IsString()
+    supplierName?: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    allocationMonths?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    odometerKm?: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
+export class UpsertVehicleMonthlyFixedCostDto {
+    @IsString()
+    @IsNotEmpty()
+    vehiclePlate!: string
+
+    @IsDateString()
+    month!: string
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    depreciationCost?: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    driverSalaryCost?: number
+
+    @IsOptional()
+    @IsString()
+    note?: string
+}
+
 export class ChangeVehicleDispatchStatusDto {
     @IsEnum(VehicleDispatchStatus)
     status!: VehicleDispatchStatus

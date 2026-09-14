@@ -50,6 +50,7 @@ import { SalesDashboardController } from './sales-dashboard.controller'
 import { SalesDashboardService } from './sales-dashboard.service'
 import { SalesManagementReportController } from './sales-management-report.controller'
 import { SalesManagementReportService } from './sales-management-report.service'
+import { SalesReceivableOverdueNotificationService } from './sales-receivable-overdue-notification.service'
 
 @Module({
     imports: [ContractsModule],
@@ -104,6 +105,7 @@ import { SalesManagementReportService } from './sales-management-report.service'
         SalesOrderAdjustmentsService,
         SalesDashboardService,
         SalesManagementReportService,
+        SalesReceivableOverdueNotificationService,
     ],
     exports: [
         SalesOrdersService,

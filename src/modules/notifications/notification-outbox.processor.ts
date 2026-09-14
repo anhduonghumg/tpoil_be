@@ -103,18 +103,19 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                 })
                 return
             }
-            const resolvedUserIds = await this.recipients.resolve(payload)
-            const preferences = resolvedUserIds.length
+            const resolvedRecipients = await this.recipients.resolve(payload)
+            const preferences = resolvedRecipients.userIds.length
                 ? await this.prisma.notificationPreference.findMany({
-                      where: { userId: { in: resolvedUserIds }, category: rendered.category },
+                      where: { userId: { in: resolvedRecipients.userIds }, category: rendered.category },
                   })
                 : []
             const preferenceByUser = new Map(preferences.map((item) => [item.userId, item]))
             const now = new Date()
-            const userIds = resolvedUserIds.filter((userId) => {
+            const userIds = resolvedRecipients.userIds.filter((userId) => {
                 const preference = preferenceByUser.get(userId)
                 return !preference || (preference.inAppEnabled && (!preference.muteUntil || preference.muteUntil <= now))
             })
+            const actionUserIds = new Set(resolvedRecipients.actionUserIds.filter((userId) => userIds.includes(userId)))
 
             const notification = await this.prisma.$transaction(async (tx) => {
                 const created = await tx.notification.upsert({
@@ -130,6 +131,9 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                         entityType: scalarString(payload.entityType, outbox.aggregateType),
                         entityId: scalarString(payload.entityId, outbox.aggregateId),
                         action: scalarString(payload.action, rendered.action ?? ''),
+                        kind: rendered.kind,
+                        tab: rendered.tab,
+                        expiresAt: rendered.expiresAt,
                         metadata: (payload.metadata ?? payload) as Prisma.InputJsonValue,
                         occurredAt:
                             typeof payload.occurredAt === 'string'
@@ -160,28 +164,46 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                           : null
 
                 if (resolvedActions.length) {
+                    const workItemWhere = {
+                        sourceType: workItemSourceType,
+                        sourceId: workItemSourceId,
+                        action: { in: resolvedActions },
+                        status: 'OPEN' as const,
+                        ...(sourceVersion == null
+                            ? {}
+                            : {
+                                  OR: [
+                                      { sourceVersion: null },
+                                      { sourceVersion: { lte: sourceVersion } },
+                                  ],
+                              }),
+                    }
+                    const settledItems = await tx.notificationWorkItem.findMany({
+                        where: workItemWhere,
+                        select: { notificationId: true },
+                    })
                     await tx.notificationWorkItem.updateMany({
-                        where: {
-                            sourceType: workItemSourceType,
-                            sourceId: workItemSourceId,
-                            action: { in: resolvedActions },
-                            status: 'OPEN',
-                            ...(sourceVersion == null
-                                ? {}
-                                : {
-                                      OR: [
-                                          { sourceVersion: null },
-                                          { sourceVersion: { lte: sourceVersion } },
-                                      ],
-                                  }),
-                        },
+                        where: workItemWhere,
                         data: { status: 'COMPLETED', completedAt: now, sourceVersion },
                     })
+                    const settledNotificationIds = settledItems
+                        .map((item) => item.notificationId)
+                        .filter((id): id is string => !!id)
+                    if (settledNotificationIds.length) {
+                        await tx.notification.updateMany({
+                            where: { id: { in: settledNotificationIds }, expiresAt: null },
+                            data: { expiresAt: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1_000) },
+                        })
+                    }
                 }
 
                 if (userIds.length) {
                     await tx.notificationRecipient.createMany({
-                        data: userIds.map((userId) => ({ notificationId: created.id, userId })),
+                        data: userIds.map((userId) => ({
+                            notificationId: created.id,
+                            userId,
+                            actionRequired: payload.actionRequired === true && actionUserIds.has(userId),
+                        })),
                         skipDuplicates: true,
                     })
                     const recipientRows = await tx.notificationRecipient.findMany({
@@ -199,7 +221,7 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                         skipDuplicates: true,
                     })
                     if (payload.actionRequired === true) {
-                        for (const userId of userIds) {
+                        for (const userId of actionUserIds) {
                             const sourceType = workItemSourceType
                             const sourceId = workItemSourceId
                             const action = scalarString(payload.action, rendered.action ?? 'VIEW')
@@ -212,7 +234,7 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                             })
                             if (!current) {
                                 await tx.notificationWorkItem.create({
-                                    data: { ...key, dueAt, sourceVersion },
+                                    data: { ...key, notificationId: created.id, dueAt, sourceVersion },
                                 })
                                 continue
                             }
@@ -225,7 +247,7 @@ export class NotificationOutboxProcessor implements OnModuleInit, OnModuleDestro
                             }
                             await tx.notificationWorkItem.update({
                                 where: { id: current.id },
-                                data: { status: 'OPEN', completedAt: null, dueAt, sourceVersion },
+                                data: { notificationId: created.id, status: 'OPEN', completedAt: null, dueAt, sourceVersion },
                             })
                         }
                     }

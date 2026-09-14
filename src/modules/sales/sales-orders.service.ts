@@ -9,6 +9,7 @@ import {
     SalesOrderSupplySource,
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
+import { SalesOrderChecksService } from './sales-order-checks.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
 import { PURCHASE_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
 import {
@@ -123,7 +124,42 @@ export class SalesOrdersService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly notificationOutbox: NotificationOutboxService,
+        private readonly checks: SalesOrderChecksService,
     ) {}
+
+    /**
+     * Xem trước công nợ cho một đơn SẮP lưu — để màn nhập đơn cảnh báo trước khi Sale bấm Lưu.
+     *
+     * Dùng chung `creditStatus` với luật duyệt đơn, nên con số trên modal và con số sinh ra
+     * yêu cầu duyệt CREDIT không bao giờ lệch nhau. `excludeOrderId` dành cho lúc sửa đơn:
+     * đơn đang sửa đã nằm trong exposure thì phải trừ ra rồi cộng giá trị mới vào.
+     */
+    async creditPreview(params: {
+        customerPartyId: string
+        orderValue: number
+        excludeOrderId?: string
+    }) {
+        const orderValue = new Prisma.Decimal(params.orderValue || 0)
+        const credit = await this.checks.creditStatus(this.prisma, params.customerPartyId, {
+            excludeOrderId: params.excludeOrderId,
+            extraExposure: orderValue,
+        })
+        const limit = credit.limit == null ? null : new Prisma.Decimal(credit.limit)
+        const exceededBy =
+            limit == null
+                ? new Prisma.Decimal(0)
+                : Prisma.Decimal.max(credit.exposure.minus(limit), 0)
+        return {
+            creditLimit: limit?.toString() ?? null,
+            orderValue: orderValue.toString(),
+            exposureAfter: credit.exposure.toString(),
+            exposureBefore: credit.exposure.minus(orderValue).toString(),
+            receivableOutstanding: credit.receivableOutstanding.toString(),
+            overdueAmount: credit.overdueAmount.toString(),
+            exceededBy: exceededBy.toString(),
+            exceeded: exceededBy.greaterThan(0),
+        }
+    }
 
     private period(date: Date) {
         const year = String(date.getUTCFullYear()).slice(-2)

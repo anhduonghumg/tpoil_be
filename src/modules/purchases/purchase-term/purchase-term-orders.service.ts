@@ -474,6 +474,9 @@ export class PurchaseTermOrdersService {
         const where: Prisma.PurchaseOrderWhereInput = {
             bizType: PurchaseBizType.TERM,
             status: query.status ?? undefined,
+            // DTO vốn đã nhận paymentMode nhưng where lại bỏ quên, nên bộ lọc trả trước /
+            // trả sau bấm xong vẫn ra nguyên danh sách.
+            paymentMode: query.paymentMode ?? undefined,
             supplierCustomerId: query.supplierCustomerId ?? undefined,
             termPaymentRequests: query.paymentStatus
                 ? {

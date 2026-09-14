@@ -11,6 +11,28 @@ type TemplateDefinition = {
     action?: string
 }
 
+export type NotificationKind = 'ACTION' | 'ALERT' | 'UPDATE'
+
+function notificationTab(eventType: string): string {
+    if (eventType.startsWith('purchase.payment.')) return 'FINANCE'
+    if (eventType.startsWith('purchase.')) return 'PURCHASES'
+    if (
+        eventType.startsWith('sales.transport.') ||
+        eventType.startsWith('sales.delivery.')
+    ) {
+        return 'OPERATIONS'
+    }
+    if (
+        eventType.startsWith('sales.invoice.') ||
+        eventType.startsWith('sales.reconciliation.') ||
+        eventType.startsWith('sales.receivable.')
+    ) {
+        return 'FINANCE'
+    }
+    if (eventType.startsWith('sales.')) return 'SALES'
+    return 'SYSTEM'
+}
+
 const TEMPLATES: Record<string, TemplateDefinition> = {
     'purchase.order.pending_approval': {
         moduleCode: 'purchases',
@@ -292,6 +314,30 @@ const TEMPLATES: Record<string, TemplateDefinition> = {
         body: 'Tổng quá hạn {{overdueAmount}} — cần liên hệ thu hồi.',
         action: 'VIEW_RECEIVABLES',
     },
+    'sales.adjustment.review_requested': {
+        moduleCode: 'sales',
+        category: 'SALES_ORDER_ADJUSTMENT',
+        severity: 'WARNING',
+        title: 'Phiếu điều chỉnh {{adjustmentNo}} chờ duyệt',
+        body: 'Đơn {{orderNo}} — khách {{customerName}}. Lý do: {{reason}}',
+        action: 'REVIEW_SALES_ORDER_ADJUSTMENT',
+    },
+    'sales.adjustment.approved': {
+        moduleCode: 'sales',
+        category: 'SALES_ORDER_ADJUSTMENT',
+        severity: 'SUCCESS',
+        title: 'Phiếu điều chỉnh {{adjustmentNo}} đã được duyệt',
+        body: 'Đơn {{orderNo}} — khách {{customerName}}. {{followUpSummary}}',
+        action: 'VIEW_SALES_ORDER_ADJUSTMENT',
+    },
+    'sales.adjustment.rejected': {
+        moduleCode: 'sales',
+        category: 'SALES_ORDER_ADJUSTMENT',
+        severity: 'ERROR',
+        title: 'Phiếu điều chỉnh {{adjustmentNo}} bị từ chối',
+        body: 'Đơn {{orderNo}}: {{decisionNote}}',
+        action: 'FIX_SALES_ORDER_ADJUSTMENT',
+    },
     'sales.reconciliation.variance': {
         moduleCode: 'sales',
         category: 'SALES_RECONCILIATION',
@@ -371,10 +417,24 @@ export class NotificationTemplateService {
                     : ''
             })
 
+        const kind: NotificationKind =
+            payload.actionRequired === true
+                ? 'ACTION'
+                : template.severity === NotificationSeverity.ERROR
+                  ? 'ALERT'
+                  : 'UPDATE'
+        const expiresAt =
+            kind === 'ACTION'
+                ? null
+                : new Date(Date.now() + (kind === 'ALERT' ? 90 : 30) * 24 * 60 * 60 * 1_000)
+
         return {
             ...template,
             title: interpolate(template.title),
             body: interpolate(template.body),
+            kind,
+            tab: notificationTab(eventType),
+            expiresAt,
         }
     }
 }

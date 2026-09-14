@@ -12,6 +12,7 @@ import {
     CancelSalesOrderDto,
     CreateSalesOrderDto,
     CreateSalesOrderFromPurchaseDto,
+    CreditPreviewQueryDto,
     ListSalesOrdersQueryDto,
     PrintSalesOrdersDto,
     UpdateSalesOrderDto,
@@ -43,6 +44,25 @@ export class SalesOrdersController {
     @Get('status-counts')
     statusCounts(@Query() query: ListSalesOrdersQueryDto) {
         return this.service.statusCounts(query)
+    }
+
+    /**
+     * Công nợ của khách nếu lưu đơn này — màn nhập đơn gọi trước khi lưu để cảnh báo.
+     *
+     * Quyền theo sales.create/update chứ không theo quyền xem công nợ: người nhập đơn cần
+     * thấy con số này để biết đơn sẽ phải qua kế toán công nợ, nhưng không vì thế mà được
+     * mở màn quản lý hạn mức.
+     *
+     * Phải khai TRƯỚC @Get(':id'), không thì "credit-preview" bị nhận là id.
+     */
+    @Get('credit-preview')
+    @RequirePermissions(PERMISSIONS.sales.create, PERMISSIONS.sales.update)
+    creditPreview(@Query() query: CreditPreviewQueryDto) {
+        return this.service.creditPreview({
+            customerPartyId: query.customerPartyId,
+            orderValue: Number(query.orderValue ?? 0),
+            excludeOrderId: query.excludeOrderId,
+        })
     }
 
     @Get(':id')

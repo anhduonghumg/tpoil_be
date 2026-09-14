@@ -9,6 +9,9 @@ import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { SalesActor } from './sales-order-workflow.service'
 import { SalesReservationService } from './sales-reservation.service'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
+import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
+import { SALES_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import {
     CreateSalesOrderAdjustmentDto,
     DecideSalesOrderAdjustmentDto,
@@ -44,6 +47,7 @@ export class SalesOrderAdjustmentsService {
         private readonly prisma: PrismaService,
         private readonly reservations: SalesReservationService,
         private readonly events: SalesWorkflowEventsService,
+        private readonly notificationOutbox: NotificationOutboxService,
     ) {}
 
     private async nextNo(tx: Prisma.TransactionClient, date: Date) {
@@ -89,7 +93,10 @@ export class SalesOrderAdjustmentsService {
         const id = await this.prisma.$transaction(async (tx) => {
             const order = await tx.salesOrder.findUnique({
                 where: { id: dto.salesOrderId },
-                include: { lines: { where: { id: { in: uniqueLineIds } } } },
+                include: {
+                    customer: { select: { name: true } },
+                    lines: { where: { id: { in: uniqueLineIds } } },
+                },
             })
             if (!order) throw new NotFoundException('SALES_ORDER_NOT_FOUND')
             if (!order.approvedAt || ['DRAFT', 'PENDING_REVIEW', 'REJECTED', 'CANCELLED'].includes(order.status)) {
@@ -157,6 +164,29 @@ export class SalesOrderAdjustmentsService {
                 actorId: actor.userId,
                 metadata: { salesOrderId: order.id, adjustmentNo: created.adjustmentNo },
             })
+            await this.notificationOutbox.emit(
+                {
+                    eventType: SALES_NOTIFICATION_EVENTS.ADJUSTMENT_REVIEW_REQUESTED,
+                    aggregateType: 'SALES_ORDER_ADJUSTMENT',
+                    aggregateId: created.id,
+                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.ADJUSTMENT_REVIEW_REQUESTED}:${created.id}`,
+                    payload: {
+                        entityType: 'SALES_ORDER_ADJUSTMENT',
+                        entityId: created.id,
+                        workItemSourceType: 'SALES_ORDER_ADJUSTMENT',
+                        workItemSourceId: created.id,
+                        actionRequired: true,
+                        adjustmentNo: created.adjustmentNo,
+                        salesOrderId: order.id,
+                        orderNo: order.orderNo,
+                        customerName: order.customer.name,
+                        reason,
+                        recipientPermissionCodes: [PERMISSIONS.sales.approveOrder],
+                        excludeUserIds: [actor.userId],
+                    },
+                },
+                tx,
+            )
             return created.id
         })
         return this.detail(id)
@@ -170,6 +200,7 @@ export class SalesOrderAdjustmentsService {
                     lines: { include: { orderLine: true } },
                     salesOrder: {
                         include: {
+                            customer: { select: { name: true } },
                             deliveries: {
                                 where: { status: 'POSTED' },
                                 include: { lines: true },
@@ -301,6 +332,35 @@ export class SalesOrderAdjustmentsService {
                 actorId: actor.userId,
                 metadata: { requiresWarehouseCorrection, requiresInvoiceCorrection },
             })
+            const followUpSummary =
+                requiresWarehouseCorrection || requiresInvoiceCorrection
+                    ? 'Cần tiếp tục xử lý điều chỉnh kho hoặc hóa đơn.'
+                    : 'Điều chỉnh đã được áp dụng vào đơn bán.'
+            await this.notificationOutbox.emit(
+                {
+                    eventType: SALES_NOTIFICATION_EVENTS.ADJUSTMENT_APPROVED,
+                    aggregateType: 'SALES_ORDER_ADJUSTMENT',
+                    aggregateId: adjustment.id,
+                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.ADJUSTMENT_APPROVED}:${adjustment.id}`,
+                    payload: {
+                        entityType: 'SALES_ORDER_ADJUSTMENT',
+                        entityId: adjustment.id,
+                        workItemSourceType: 'SALES_ORDER_ADJUSTMENT',
+                        workItemSourceId: adjustment.id,
+                        resolvedActions: ['REVIEW_SALES_ORDER_ADJUSTMENT'],
+                        adjustmentNo: adjustment.adjustmentNo,
+                        salesOrderId: adjustment.salesOrderId,
+                        orderNo: adjustment.salesOrder.orderNo,
+                        customerName: adjustment.salesOrder.customer.name,
+                        followUpSummary,
+                        recipientUserIds: adjustment.requestedById
+                            ? [adjustment.requestedById]
+                            : [],
+                        excludeUserIds: [actor.userId],
+                    },
+                },
+                tx,
+            )
         })
         return this.detail(id)
     }
@@ -314,6 +374,16 @@ export class SalesOrderAdjustmentsService {
             })
         }
         await this.prisma.$transaction(async (tx) => {
+            const adjustment = await tx.salesOrderAdjustment.findUnique({
+                where: { id },
+                select: {
+                    salesOrderId: true,
+                    adjustmentNo: true,
+                    requestedById: true,
+                    salesOrder: { select: { orderNo: true, customer: { select: { name: true } } } },
+                },
+            })
+            if (!adjustment) throw new NotFoundException('SALES_ORDER_ADJUSTMENT_NOT_FOUND')
             const updated = await tx.salesOrderAdjustment.updateMany({
                 where: { id, status: SalesApprovalStatus.PENDING },
                 data: {
@@ -333,6 +403,29 @@ export class SalesOrderAdjustmentsService {
                 actorId: actor.userId,
                 reason: note,
             })
+            await this.notificationOutbox.emit(
+                {
+                    eventType: SALES_NOTIFICATION_EVENTS.ADJUSTMENT_REJECTED,
+                    aggregateType: 'SALES_ORDER_ADJUSTMENT',
+                    aggregateId: id,
+                    dedupeKey: `${SALES_NOTIFICATION_EVENTS.ADJUSTMENT_REJECTED}:${id}`,
+                    payload: {
+                        entityType: 'SALES_ORDER_ADJUSTMENT',
+                        entityId: id,
+                        workItemSourceType: 'SALES_ORDER_ADJUSTMENT',
+                        workItemSourceId: id,
+                        resolvedActions: ['REVIEW_SALES_ORDER_ADJUSTMENT'],
+                        adjustmentNo: adjustment.adjustmentNo,
+                        salesOrderId: adjustment.salesOrderId,
+                        orderNo: adjustment.salesOrder.orderNo,
+                        customerName: adjustment.salesOrder.customer.name,
+                        decisionNote: note,
+                        recipientUserIds: adjustment.requestedById ? [adjustment.requestedById] : [],
+                        excludeUserIds: [actor.userId],
+                    },
+                },
+                tx,
+            )
         })
         return this.detail(id)
     }

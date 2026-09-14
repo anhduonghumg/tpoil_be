@@ -27,12 +27,31 @@ export class NotificationsController {
         @Query('unreadOnly') unreadOnly?: string,
         @Query('cursor') cursor?: string,
         @Query('limit') limit?: string,
+        @Query('tab') tab?: string,
+        @Query('kind') kind?: string,
     ) {
         return this.service.list(this.userId(req), {
             unreadOnly: unreadOnly === 'true',
             cursor,
             limit: limit ? Number(limit) : undefined,
+            tab,
+            kind,
         })
+    }
+
+    @Get('summary')
+    summary(@Req() req: Request) {
+        return this.service.summary(this.userId(req))
+    }
+
+    @Get('work-items')
+    workItems(@Req() req: Request, @Query('cursor') cursor?: string, @Query('limit') limit?: string) {
+        return this.service.workItems(this.userId(req), { cursor, limit: limit ? Number(limit) : undefined })
+    }
+
+    @Get('quick')
+    quick(@Req() req: Request) {
+        return this.service.quick(this.userId(req))
     }
 
     @Get('unread-count')
@@ -48,6 +67,11 @@ export class NotificationsController {
     @Patch('read-all')
     markAllRead(@Req() req: Request) {
         return this.service.markAllRead(this.userId(req))
+    }
+
+    @Patch(':id/archive')
+    archive(@Req() req: Request, @Param('id') id: string) {
+        return this.service.archive(this.userId(req), id)
     }
 
     @Get('preferences')
@@ -78,4 +102,3 @@ export class NotificationsController {
         return merge(this.eventBus.forUser(this.userId(req)), heartbeat)
     }
 }
-

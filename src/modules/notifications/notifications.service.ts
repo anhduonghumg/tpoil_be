@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
-import { NotificationRecipientStatus } from '@prisma/client'
+import { NotificationRecipientStatus, NotificationWorkItemStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { RegisterNotificationDeviceDto } from './dto/notification-device.dto'
 import { UpdateNotificationPreferenceDto } from './dto/notification-preference.dto'
@@ -8,14 +8,33 @@ import { UpdateNotificationPreferenceDto } from './dto/notification-preference.d
 export class NotificationsService {
     constructor(private readonly prisma: PrismaService) {}
 
-    async list(userId: string, input: { unreadOnly?: boolean; cursor?: string; limit?: number }) {
+    async list(
+        userId: string,
+        input: { unreadOnly?: boolean; cursor?: string; limit?: number; tab?: string; kind?: string },
+    ) {
         const limit = Math.min(Math.max(input.limit ?? 20, 1), 50)
+        const now = new Date()
         const rows = await this.prisma.notificationRecipient.findMany({
             where: {
                 userId,
                 status: input.unreadOnly ? NotificationRecipientStatus.UNREAD : { not: NotificationRecipientStatus.ARCHIVED },
+                notification: {
+                    ...(input.tab ? { tab: input.tab } : {}),
+                    ...(input.kind ? { kind: input.kind } : {}),
+                    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+                },
             },
-            include: { notification: true },
+            include: {
+                notification: {
+                    include: {
+                        recipients: {
+                            where: { userId },
+                            select: { id: true, status: true, readAt: true, actionRequired: true, createdAt: true },
+                            take: 1,
+                        },
+                    },
+                },
+            },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
             take: limit + 1,
             ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
@@ -31,16 +50,110 @@ export class NotificationsService {
                 readAt: row.readAt,
                 createdAt: row.createdAt,
                 recipientId: row.id,
+                actionRequired: row.actionRequired,
             })),
             nextCursor: hasMore ? items.at(-1)?.id ?? null : null,
         }
     }
 
     async unreadCount(userId: string) {
+        const now = new Date()
         const count = await this.prisma.notificationRecipient.count({
-            where: { userId, status: NotificationRecipientStatus.UNREAD },
+            where: {
+                userId,
+                status: NotificationRecipientStatus.UNREAD,
+                notification: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+            },
         })
         return { count }
+    }
+
+    async summary(userId: string) {
+        const now = new Date()
+        const [unread, openWorkItems, rows] = await Promise.all([
+            this.unreadCount(userId),
+            this.prisma.notificationWorkItem.count({
+                where: {
+                    userId,
+                    status: NotificationWorkItemStatus.OPEN,
+                    notification: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+                },
+            }),
+            this.prisma.notificationRecipient.findMany({
+                where: {
+                    userId,
+                    status: { not: NotificationRecipientStatus.ARCHIVED },
+                    notification: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+                },
+                select: { status: true, actionRequired: true, notification: { select: { tab: true } } },
+            }),
+        ])
+        const tabs: Record<string, { unread: number; actionRequired: number; total: number }> = {}
+        for (const row of rows) {
+            const tab = row.notification.tab
+            const current = tabs[tab] ?? { unread: 0, actionRequired: 0, total: 0 }
+            current.total += 1
+            if (row.status === NotificationRecipientStatus.UNREAD) current.unread += 1
+            if (row.actionRequired) current.actionRequired += 1
+            tabs[tab] = current
+        }
+        return { unread: unread.count, openWorkItems, tabs }
+    }
+
+    async workItems(userId: string, input: { cursor?: string; limit?: number }) {
+        const limit = Math.min(Math.max(input.limit ?? 20, 1), 50)
+        const now = new Date()
+        const rows = await this.prisma.notificationWorkItem.findMany({
+            where: {
+                userId,
+                status: NotificationWorkItemStatus.OPEN,
+                notification: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+            },
+            include: {
+                notification: {
+                    include: {
+                        recipients: {
+                            where: { userId },
+                            select: { id: true, status: true, readAt: true, actionRequired: true, createdAt: true },
+                            take: 1,
+                        },
+                    },
+                },
+            },
+            orderBy: [{ dueAt: 'asc' }, { createdAt: 'desc' }],
+            take: limit + 1,
+            ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+        })
+        const hasMore = rows.length > limit
+        const items = rows.slice(0, limit)
+        return {
+            items: items.flatMap((item) => {
+                if (!item.notification) return []
+                const recipient = item.notification.recipients[0]
+                return [{
+                    ...item.notification,
+                    id: recipient?.id ?? item.notification.id,
+                    notificationId: item.notification.id,
+                    status: recipient?.status ?? NotificationRecipientStatus.READ,
+                    readAt: recipient?.readAt ?? null,
+                    actionRequired: recipient?.actionRequired ?? true,
+                    workItemId: item.id,
+                    action: item.action,
+                    dueAt: item.dueAt,
+                    workItemStatus: item.status,
+                    createdAt: recipient?.createdAt ?? item.createdAt,
+                }]
+            }),
+            nextCursor: hasMore ? items.at(-1)?.id ?? null : null,
+        }
+    }
+
+    async quick(userId: string) {
+        const [tasks, updates] = await Promise.all([
+            this.workItems(userId, { limit: 3 }),
+            this.list(userId, { limit: 2, kind: 'UPDATE' }),
+        ])
+        return { tasks: tasks.items, updates: updates.items }
     }
 
     async markRead(userId: string, recipientId: string) {
@@ -64,6 +177,15 @@ export class NotificationsService {
             data: { status: NotificationRecipientStatus.READ, readAt: new Date() },
         })
         return { updated: result.count }
+    }
+
+    async archive(userId: string, recipientId: string) {
+        const result = await this.prisma.notificationRecipient.updateMany({
+            where: { id: recipientId, userId, status: { not: NotificationRecipientStatus.ARCHIVED } },
+            data: { status: NotificationRecipientStatus.ARCHIVED, archivedAt: new Date() },
+        })
+        if (!result.count) throw new NotFoundException('NOTIFICATION_NOT_FOUND')
+        return { ok: true }
     }
 
     preferences(userId: string) {

@@ -11,6 +11,7 @@ import {
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { NotificationOutboxService } from 'src/modules/notifications/notification-outbox.service'
 import { SALES_NOTIFICATION_EVENTS } from 'src/modules/notifications/notification-events'
+import { PERMISSIONS } from 'src/common/auth/permissions.constant'
 import { SalesWorkflowEventsService } from './sales-workflow-events.service'
 import {
     APPROVAL_TYPE_LABELS,
@@ -542,7 +543,13 @@ export class SalesApprovalsService {
                 where: { id: lineId },
                 select: {
                     id: true, vehiclePlate: true, driverName: true,
-                    salesOrder: { select: { id: true, status: true, kind: true, transportVehiclePlate: true, transportDriverName: true } },
+                    salesOrder: {
+                        select: {
+                            id: true, orderNo: true, status: true, kind: true,
+                            transportVehiclePlate: true, transportDriverName: true,
+                            customer: { select: { name: true } },
+                        },
+                    },
                 },
             })
             if (!line) throw new NotFoundException('SALES_ORDER_LINE_NOT_FOUND')
@@ -560,7 +567,45 @@ export class SalesApprovalsService {
                 where: { id: line.salesOrder.id },
                 data: { hasTransportFee, transportVehiclePlate: hasTransportFee ? vehiclePlate : null, transportDriverName: hasTransportFee ? driverName : null },
             })
-            if (!hasTransportFee) await tx.salesOrderTransportRequest.updateMany({ where: { salesOrderId: line.salesOrder.id }, data: { status: 'CANCELLED' } })
+            const currentRequest = await tx.salesOrderTransportRequest.findUnique({
+                where: { salesOrderId: line.salesOrder.id },
+                select: { id: true, status: true },
+            })
+            if (hasTransportFee) {
+                const request = await tx.salesOrderTransportRequest.upsert({
+                    where: { salesOrderId: line.salesOrder.id },
+                    create: {
+                        salesOrderId: line.salesOrder.id,
+                        tripNo: `CX-${line.salesOrder.orderNo}`,
+                        plannedVehiclePlate: vehiclePlate,
+                        plannedDriverName: driverName,
+                    },
+                    update: {
+                        plannedVehiclePlate: vehiclePlate,
+                        plannedDriverName: driverName,
+                        ...(currentRequest?.status === 'CANCELLED' ? { status: 'NEW', acknowledgedAt: null } : {}),
+                    },
+                    select: { id: true },
+                })
+                // Nếu CPVC được thêm trong lúc duyệt, đơn đã qua bước submit nên phải tạo thông báo tại đây.
+                if (!currentRequest || currentRequest.status === 'CANCELLED') {
+                    await this.notificationOutbox.emit({
+                        eventType: SALES_NOTIFICATION_EVENTS.TRANSPORT_REQUESTED,
+                        aggregateType: 'SALES_TRANSPORT_REQUEST',
+                        aggregateId: request.id,
+                        dedupeKey: `${SALES_NOTIFICATION_EVENTS.TRANSPORT_REQUESTED}:${line.salesOrder.id}:${request.id}:${Date.now()}`,
+                        payload: {
+                            entityType: 'SALES_TRANSPORT_REQUEST', entityId: request.id,
+                            workItemSourceType: 'SALES_TRANSPORT_REQUEST', workItemSourceId: request.id,
+                            actionRequired: true, orderNo: line.salesOrder.orderNo,
+                            customerName: line.salesOrder.customer.name, vehiclePlate, driverName,
+                            recipientPermissionCodes: [PERMISSIONS.operations.roadManage],
+                        },
+                    }, tx)
+                }
+            } else {
+                await tx.salesOrderTransportRequest.updateMany({ where: { salesOrderId: line.salesOrder.id }, data: { status: 'CANCELLED' } })
+            }
             await this.events.record(tx, { entityType: 'SALES_ORDER', entityId: line.salesOrder.id, eventType: 'ADJUST_TRANSPORT_FEE', actorId: actor.userId, metadata: { salesOrderLineId: lineId, transportFeeUnitPrice: fee.toString() } })
             const lines = await tx.salesOrderLine.findMany({ where: { salesOrderId: line.salesOrder.id }, select: { orderedActualQty: true, unitPrice: true, discountAmount: true, transportFeeUnitPrice: true } })
             const orderNetAmount = lines.reduce((sum, row) => sum.plus(salesLineNetAmount(row)), new Prisma.Decimal(0))

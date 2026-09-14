@@ -12,7 +12,6 @@ import {
 } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { PurchaseTermCostLayerService } from 'src/modules/purchases/purchase-term/purchase-term-cost-layer.service'
-import { SalesDiscountService } from './sales-discount.service'
 import { salesLineNetAmount } from './sales-order-amount'
 import { startOfToday } from './receivables.service'
 
@@ -61,7 +60,6 @@ export class SalesOrderChecksService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly costLayers: PurchaseTermCostLayerService,
-        private readonly discounts: SalesDiscountService,
         private readonly contractTerms: ContractTermsService,
     ) {}
 
@@ -303,41 +301,6 @@ export class SalesOrderChecksService {
                 }
             }
         }
-        // Luật "phải có thông báo chiết khấu thì mới cho bán" nằm ở validateSubmittable và
-        // chặn bằng cách throw. submitQuietly nuốt lỗi đó để đơn không bị mất, hậu quả là
-        // đơn nằm im ở nháp mà Sale không biết vì sao. Soi lại đúng luật ấy ở đây để lý do
-        // hiện ra trong danh sách vi phạm của đơn.
-        const discountPairs = order.lines.flatMap((line) =>
-            line.issueWarehouse
-                ? [{ warehouseId: line.issueWarehouse.id, productId: line.productId }]
-                : (line.receivingWarehouseArea?.warehouses ?? [])
-                      .filter((warehouse) => warehouse.legalEntityId === order.legalEntityId)
-                      .map((warehouse) => ({ warehouseId: warehouse.id, productId: line.productId })),
-        )
-        const announcedDiscounts = await this.discounts.resolveDiscounts(discountPairs, new Date(), db)
-        for (const line of order.lines) {
-            const candidates = line.issueWarehouse
-                ? [line.issueWarehouse.id]
-                : (line.receivingWarehouseArea?.warehouses ?? [])
-                      .filter((warehouse) => warehouse.legalEntityId === order.legalEntityId)
-                      .map((warehouse) => warehouse.id)
-            if (candidates.some((warehouseId) => announcedDiscounts.has(`${warehouseId}:${line.productId}`))) {
-                continue
-            }
-            const location = line.issueWarehouse?.name ?? line.receivingWarehouseArea?.name ?? ''
-            violations.push({
-                approvalType: SalesApprovalType.EXCEPTION,
-                code: 'DISCOUNT_NOT_ANNOUNCED',
-                message: `Dòng ${line.lineNo}: ${location} chưa có thông báo chiết khấu cho ${line.product.code ?? line.product.name} — vận hành phải ra thông báo thì đơn mới gửi duyệt được.`,
-                detail: {
-                    lineNo: line.lineNo,
-                    productId: line.productId,
-                    warehouseId: line.issueWarehouseId,
-                    warehouseAreaId: line.receivingWarehouseAreaId,
-                },
-            })
-        }
-
         const maxDiscountEnv = process.env.SALES_MAX_LINE_DISCOUNT
         if (maxDiscountEnv) {
             const maxDiscount = new Prisma.Decimal(maxDiscountEnv)
@@ -394,9 +357,39 @@ export class SalesOrderChecksService {
             }
         }
 
-        // Công nợ KHÔNG thuộc luồng đơn bán. Kế toán công nợ xử lý ở màn xuất hóa đơn
-        // (SalesInvoicesService.issue) — đó mới là lúc khoản phải thu ra đời. Ở đây không
-        // kiểm, không cảnh báo, và cũng không truy vấn dư nợ để khỏi tốn 3 query mỗi lần.
+        // ===== 3) Công nợ =====
+        // Chốt chặn tín dụng nằm ở đây chứ không ở bước xuất hóa đơn: lúc xuất hóa đơn thì
+        // xăng đã ra khỏi bồn, chặn cũng không cứu được đồng nào, mà luật lại buộc bán rồi
+        // là phải lập hóa đơn. Duyệt đơn mới là mốc cuối còn từ chối được mà vô hại.
+        //
+        // Vi phạm này mang approvalType CREDIT nên chỉ người có quyền sales.approve_credit
+        // (kế toán công nợ) ký được — sinh ra một yêu cầu duyệt riêng, song song với PRICE
+        // và EXCEPTION, và đơn chỉ đi tiếp khi TẤT CẢ yêu cầu đều được duyệt.
+        const orderValue = this.orderValue(order.lines)
+        const credit = await this.creditStatus(db, order.customerPartyId, {
+            // Đơn đang xét có thể đã nằm trong exposure (gửi lại sau khi thu hồi), trừ ra
+            // rồi cộng giá trị của chính nó vào để không đếm hai lần.
+            excludeOrderId: orderId,
+            extraExposure: orderValue,
+        })
+        if (credit.limit != null) {
+            const limit = new Prisma.Decimal(credit.limit)
+            if (credit.exposure.greaterThan(limit)) {
+                violations.push({
+                    approvalType: SalesApprovalType.CREDIT,
+                    code: 'CREDIT_LIMIT_EXCEEDED',
+                    message: `Đơn này đưa công nợ lên ${credit.exposure.toFixed(0)}, vượt hạn mức ${limit.toFixed(0)} của khách hàng.`,
+                    detail: {
+                        creditLimit: limit.toString(),
+                        exposureAfter: credit.exposure.toString(),
+                        exceededBy: credit.exposure.minus(limit).toString(),
+                        orderValue: orderValue.toString(),
+                        receivableOutstanding: credit.receivableOutstanding.toString(),
+                        overdueAmount: credit.overdueAmount.toString(),
+                    },
+                })
+            }
+        }
 
         // ===== 4) Tồn khả dụng (chỉ cảnh báo — chặn thật ở bước giữ hàng, D2 owner pháp nhân) =====
         for (const line of order.kind === SalesOrderKind.DAY_TRADE ? [] : order.lines) {

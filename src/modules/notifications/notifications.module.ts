@@ -4,6 +4,7 @@ import { NotificationEventBus } from './notification-event-bus.service'
 import { NotificationOutboxProcessor } from './notification-outbox.processor'
 import { NotificationOutboxService } from './notification-outbox.service'
 import { NotificationRecipientResolver } from './notification-recipient-resolver.service'
+import { NotificationRetentionService } from './notification-retention.service'
 import { NotificationTemplateService } from './notification-template.service'
 import { NotificationsController } from './notifications.controller'
 import { NotificationsService } from './notifications.service'
@@ -17,6 +18,7 @@ import { NotificationsService } from './notifications.service'
         NotificationOutboxService,
         NotificationTemplateService,
         NotificationRecipientResolver,
+        NotificationRetentionService,
         NotificationEventBus,
         NotificationOutboxProcessor,
     ],

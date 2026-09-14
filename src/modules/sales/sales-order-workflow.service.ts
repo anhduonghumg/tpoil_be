@@ -483,11 +483,6 @@ export class SalesOrderWorkflowService {
         if (Number.isNaN(orderDate.getTime())) throw new BadRequestException('ORDER_DATE_INVALID')
         if (!dto.lines?.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
         const transport = this.resolveTransportConfiguration(dto, kind, dto.lines)
-        // Chặn ngay, không để đơn lưu xong rồi mới kẹt im ở nháp vì thiếu công bố giá.
-        await this.assertDiscountsAnnounced(
-            dto.lines.map((line, index) => ({ lineNo: index + 1, ...line })),
-            legalEntityId,
-        )
         const contractId = await this.resolveContractForCreate(
             dto.customerPartyId,
             orderDate,
@@ -672,13 +667,6 @@ export class SalesOrderWorkflowService {
 
             if (dto.lines) {
                 if (!dto.lines.length) throw new BadRequestException('SALES_ORDER_LINES_REQUIRED')
-                // Cùng luật như lúc tạo: sửa xong mà vẫn thiếu công bố giá thì chặn tại
-                // đây, đừng để đơn lưu được rồi lại kẹt im ở nháp.
-                await this.assertDiscountsAnnounced(
-                    dto.lines.map((line, index) => ({ lineNo: index + 1, ...line })),
-                    order.legalEntityId,
-                    tx,
-                )
                 await tx.salesOrderLine.deleteMany({ where: { salesOrderId: id } })
                 await tx.salesOrderLine.createMany({
                     data: this.linesCreateInput(dto, order.kind, transport).map((line) => ({
@@ -793,111 +781,6 @@ export class SalesOrderWorkflowService {
         }
         const policyHash = createHash('md5').update(JSON.stringify(payload)).digest('hex')
         return { ...payload, policyHash } as unknown as Prisma.InputJsonObject
-    }
-
-    /**
-     * "Phải có thông báo chiết khấu thì mới cho bán hàng" (docs/thongbaogia.md §1).
-     *
-     * Chặn ngay từ lúc lưu chứ không đợi tới bước gửi duyệt: đơn lưu được rồi mới hỏng ở
-     * submit thì lỗi bị submitQuietly nuốt (cố tình, để không mất đơn), Sale tưởng đã xong
-     * mà đơn nằm im ở nháp. Dùng chung một hàm cho cả lúc lưu lẫn lúc gửi duyệt để hai nơi
-     * không bao giờ nói khác nhau.
-     *
-     * Dòng chốt tới khu vực thì chỉ cần MỘT kho vận hành trong khu vực đã có công bố.
-     */
-    private async assertDiscountsAnnounced(
-        lines: Array<{
-            lineNo: number
-            productId: string
-            issueWarehouseId?: string | null
-            receivingWarehouseAreaId?: string | null
-        }>,
-        legalEntityId: string,
-        db: Prisma.TransactionClient | PrismaService = this.prisma,
-    ) {
-        const areaIds = [
-            ...new Set(lines.map((line) => line.receivingWarehouseAreaId).filter(Boolean)),
-        ] as string[]
-        const areas = areaIds.length
-            ? await db.warehouseArea.findMany({
-                  where: { id: { in: areaIds } },
-                  select: {
-                      id: true,
-                      name: true,
-                      warehouses: {
-                          where: {
-                              status: MasterStatus.ACTIVE,
-                              isOperationalWarehouse: true,
-                              legalEntityId,
-                          },
-                          select: { id: true },
-                      },
-                  },
-              })
-            : []
-        const areaById = new Map(areas.map((area) => [area.id, area]))
-        const candidatesOf = (line: (typeof lines)[number]) =>
-            line.issueWarehouseId
-                ? [line.issueWarehouseId]
-                : (areaById.get(line.receivingWarehouseAreaId!)?.warehouses ?? []).map(
-                      (warehouse) => warehouse.id,
-                  )
-
-        const announced = await this.discounts.resolveDiscounts(
-            lines.flatMap((line) =>
-                candidatesOf(line).map((warehouseId) => ({ warehouseId, productId: line.productId })),
-            ),
-            new Date(),
-            db,
-        )
-        const failing = lines.filter(
-            (line) =>
-                !candidatesOf(line).some((warehouseId) =>
-                    announced.has(`${warehouseId}:${line.productId}`),
-                ),
-        )
-        if (!failing.length) return
-
-        // Chỉ tra tên cho những dòng hỏng — thông báo phải chỉ đúng mặt hàng và nơi nhận.
-        const [products, warehouses] = await Promise.all([
-            db.product.findMany({
-                where: { id: { in: [...new Set(failing.map((line) => line.productId))] } },
-                select: { id: true, code: true, name: true },
-            }),
-            db.warehouse.findMany({
-                where: {
-                    id: {
-                        in: [
-                            ...new Set(failing.map((line) => line.issueWarehouseId).filter(Boolean)),
-                        ] as string[],
-                    },
-                },
-                select: { id: true, name: true },
-            }),
-        ])
-        const productById = new Map(products.map((row) => [row.id, row]))
-        const warehouseById = new Map(warehouses.map((row) => [row.id, row]))
-        const detail = failing.map((line) => {
-            const product = productById.get(line.productId)
-            const location = line.issueWarehouseId
-                ? (warehouseById.get(line.issueWarehouseId)?.name ?? '')
-                : `khu vực ${areaById.get(line.receivingWarehouseAreaId!)?.name ?? ''}`
-            return {
-                lineNo: line.lineNo,
-                productId: line.productId,
-                productCode: product?.code ?? null,
-                warehouseId: line.issueWarehouseId ?? null,
-                warehouseAreaId: line.receivingWarehouseAreaId ?? null,
-                text: `dòng ${line.lineNo} (${product?.code ?? product?.name ?? ''} tại ${location})`,
-            }
-        })
-        throw new BadRequestException({
-            code: 'DISCOUNT_NOT_ANNOUNCED',
-            message: `Chưa có thông báo chiết khấu cho ${detail
-                .map((row) => row.text)
-                .join('; ')} — vận hành phải ra thông báo trước khi bán.`,
-            detail: { lines: detail },
-        })
     }
 
     private async validateSubmittable(
@@ -1021,14 +904,6 @@ export class SalesOrderWorkflowService {
         // Chỉ bán cho TNPP (mua bán hai chiều) và TNDL (chỉ bán cho họ). Xét theo phân
         // loại TẠI NGÀY ĐƠN, vì một đối tác có thể đổi loại theo thời gian.
         await this.merchants.assertCanTrade(order.customerPartyId, 'SELL', order.orderDate, tx)
-
-        // "Phải có chiết khấu thì mới cho bán hàng" (docs/thongbaogia.md §1): kho hoặc mặt
-        // hàng chưa nằm trong bảng chiết khấu đang hiệu lực thì chặn ngay, không cho gửi.
-        //
-        // Tra theo THỜI ĐIỂM gửi duyệt, không phải orderDate: orderDate là cột DATE nên
-        // luôn là 00:00, mà chiết khấu thì đổi trong ngày (14h, 17h...). Lấy orderDate sẽ
-        // khiến bản công bố lúc 14h không bao giờ áp cho đơn cùng ngày.
-        await this.assertDiscountsAnnounced(order.lines, order.legalEntityId, tx)
     }
 
     async submit(id: string, actor: SalesActor) {
@@ -1107,6 +982,7 @@ export class SalesOrderWorkflowService {
                     where: { salesOrderId: id },
                     create: {
                         salesOrderId: id,
+                        tripNo: `CX-${order.orderNo}`,
                         plannedVehiclePlate: order.transportVehiclePlate,
                         plannedDriverName: order.transportDriverName,
                     },

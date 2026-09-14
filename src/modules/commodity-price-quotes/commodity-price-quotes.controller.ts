@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common'
+import { BulkUpsertCommodityPriceQuotesDto } from './dto/bulk-upsert-commodity-price-quotes.dto'
 import { QueryCommodityPriceQuotesDto } from './dto/query-commodity-price-quotes.dto'
 import { UpsertCommodityPriceQuoteDto } from './dto/upsert-commodity-price-quote.dto'
 import { CommodityPriceQuotesService } from './commodity-price-quotes.service'
@@ -15,6 +16,11 @@ export class CommodityPriceQuotesController {
     @Post('upsert')
     upsert(@Body() dto: UpsertCommodityPriceQuoteDto) {
         return this.service.upsert(dto)
+    }
+
+    @Post('bulk-upsert')
+    bulkUpsert(@Body() dto: BulkUpsertCommodityPriceQuotesDto) {
+        return this.service.bulkUpsert(dto)
     }
 
     @Delete(':id')

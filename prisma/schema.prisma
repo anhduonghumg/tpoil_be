@@ -776,6 +776,7 @@ enum VehicleDispatchStatus {
 enum SalesTransportRequestStatus {
   NEW
   ACKNOWLEDGED
+  COMPLETED
   CANCELLED
 }
 
@@ -1171,14 +1172,22 @@ model Notification {
   entityType String?
   entityId   String?
   action     String?
+  /// ACTION is a task assigned to a business user; ALERT needs attention; UPDATE is informational.
+  kind       String               @default("UPDATE")
+  /// Top-level notification-center tab, for example SALES, PURCHASES, OPERATIONS, or FINANCE.
+  tab        String               @default("GENERAL")
+  /// Informational notifications expire automatically. Actionable items remain until their work is settled.
+  expiresAt  DateTime?            @db.Timestamptz(6)
   metadata   Json?
   occurredAt DateTime             @default(now()) @db.Timestamptz(6)
   createdAt  DateTime             @default(now()) @db.Timestamptz(6)
 
-  outbox     NotificationOutbox      @relation(fields: [outboxId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  outbox     NotificationOutbox      @relation(fields: [outboxId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   recipients NotificationRecipient[]
+  workItems  NotificationWorkItem[]
 
   @@index([moduleCode, category, createdAt])
+  @@index([tab, kind, expiresAt])
   @@index([entityType, entityId])
 }
 
@@ -1189,6 +1198,8 @@ model NotificationRecipient {
   status         NotificationRecipientStatus @default(UNREAD)
   readAt         DateTime?                   @db.Timestamptz(6)
   archivedAt     DateTime?                   @db.Timestamptz(6)
+  /// True only when this recipient owns the business action, never for an admin observing it.
+  actionRequired Boolean                      @default(false)
   createdAt      DateTime                    @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime                    @updatedAt @db.Timestamptz(6)
 
@@ -1261,6 +1272,7 @@ model NotificationDelivery {
 model NotificationWorkItem {
   id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   userId     String @db.Uuid
+  notificationId String? @db.Uuid
   sourceType String
   sourceId   String
   action     String
@@ -1276,9 +1288,11 @@ model NotificationWorkItem {
   updatedAt   DateTime                   @updatedAt @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@unique([userId, sourceType, sourceId, action])
   @@index([userId, status, dueAt])
+  @@index([notificationId])
 }
 
 // =======================================
@@ -1681,7 +1695,7 @@ model ContractAppendix {
   contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   code          String
-  effectiveDate DateTime  @db.Date
+  effectiveDate DateTime @db.Date
   changeSummary String?
   docUrl        String?
 
@@ -2485,18 +2499,18 @@ model SalesOrder {
 
   // Approval workflow (SINGLE/LOT). approvalCycle increments on each resubmission;
   // approvedById stays null when every internal check passed and no manual approval was needed.
-  approvalCycle  Int       @default(0)
-  policySnapshot Json?
-  createdById    String?   @db.Uuid
+  approvalCycle   Int       @default(0)
+  policySnapshot  Json?
+  createdById     String?   @db.Uuid
   /// Snapshot Sale phụ trách khi tạo đơn; đổi người phụ trách trên khách hàng không làm sai báo cáo lịch sử.
-  salesOwnerEmpId String?  @db.Uuid
-  submittedById  String?   @db.Uuid
-  submittedAt    DateTime? @db.Timestamptz(6)
-  approvedById   String?   @db.Uuid
-  approvedAt     DateTime? @db.Timestamptz(6)
-  rejectedReason String?
-  cancelledById  String?   @db.Uuid
-  cancelledAt    DateTime? @db.Timestamptz(6)
+  salesOwnerEmpId String?   @db.Uuid
+  submittedById   String?   @db.Uuid
+  submittedAt     DateTime? @db.Timestamptz(6)
+  approvedById    String?   @db.Uuid
+  approvedAt      DateTime? @db.Timestamptz(6)
+  rejectedReason  String?
+  cancelledById   String?   @db.Uuid
+  cancelledAt     DateTime? @db.Timestamptz(6)
 
   version   Int      @default(1)
   createdAt DateTime @default(now()) @db.Timestamptz(6)
@@ -2504,7 +2518,7 @@ model SalesOrder {
 
   legalEntity        LegalEntity                 @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   customer           Party                       @relation("SalesOrderCustomer", fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  salesOwner         Employee?                    @relation("SalesOrderSalesOwner", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  salesOwner         Employee?                   @relation("SalesOrderSalesOwner", fields: [salesOwnerEmpId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   contract           Contract?                   @relation("SalesOrderContract", fields: [contractId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   lines              SalesOrderLine[]
   reservations       InventoryReservation[]
@@ -2630,18 +2644,128 @@ model SalesOrderTransportRequest {
   salesOrderId String                      @unique @db.Uuid
   status       SalesTransportRequestStatus @default(NEW)
 
+  /// Mã chuyến được tạo cùng đơn cước. Một chuyến có thể hiển thị nhiều dòng hàng,
+  /// nhưng doanh thu chỉ lấy từ các dòng có CPVC.
+  tripNo String?
+
   /// Snapshot Sale khai báo lúc gửi đơn; quản lý xe sẽ xác nhận/thay bằng thực tế ở giai đoạn chuyến xe.
   plannedVehiclePlate String?
   plannedDriverName   String?
-  requestedAt         DateTime @default(now()) @db.Timestamptz(6)
+  requestedAt         DateTime  @default(now()) @db.Timestamptz(6)
   acknowledgedAt      DateTime? @db.Timestamptz(6)
+  completedAt         DateTime? @db.Timestamptz(6)
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  salesOrder SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  salesOrder SalesOrder                 @relation(fields: [salesOrderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  actual     SalesOrderTransportActual?
 
   @@index([status, requestedAt])
+}
+
+/// Thông tin thực tế do quản lý xe bổ sung cho từng yêu cầu cước.
+/// Doanh thu cước, chi phí nhiên liệu, tổng chi phí và lãi gộp được tính từ
+/// các trường này, không lưu số tổng để tránh sai lệch khi Sale chỉnh cước.
+model SalesOrderTransportActual {
+  id                 String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  transportRequestId String @unique @db.Uuid
+
+  actualVehiclePlate String?
+  actualDriverName   String?
+  actualTripDate     DateTime? @db.Date
+
+  /// Những số liệu đầu vào đúng theo bảng phụ cấp chi phí theo chuyến.
+  tripDistanceKm        Decimal @default(0) @db.Decimal(24, 3)
+  fuelConsumptionPer100 Decimal @default(0) @db.Decimal(24, 6)
+  fuelConsumedQty       Decimal @default(0) @db.Decimal(24, 6)
+  fuelUnitPrice         Decimal @default(0) @db.Decimal(24, 8)
+  warehouseEntryFee     Decimal @default(0) @db.Decimal(24, 2)
+  tollAndTerminalFee    Decimal @default(0) @db.Decimal(24, 2)
+  portDeliverySurcharge Decimal @default(0) @db.Decimal(24, 2)
+  stationAgencyDutyFee  Decimal @default(0) @db.Decimal(24, 2)
+  portTicketFee         Decimal @default(0) @db.Decimal(24, 2)
+  invoiceIssuanceFee    Decimal @default(0) @db.Decimal(24, 2)
+  driverAllowance       Decimal @default(0) @db.Decimal(24, 2)
+  loadingUnloadingFee   Decimal @default(0) @db.Decimal(24, 2)
+  otherExpense          Decimal @default(0) @db.Decimal(24, 2)
+  note                  String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  transportRequest SalesOrderTransportRequest @relation(fields: [transportRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+}
+
+/// Cấu hình áp dụng theo BKS và ngày hiệu lực. Sale có thể nhập BKS tự do nên
+/// cấu hình dùng biển số thay vì bắt buộc xe phải tồn tại trong danh mục nội bộ.
+model TransportVehicleSetting {
+  id            String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  vehiclePlate  String
+  effectiveFrom DateTime @db.Date
+
+  fuelConsumptionPer100 Decimal @default(0) @db.Decimal(24, 6)
+  fuelUnitPrice         Decimal @default(0) @db.Decimal(24, 8)
+  defaultTripAllowance  Decimal @default(0) @db.Decimal(24, 2)
+
+  note      String?
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([vehiclePlate, effectiveFrom])
+  @@index([vehiclePlate, effectiveFrom])
+}
+
+/// Nhật ký đổ dầu thực tế, tách khỏi định mức phân bổ nhiên liệu theo chuyến.
+model VehicleFuelLog {
+  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  vehiclePlate String
+  fueledAt     DateTime @db.Date
+  odometerKm   Decimal? @db.Decimal(24, 3)
+  liters       Decimal  @db.Decimal(24, 6)
+  unitPrice    Decimal  @db.Decimal(24, 8)
+  amount       Decimal  @db.Decimal(24, 2)
+  fueledBy     String?
+  note         String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([vehiclePlate, fueledAt])
+}
+
+/// Chi phí sửa chữa/thay thế xe; số phân bổ tháng được dùng cho báo cáo hiệu quả xe.
+model VehicleMaintenanceExpense {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  vehiclePlate     String
+  documentDate     DateTime @db.Date
+  description      String
+  amountBeforeTax  Decimal  @default(0) @db.Decimal(24, 2)
+  taxAmount        Decimal  @default(0) @db.Decimal(24, 2)
+  totalAmount      Decimal  @default(0) @db.Decimal(24, 2)
+  invoiceStatus    String?
+  supplierName     String?
+  allocationMonths Int      @default(1)
+  odometerKm       Decimal? @db.Decimal(24, 3)
+  note             String?
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([vehiclePlate, documentDate])
+}
+
+/// Chi phí cố định theo tháng để báo cáo hiệu quả xe không phải nhập lại trên Excel.
+model VehicleMonthlyFixedCost {
+  id               String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  vehiclePlate     String
+  month            DateTime @db.Date
+  depreciationCost Decimal  @default(0) @db.Decimal(24, 2)
+  driverSalaryCost Decimal  @default(0) @db.Decimal(24, 2)
+  note             String?
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([vehiclePlate, month])
+  @@index([month])
 }
 
 /// Phân bổ từng dòng mua cho từng dòng bán đối ứng. Một dòng bán có thể được mua
@@ -3988,15 +4112,15 @@ model BankTransactionPurpose {
 }
 
 model BankAccount {
-  id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  id            String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   /// Legacy accounts may be unmapped during migration; all new accounts are mapped.
   legalEntityId String? @db.Uuid
-  bankCode    String
-  bankName    String?
-  accountNo   String
-  accountName String?
-  currency    String  @default("VND")
-  isActive    Boolean @default(true)
+  bankCode      String
+  bankName      String?
+  accountNo     String
+  accountName   String?
+  currency      String  @default("VND")
+  isActive      Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4005,7 +4129,7 @@ model BankAccount {
   transactions           BankTransaction[]
   termPaymentBatches     TermPaymentBatch[]
   paymentRequestPayments PaymentRequestPayment[]
-  legalEntity            LegalEntity?             @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  legalEntity            LegalEntity?            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@unique([legalEntityId, bankCode, accountNo])
   @@index([legalEntityId, isActive])
@@ -4074,10 +4198,10 @@ model BankTransaction {
   direction BankTxnDirection
   amount    Decimal          @db.Decimal(18, 2)
 
-  source                BankTransactionSource             @default(MANUAL)
+  source                BankTransactionSource @default(MANUAL)
   providerCode          String?
   providerTransactionId String?
-  receivedAt            DateTime?                          @db.Timestamptz(6)
+  receivedAt            DateTime?             @db.Timestamptz(6)
 
   description      String
   counterpartyName String?
@@ -4093,9 +4217,9 @@ model BankTransaction {
   counterpartyId   String?           @db.Uuid
   note             String?
 
-  matchStatus            BankTxnMatchStatus          @default(UNMATCHED)
-  reconciliationStatus   BankTxnReconciliationStatus @default(PENDING)
-  ignoredReason          String?
+  matchStatus          BankTxnMatchStatus          @default(UNMATCHED)
+  reconciliationStatus BankTxnReconciliationStatus @default(PENDING)
+  ignoredReason        String?
 
   raw Json?
 

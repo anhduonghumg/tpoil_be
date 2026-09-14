@@ -461,3 +461,20 @@ export class AdjustLineSupplierDto {
     @IsEnum(SalesOrderSupplySource)
     supplySource?: SalesOrderSupplySource
 }
+
+/** Tham số xem trước công nợ cho đơn sắp lưu (màn nhập đơn gọi trước khi bấm Lưu). */
+export class CreditPreviewQueryDto {
+    @IsUUID()
+    customerPartyId!: string
+
+    /** Tổng tiền đơn đang nhập, đã gồm chiết khấu và VAT. */
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    orderValue!: number
+
+    /** Khi sửa đơn: trừ chính đơn đó ra khỏi exposure để khỏi đếm hai lần. */
+    @IsOptional()
+    @IsUUID()
+    excludeOrderId?: string
+}

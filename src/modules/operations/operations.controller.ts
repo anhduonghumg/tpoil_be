@@ -29,6 +29,11 @@ import {
     UpsertShipFreightRateDto,
     UpsertShippingAgentDto,
     UpsertStorageRentalContractDto,
+    UpsertSalesTransportActualDto,
+    UpsertTransportVehicleSettingDto,
+    UpsertVehicleFuelLogDto,
+    UpsertVehicleMaintenanceExpenseDto,
+    UpsertVehicleMonthlyFixedCostDto,
     UpsertVehicleDispatchDto,
     UpsertVehicleDocumentDto,
     UpsertVehicleDto,
@@ -619,6 +624,90 @@ export class OperationsController {
     @RequirePermissions(PERMISSIONS.operations.roadManage)
     acknowledgeSalesTransportRequest(@Param('id') id: string) {
         return this.road.acknowledgeSalesTransportRequest(id)
+    }
+
+    @Put('sales-transport-requests/:id/actual')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    saveSalesTransportActual(@Param('id') id: string, @Body() dto: UpsertSalesTransportActualDto) {
+        return this.road.saveSalesTransportActual(id, dto)
+    }
+
+    @Get('transport-vehicle-settings')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    transportVehicleSettings(@Query() q: PageQueryDto) {
+        return this.road.listTransportVehicleSettings(q)
+    }
+
+    @Post('transport-vehicle-settings')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    createTransportVehicleSetting(@Body() dto: UpsertTransportVehicleSettingDto) {
+        return this.road.saveTransportVehicleSetting(dto)
+    }
+
+    @Put('transport-vehicle-settings/:id')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    updateTransportVehicleSetting(@Param('id') id: string, @Body() dto: UpsertTransportVehicleSettingDto) {
+        return this.road.saveTransportVehicleSetting(dto, id)
+    }
+
+    @Get('vehicle-fuel-logs')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    vehicleFuelLogs(@Query() q: PageQueryDto) {
+        return this.road.listVehicleFuelLogs(q)
+    }
+
+    @Post('vehicle-fuel-logs')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    createVehicleFuelLog(@Body() dto: UpsertVehicleFuelLogDto) {
+        return this.road.saveVehicleFuelLog(dto)
+    }
+
+    @Put('vehicle-fuel-logs/:id')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    updateVehicleFuelLog(@Param('id') id: string, @Body() dto: UpsertVehicleFuelLogDto) {
+        return this.road.saveVehicleFuelLog(dto, id)
+    }
+
+    @Get('vehicle-maintenance-expenses')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    vehicleMaintenanceExpenses(@Query() q: PageQueryDto) {
+        return this.road.listVehicleMaintenanceExpenses(q)
+    }
+
+    @Post('vehicle-maintenance-expenses')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    createVehicleMaintenanceExpense(@Body() dto: UpsertVehicleMaintenanceExpenseDto) {
+        return this.road.saveVehicleMaintenanceExpense(dto)
+    }
+
+    @Put('vehicle-maintenance-expenses/:id')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    updateVehicleMaintenanceExpense(@Param('id') id: string, @Body() dto: UpsertVehicleMaintenanceExpenseDto) {
+        return this.road.saveVehicleMaintenanceExpense(dto, id)
+    }
+
+    @Get('vehicle-monthly-fixed-costs')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    vehicleMonthlyFixedCosts(@Query() q: PageQueryDto) {
+        return this.road.listVehicleMonthlyFixedCosts(q)
+    }
+
+    @Post('vehicle-monthly-fixed-costs')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    createVehicleMonthlyFixedCost(@Body() dto: UpsertVehicleMonthlyFixedCostDto) {
+        return this.road.saveVehicleMonthlyFixedCost(dto)
+    }
+
+    @Put('vehicle-monthly-fixed-costs/:id')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    updateVehicleMonthlyFixedCost(@Param('id') id: string, @Body() dto: UpsertVehicleMonthlyFixedCostDto) {
+        return this.road.saveVehicleMonthlyFixedCost(dto, id)
+    }
+
+    @Get('vehicle-efficiency-report')
+    @RequirePermissions(PERMISSIONS.operations.roadManage)
+    vehicleEfficiencyReport(@Query() q: PageQueryDto & { from?: string; to?: string; vehiclePlate?: string }) {
+        return this.road.vehicleEfficiencyReport(q)
     }
 
     @Get('vehicle-dispatches')
