@@ -1,3 +1,5 @@
+// Phải đứng đầu: cố định múi giờ Việt Nam trước khi bất kỳ module nào tạo Date.
+import './common/timezone'
 import { NestFactory } from '@nestjs/core'
 import { Logger } from 'nestjs-pino'
 import { BadRequestException, ValidationPipe } from '@nestjs/common'

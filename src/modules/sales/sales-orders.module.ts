@@ -21,6 +21,8 @@ import { SalesLotService } from './sales-lot.service'
 import { SalesWithdrawalsService } from './sales-withdrawals.service'
 import { ReceivablesController } from './receivables.controller'
 import { ReceivablesService } from './receivables.service'
+import { ReceivableInterestController } from './receivable-interest.controller'
+import { ReceivableInterestService } from './receivable-interest.service'
 import { SalesCreditController } from './sales-credit.controller'
 import { SalesCreditService } from './sales-credit.service'
 import { SalesOrderPrintService } from './sales-order-print.service'
@@ -67,6 +69,7 @@ import { SalesReceivableOverdueNotificationService } from './sales-receivable-ov
         SalesAliasController,
         SalesQuickEntryController,
         ReceivablesController,
+        ReceivableInterestController,
         SalesCreditController,
         SalesDiscountController,
         SalesOrderAdjustmentsController,
@@ -90,6 +93,7 @@ import { SalesReceivableOverdueNotificationService } from './sales-receivable-ov
         SalesLotService,
         SalesWithdrawalsService,
         ReceivablesService,
+        ReceivableInterestService,
         SalesCreditService,
         SalesDiscountService,
         PartyMerchantService,

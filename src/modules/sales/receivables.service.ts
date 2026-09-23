@@ -3,6 +3,8 @@ import {
     BankTxnDirection,
     BankTxnMatchStatus,
     BankTxnReconciliationStatus,
+    CollectionPlanStatus,
+    CustomerReceiptStatus,
     PayableOpenItemStatus,
     Prisma,
     ReceivableAllocationStatus,
@@ -15,8 +17,17 @@ import { ScopedActor } from './sales-warehouse-scope.service'
 import {
     AllocateReceivableDto,
     AllocateBankReceiptDto,
+    CarryForwardCollectionPlanDto,
+    CreateCollectionPlanDto,
+    CreateCustomerReceiptDto,
+    CreditManagementQueryDto,
+    ListCollectionPlansQueryDto,
+    ListCustomerReceiptsQueryDto,
     ListReceivablesQueryDto,
     PartyDebtQueryDto,
+    BankReceiptFifoItemDto,
+    PostBankReceiptsFifoDto,
+    ReverseReceiptDto,
 } from './dto/receivable.dto'
 
 const openStatuses: ReceivableOpenItemStatus[] = [
@@ -540,81 +551,216 @@ export class ReceivablesService {
     }
 
     /** Undoes an allocation with a counter-entry; the original rows stay untouched. */
-    async reverseAllocation(allocationId: string, actor: ScopedActor) {
-        const openItemId = await this.prisma.$transaction(async (tx) => {
-            const allocation = await tx.receivableAllocation.findUnique({
-                where: { id: allocationId },
+    /**
+     * Đảo một bút phân bổ. Bút thuộc một khoản thu FIFO thì đảo cả khoản thu: FIFO trải tiền ra
+     * nhiều khoản phải thu, đảo lẻ một bút sẽ để khoản thu trừ dở mà không ghi nhận lại được.
+     */
+    async reverseAllocation(allocationId: string, actor: ScopedActor, dto: ReverseReceiptDto = {}) {
+        const found = await this.prisma.receivableAllocation.findUnique({
+            where: { id: allocationId },
+            select: { customerReceiptId: true, openItemId: true },
+        })
+        if (!found) throw new NotFoundException('RECEIVABLE_ALLOCATION_NOT_FOUND')
+        if (found.customerReceiptId) {
+            await this.reverseCustomerReceipt(found.customerReceiptId, dto, actor)
+            return this.detail(found.openItemId)
+        }
+        await this.prisma.$transaction(async (tx) => {
+            const allocation = await tx.receivableAllocation.findUnique({ where: { id: allocationId }, include: { openItem: true } })
+            if (!allocation) throw new NotFoundException('RECEIVABLE_ALLOCATION_NOT_FOUND')
+            if (allocation.bankTransactionId) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'bank:' + allocation.bankTransactionId}))`
+            await this.reverseAllocationInTx(tx, allocation, actor, dto.mode ?? 'CORRECTION')
+            if (allocation.bankTransactionId) await this.syncBankTransactionAfterReversal(tx, allocation.bankTransactionId)
+        })
+        return this.detail(found.openItemId)
+    }
+
+    /**
+     * Đảo cả một khoản thu, đồng bộ mọi thứ phụ thuộc trong một giao dịch:
+     *   bút phân bổ + sổ công nợ → khoản thu REVERSED → gỡ khỏi dòng sao kê, trả dòng về hàng
+     *   đợi → mở lại kế hoạch thu nếu tiền đã thu không còn đủ.
+     */
+    async reverseCustomerReceipt(id: string, dto: ReverseReceiptDto, actor: ScopedActor) {
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'customer-receipt:' + id}))`
+            const receipt = await tx.customerReceipt.findUnique({
+                where: { id },
+                include: { allocations: { where: { status: ReceivableAllocationStatus.ACTIVE }, include: { openItem: true } } },
+            })
+            if (!receipt) throw new NotFoundException('CUSTOMER_RECEIPT_NOT_FOUND')
+            if (receipt.status === CustomerReceiptStatus.REVERSED) {
+                throw new BadRequestException({ code: 'CUSTOMER_RECEIPT_ALREADY_REVERSED', message: 'Khoản thu này đã được đảo.' })
+            }
+            if (receipt.bankTransactionId) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'bank:' + receipt.bankTransactionId}))`
+
+            for (const allocation of receipt.allocations) {
+                await this.reverseAllocationInTx(tx, allocation, actor, dto.mode ?? 'CORRECTION')
+            }
+            const reason = dto.reason?.trim() || 'Đảo khoản thu'
+            await tx.customerReceipt.update({
+                where: { id },
+                data: {
+                    status: CustomerReceiptStatus.REVERSED,
+                    reversedAt: new Date(),
+                    reversedById: actor.userId,
+                    // Mỗi dòng sao kê chỉ gắn được một khoản thu: gỡ ra để dòng đó ghi nhận lại được.
+                    bankTransactionId: null,
+                    note: [receipt.note, `[Đảo ${new Date().toLocaleDateString('vi-VN')}] ${reason}`].filter(Boolean).join('\n'),
+                },
+            })
+            if (receipt.bankTransactionId) await this.syncBankTransactionAfterReversal(tx, receipt.bankTransactionId)
+            await this.reopenCollectionPlan(tx, receipt.collectionPlanId)
+            return { id, status: CustomerReceiptStatus.REVERSED, reversedAllocations: receipt.allocations.length, bankTransactionId: receipt.bankTransactionId }
+        })
+    }
+
+    /** Nút "Đảo ghi nhận" trên dòng sao kê: đảo khoản thu FIFO, hoặc mọi bút phân bổ tay của dòng. */
+    async reverseBankReceipt(bankTransactionId: string, dto: ReverseReceiptDto, actor: ScopedActor) {
+        const bankTransaction = await this.prisma.bankTransaction.findUnique({
+            where: { id: bankTransactionId },
+            select: { id: true, customerReceipt: { select: { id: true } } },
+        })
+        if (!bankTransaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        if (bankTransaction.customerReceipt) return this.reverseCustomerReceipt(bankTransaction.customerReceipt.id, dto, actor)
+
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'bank:' + bankTransactionId}))`
+            const allocations = await tx.receivableAllocation.findMany({
+                where: { bankTransactionId, status: ReceivableAllocationStatus.ACTIVE },
                 include: { openItem: true },
             })
-            if (!allocation) throw new NotFoundException('RECEIVABLE_ALLOCATION_NOT_FOUND')
-            if (allocation.status !== ReceivableAllocationStatus.ACTIVE) {
-                throw new BadRequestException({
-                    code: 'ALLOCATION_NOT_ACTIVE',
-                    message: 'Phân bổ này đã được đảo.',
-                })
+            if (!allocations.length) {
+                throw new BadRequestException({ code: 'NOTHING_TO_REVERSE', message: 'Giao dịch này chưa được ghi nhận vào công nợ.' })
             }
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'receivable:' + allocation.openItemId}))`
-
-            const reversal = await tx.receivableAllocation.create({
-                data: {
-                    bankTransactionId: allocation.bankTransactionId,
-                    openItemId: allocation.openItemId,
-                    amountInBankCurrency: allocation.amountInBankCurrency.negated(),
-                    amountInItemCurrency: allocation.amountInItemCurrency.negated(),
-                    fxRate: allocation.fxRate,
-                    status: ReceivableAllocationStatus.REVERSED,
-                    reversalOfId: allocation.id,
-                    idempotencyKey: `receivable-alloc-reverse:${allocation.id}`,
-                    allocatedById: actor.userId,
-                    allocatedAt: new Date(),
-                },
-            })
-            await tx.receivableAllocation.update({
-                where: { id: allocation.id },
-                data: { status: ReceivableAllocationStatus.REVERSED },
-            })
-
-            const originalEntry = await tx.receivableLedgerEntry.findFirst({
-                where: { allocationId: allocation.id },
-            })
-            await tx.receivableLedgerEntry.create({
-                data: {
-                    openItemId: allocation.openItemId,
-                    type: ReceivableEntryType.REVERSAL,
-                    amountDelta: allocation.amountInItemCurrency,
-                    allocationId: reversal.id,
-                    reversalOfId: originalEntry?.id ?? null,
-                    idempotencyKey: `receivable-reverse:${allocation.id}`,
-                    effectiveAt: new Date(),
-                },
-            })
-
-            const outstandingAmount = new Prisma.Decimal(allocation.openItem.outstandingAmount).plus(
-                allocation.amountInItemCurrency,
-            )
-            await tx.receivableOpenItem.update({
-                where: { id: allocation.openItemId },
-                data: {
-                    outstandingAmount,
-                    status: outstandingAmount.equals(allocation.openItem.originalAmount)
-                        ? ReceivableOpenItemStatus.OPEN
-                        : ReceivableOpenItemStatus.PARTIALLY_SETTLED,
-                    version: { increment: 1 },
-                },
-            })
-            await this.events.record(tx, {
-                entityType: 'SALES_ORDER',
-                entityId:
-                    allocation.openItem.salesOrderId ??
-                    allocation.openItem.withdrawalRequestId ??
-                    allocation.openItemId,
-                eventType: 'RECEIVABLE_RECEIPT_REVERSED',
-                actorId: actor.userId,
-                metadata: { allocationId: allocation.id },
-            })
-            return allocation.openItemId
+            for (const allocation of allocations) await this.reverseAllocationInTx(tx, allocation, actor, dto.mode ?? 'CORRECTION')
+            await this.syncBankTransactionAfterReversal(tx, bankTransactionId)
+            return { bankTransactionId, reversedAllocations: allocations.length }
         })
-        return this.detail(openItemId)
+    }
+
+    /**
+     * Một bút đảo: bút phân bổ âm, bút sổ REVERSAL, trả số dư khoản phải thu.
+     *   - CORRECTION: lấy ngày của bút gốc → sổ và lãi công nợ như chưa từng ghi nhầm.
+     *   - BANK_REVERSAL: lấy ngày hôm nay → khoảng giữa công ty đã thật sự cầm tiền.
+     */
+    private async reverseAllocationInTx(
+        tx: Prisma.TransactionClient,
+        allocation: Prisma.ReceivableAllocationGetPayload<{ include: { openItem: true } }>,
+        actor: ScopedActor,
+        mode: 'CORRECTION' | 'BANK_REVERSAL',
+    ) {
+        if (allocation.status !== ReceivableAllocationStatus.ACTIVE) {
+            throw new BadRequestException({ code: 'ALLOCATION_NOT_ACTIVE', message: 'Phân bổ này đã được đảo.' })
+        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'receivable:' + allocation.openItemId}))`
+        const openItem = await tx.receivableOpenItem.findUniqueOrThrow({ where: { id: allocation.openItemId } })
+        const effectiveAt = mode === 'CORRECTION' ? (allocation.effectiveAt ?? allocation.allocatedAt) : new Date()
+
+        const reversal = await tx.receivableAllocation.create({
+            data: {
+                bankTransactionId: allocation.bankTransactionId,
+                customerReceiptId: allocation.customerReceiptId,
+                openItemId: allocation.openItemId,
+                amountInBankCurrency: allocation.amountInBankCurrency.negated(),
+                amountInItemCurrency: allocation.amountInItemCurrency.negated(),
+                fxRate: allocation.fxRate,
+                status: ReceivableAllocationStatus.REVERSED,
+                reversalOfId: allocation.id,
+                idempotencyKey: `receivable-alloc-reverse:${allocation.id}`,
+                allocatedById: actor.userId,
+                effectiveAt,
+                allocatedAt: new Date(),
+            },
+        })
+        await tx.receivableAllocation.update({
+            where: { id: allocation.id },
+            data: {
+                status: ReceivableAllocationStatus.REVERSED,
+                // Giải phóng khóa chống trùng: không thì phân bổ lại đúng như cũ sẽ bị coi là
+                // "đã xử lý rồi" và bỏ qua mà không ghi gì.
+                idempotencyKey: `${allocation.idempotencyKey}#reversed`,
+            },
+        })
+
+        const originalEntry = await tx.receivableLedgerEntry.findFirst({ where: { allocationId: allocation.id } })
+        await tx.receivableLedgerEntry.create({
+            data: {
+                openItemId: allocation.openItemId,
+                type: ReceivableEntryType.REVERSAL,
+                amountDelta: allocation.amountInItemCurrency,
+                allocationId: reversal.id,
+                reversalOfId: originalEntry?.id ?? null,
+                idempotencyKey: `receivable-reverse:${allocation.id}`,
+                effectiveAt,
+            },
+        })
+
+        const outstandingAmount = new Prisma.Decimal(openItem.outstandingAmount).plus(allocation.amountInItemCurrency)
+        await tx.receivableOpenItem.update({
+            where: { id: allocation.openItemId },
+            data: {
+                outstandingAmount,
+                status: outstandingAmount.greaterThanOrEqualTo(openItem.originalAmount)
+                    ? ReceivableOpenItemStatus.OPEN
+                    : ReceivableOpenItemStatus.PARTIALLY_SETTLED,
+                version: { increment: 1 },
+            },
+        })
+        await this.events.record(tx, {
+            entityType: 'SALES_ORDER',
+            entityId: openItem.salesOrderId ?? openItem.withdrawalRequestId ?? allocation.openItemId,
+            eventType: 'RECEIVABLE_RECEIPT_REVERSED',
+            actorId: actor.userId,
+            metadata: { allocationId: allocation.id, mode, customerReceiptId: allocation.customerReceiptId },
+        })
+    }
+
+    /** Trạng thái dòng sao kê theo số tiền còn phân bổ sau khi đảo; hết thì trả về hàng đợi. */
+    private async syncBankTransactionAfterReversal(tx: Prisma.TransactionClient, bankTransactionId: string) {
+        const [transaction, active] = await Promise.all([
+            tx.bankTransaction.findUniqueOrThrow({ where: { id: bankTransactionId }, select: { amount: true, customerReceipt: { select: { id: true } } } }),
+            tx.receivableAllocation.aggregate({
+                where: { bankTransactionId, status: ReceivableAllocationStatus.ACTIVE },
+                _sum: { amountInBankCurrency: true },
+            }),
+        ])
+        const allocated = new Prisma.Decimal(active._sum.amountInBankCurrency ?? 0)
+        if (allocated.isZero() && !transaction.customerReceipt) {
+            await tx.bankTransaction.update({
+                where: { id: bankTransactionId },
+                data: {
+                    matchStatus: BankTxnMatchStatus.UNMATCHED,
+                    reconciliationStatus: BankTxnReconciliationStatus.PENDING,
+                    isConfirmed: false,
+                    confirmedAt: null,
+                    confirmedBy: null,
+                    counterpartyType: null,
+                    counterpartyId: null,
+                },
+            })
+            return
+        }
+        const full = allocated.greaterThanOrEqualTo(new Prisma.Decimal(transaction.amount).abs())
+        await tx.bankTransaction.update({
+            where: { id: bankTransactionId },
+            data: {
+                matchStatus: full ? BankTxnMatchStatus.MANUAL_MATCHED : BankTxnMatchStatus.PARTIAL_MATCHED,
+                reconciliationStatus: full ? BankTxnReconciliationStatus.ALLOCATED : BankTxnReconciliationStatus.PARTIALLY_ALLOCATED,
+            },
+        })
+    }
+
+    /** Kế hoạch đã "hoàn thành" mà tiền thu không còn đủ (do đảo) thì quay lại đang theo dõi. */
+    private async reopenCollectionPlan(tx: Prisma.TransactionClient, planId: string | null) {
+        if (!planId) return
+        const plan = await tx.customerCollectionPlan.findUnique({
+            where: { id: planId },
+            include: { receipts: { select: { amount: true, status: true } } },
+        })
+        if (!plan || plan.status !== CollectionPlanStatus.COMPLETED) return
+        if (this.receiptTotal(plan.receipts).lessThan(new Prisma.Decimal(plan.plannedAmount))) {
+            await tx.customerCollectionPlan.update({ where: { id: planId }, data: { status: CollectionPlanStatus.ACTIVE, completedAt: null } })
+        }
     }
 
     async detail(openItemId: string) {
@@ -655,6 +801,8 @@ export class ReceivablesService {
         const limit = Math.min(Math.max(query.limit ?? 20, 1), 100)
         const where: Prisma.ReceivableOpenItemWhereInput = {
             customerPartyId: query.customerPartyId ?? undefined,
+            // Lọc theo kế toán phụ trách khách (Party.accountingOwnerEmpId).
+            ...(query.accountingOwnerEmpId ? { customer: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
             status: query.status
                 ? (query.status as ReceivableOpenItemStatus)
                 : query.onlyOpen
@@ -768,7 +916,7 @@ export class ReceivablesService {
             byCustomer.set(key, row)
         }
         return {
-            asOf: asOfDay.toISOString().slice(0, 10),
+            asOf: this.dayKey(asOfDay),
             items: [...byCustomer.values()].map((row) => ({
                 customer: row.customer,
                 CURRENT: row.CURRENT.toString(),
@@ -850,8 +998,8 @@ export class ReceivablesService {
             .filter((item) => item.dueDate && item.dueDate < today)
             .reduce((sum, row) => sum.plus(row.outstandingAmount), new Prisma.Decimal(0))
         return {
-            fromDate: fromDate.toISOString().slice(0, 10),
-            toDate: toDate.toISOString().slice(0, 10),
+            fromDate: this.dayKey(fromDate),
+            toDate: this.dayKey(toDate),
             totals: {
                 collectedAmount: totalCollected.toString(),
                 outstandingAmount: totalOutstanding.toString(),
@@ -859,6 +1007,776 @@ export class ReceivablesService {
             },
             bySalesOwner: serialize(sales),
             byAccountant: serialize(accountants),
+        }
+    }
+
+    private period(fromDateText?: string, toDateText?: string) {
+        const today = startOfToday()
+        const from = fromDateText ? new Date(`${fromDateText}T00:00:00`) : today
+        const toDay = toDateText ? new Date(`${toDateText}T00:00:00`) : today
+        if (Number.isNaN(from.getTime()) || Number.isNaN(toDay.getTime()) || from > toDay) {
+            throw new BadRequestException({ code: 'REPORT_PERIOD_INVALID', message: 'Khoảng thời gian báo cáo không hợp lệ.' })
+        }
+        const to = new Date(toDay)
+        to.setHours(23, 59, 59, 999)
+        // Mốc from/to dựng theo giờ địa phương (đã cố định là giờ VN), nên chuỗi ngày cũng phải đọc
+        // theo giờ địa phương — toISOString lấy ngày UTC, dưới múi +7 sẽ lùi mất một ngày.
+        return { from, to, fromText: this.dayKey(from), toText: this.dayKey(toDay) }
+    }
+
+    private receiptTotal(receipts: Array<{ amount: Prisma.Decimal; status: CustomerReceiptStatus }>) {
+        return receipts
+            .filter((receipt) => receipt.status === CustomerReceiptStatus.CONFIRMED || receipt.status === CustomerReceiptStatus.RECONCILED)
+            .reduce((sum, receipt) => sum.plus(receipt.amount), new Prisma.Decimal(0))
+    }
+
+    private collectionPlanView(plan: any) {
+        const actualAmount = this.receiptTotal(plan.receipts ?? [])
+        const plannedAmount = new Prisma.Decimal(plan.plannedAmount)
+        const completedAmount = Prisma.Decimal.min(actualAmount, plannedAmount)
+        return {
+            ...plan,
+            plannedAmount: plannedAmount.toString(),
+            actualAmount: actualAmount.toString(),
+            remainingAmount: Prisma.Decimal.max(plannedAmount.minus(actualAmount), 0).toString(),
+            excessAmount: Prisma.Decimal.max(actualAmount.minus(plannedAmount), 0).toString(),
+            completionRate: plannedAmount.isZero() ? null : completedAmount.div(plannedAmount).mul(100).toDecimalPlaces(2).toString(),
+        }
+    }
+
+    async collectionPlans(query: ListCollectionPlansQueryDto) {
+        const { from, to } = this.period(query.fromDate, query.toDate)
+        const plans = await this.prisma.customerCollectionPlan.findMany({
+            where: {
+                customerPartyId: query.customerPartyId ?? undefined,
+                plannedDate: { gte: from, lte: to },
+                status: query.status ?? undefined,
+            },
+            include: {
+                customer: { select: { id: true, code: true, name: true } },
+                receipts: { select: { id: true, amount: true, status: true, receivedAt: true } },
+            },
+            orderBy: [{ plannedDate: 'asc' }, { createdAt: 'asc' }],
+        })
+        return { fromDate: this.dayKey(from), toDate: this.dayKey(to), items: plans.map((plan) => this.collectionPlanView(plan)) }
+    }
+
+    async createCollectionPlan(dto: CreateCollectionPlanDto, actor: ScopedActor) {
+        const plannedDate = new Date(`${dto.plannedDate}T00:00:00`)
+        if (Number.isNaN(plannedDate.getTime())) throw new BadRequestException('COLLECTION_PLAN_DATE_INVALID')
+        const customer = await this.prisma.party.findUnique({ where: { id: dto.customerPartyId }, select: { id: true } })
+        if (!customer) throw new NotFoundException('CUSTOMER_NOT_FOUND')
+        return this.prisma.customerCollectionPlan.create({
+            data: {
+                customerPartyId: dto.customerPartyId,
+                plannedDate,
+                plannedAmount: new Prisma.Decimal(dto.plannedAmount),
+                confirmationNote: dto.confirmationNote?.trim() || null,
+                note: dto.note?.trim() || null,
+                createdById: actor.userId,
+            },
+        })
+    }
+
+    async carryForwardCollectionPlan(id: string, dto: CarryForwardCollectionPlanDto, actor: ScopedActor) {
+        const plannedDate = new Date(`${dto.plannedDate}T00:00:00`)
+        if (Number.isNaN(plannedDate.getTime())) throw new BadRequestException('COLLECTION_PLAN_DATE_INVALID')
+        return this.prisma.$transaction(async (tx) => {
+            const plan = await tx.customerCollectionPlan.findUnique({
+                where: { id },
+                include: { receipts: { select: { amount: true, status: true } } },
+            })
+            if (!plan) throw new NotFoundException('COLLECTION_PLAN_NOT_FOUND')
+            if (plan.status !== CollectionPlanStatus.ACTIVE) {
+                throw new BadRequestException({ code: 'COLLECTION_PLAN_NOT_ACTIVE', message: 'Chỉ kế hoạch đang theo dõi mới được hẹn lại.' })
+            }
+            const remaining = new Prisma.Decimal(plan.plannedAmount).minus(this.receiptTotal(plan.receipts))
+            const amount = new Prisma.Decimal(dto.amount ?? remaining)
+            if (!remaining.greaterThan(0) || !amount.greaterThan(0) || !amount.equals(remaining)) {
+                throw new BadRequestException({ code: 'COLLECTION_PLAN_CARRY_AMOUNT_INVALID', message: 'Số tiền hẹn lại phải bằng đúng phần còn thiếu để không làm mất kế hoạch cũ.' })
+            }
+            await tx.customerCollectionPlan.update({ where: { id }, data: { status: CollectionPlanStatus.CARRIED_FORWARD } })
+            return tx.customerCollectionPlan.create({
+                data: {
+                    customerPartyId: plan.customerPartyId,
+                    plannedDate,
+                    plannedAmount: amount,
+                    status: CollectionPlanStatus.ACTIVE,
+                    parentPlanId: id,
+                    confirmationNote: dto.confirmationNote?.trim() || null,
+                    note: dto.note?.trim() || null,
+                    createdById: actor.userId,
+                },
+            })
+        })
+    }
+
+    async customerReceipts(query: ListCustomerReceiptsQueryDto) {
+        const { from, to } = this.period(query.fromDate, query.toDate)
+        return this.prisma.customerReceipt.findMany({
+            where: {
+                customerPartyId: query.customerPartyId ?? undefined,
+                status: query.status ?? undefined,
+                receivedAt: { gte: from, lte: to },
+            },
+            include: {
+                customer: { select: { id: true, code: true, name: true } },
+                collectionPlan: { select: { id: true, plannedDate: true, plannedAmount: true } },
+                bankTransaction: { select: { id: true, txnDate: true, valueDate: true, description: true } },
+                allocations: { where: { status: ReceivableAllocationStatus.ACTIVE }, select: { amountInItemCurrency: true } },
+            },
+            orderBy: [{ receivedAt: 'desc' }, { createdAt: 'desc' }],
+        })
+    }
+
+    async createCustomerReceipt(dto: CreateCustomerReceiptDto, actor: ScopedActor) {
+        const receivedAt = new Date(dto.receivedAt)
+        if (Number.isNaN(receivedAt.getTime())) throw new BadRequestException('CUSTOMER_RECEIPT_DATE_INVALID')
+        const customer = await this.prisma.party.findUnique({ where: { id: dto.customerPartyId }, select: { id: true } })
+        if (!customer) throw new NotFoundException('CUSTOMER_NOT_FOUND')
+        if (dto.collectionPlanId) {
+            const plan = await this.prisma.customerCollectionPlan.findUnique({ where: { id: dto.collectionPlanId }, select: { customerPartyId: true } })
+            if (!plan) throw new NotFoundException('COLLECTION_PLAN_NOT_FOUND')
+            if (plan.customerPartyId !== dto.customerPartyId) {
+                throw new BadRequestException({ code: 'COLLECTION_PLAN_CUSTOMER_MISMATCH', message: 'Kế hoạch thu không thuộc khách hàng này.' })
+            }
+        }
+        return this.prisma.customerReceipt.create({
+            data: {
+                customerPartyId: dto.customerPartyId,
+                collectionPlanId: dto.collectionPlanId ?? null,
+                amount: new Prisma.Decimal(dto.amount),
+                currency: (dto.currency ?? 'VND').toUpperCase(),
+                receivedAt,
+                transferReference: dto.transferReference?.trim() || null,
+                evidenceReference: dto.evidenceReference?.trim() || null,
+                note: dto.note?.trim() || null,
+                reportedById: actor.userId,
+            },
+        })
+    }
+
+    private async refreshCollectionPlan(tx: Prisma.TransactionClient, planId: string | null) {
+        if (!planId) return
+        const plan = await tx.customerCollectionPlan.findUnique({
+            where: { id: planId },
+            include: { receipts: { select: { amount: true, status: true } } },
+        })
+        if (!plan || plan.status !== CollectionPlanStatus.ACTIVE) return
+        if (this.receiptTotal(plan.receipts).greaterThanOrEqualTo(new Prisma.Decimal(plan.plannedAmount))) {
+            await tx.customerCollectionPlan.update({ where: { id: planId }, data: { status: CollectionPlanStatus.COMPLETED, completedAt: new Date() } })
+        }
+    }
+
+    /**
+     * Confirms money after the bank-account owner has checked it. Allocation is FIFO only as
+     * an internal accounting detail; the accountant never needs to choose an order.
+     */
+    async confirmCustomerReceipt(id: string, actor: ScopedActor) {
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'customer-receipt:' + id}))`
+            const receipt = await tx.customerReceipt.findUnique({ where: { id } })
+            if (!receipt) throw new NotFoundException('CUSTOMER_RECEIPT_NOT_FOUND')
+            if (receipt.status === CustomerReceiptStatus.CONFIRMED || receipt.status === CustomerReceiptStatus.RECONCILED) return receipt
+            if (receipt.status !== CustomerReceiptStatus.REPORTED) {
+                throw new BadRequestException({ code: 'CUSTOMER_RECEIPT_NOT_CONFIRMABLE', message: 'Khoản thu không ở trạng thái chờ xác nhận.' })
+            }
+
+            const remaining = await this.applyReceiptFifo(tx, receipt, actor, null)
+            const confirmed = await tx.customerReceipt.update({
+                where: { id },
+                data: { status: CustomerReceiptStatus.CONFIRMED, confirmedAt: new Date(), confirmedById: actor.userId },
+            })
+            await this.refreshCollectionPlan(tx, receipt.collectionPlanId)
+            return { ...confirmed, appliedAmount: new Prisma.Decimal(receipt.amount).minus(remaining).toString(), unappliedAmount: remaining.toString() }
+        })
+    }
+
+    /**
+     * Trừ một khoản thu vào công nợ khách theo FIFO: khoản phải thu có hạn sớm nhất trước, cùng
+     * hạn thì khoản lập trước. Trả về phần tiền chưa trừ được (khách trả thừa).
+     * `bankTransactionId` có thì gắn luôn vào bút phân bổ, để dòng sao kê hiện đúng số đã phân bổ.
+     *
+     * `legalEntity` là pháp nhân của tài khoản nhận tiền — tiền về tài khoản pháp nhân A chỉ được
+     * trừ nợ của pháp nhân A (cùng quy tắc với phân bổ tay ở allocateBankReceipt):
+     *   - `undefined`: không có dòng sao kê (sale báo, kế toán xác nhận) → giữ cách cũ.
+     *   - `{ id }`: chỉ trừ khoản phải thu của đúng pháp nhân đó.
+     *   - `{ id: null }`: tài khoản chưa khai pháp nhân → chỉ cho trừ khi khách chỉ nợ ở MỘT
+     *     pháp nhân; nợ ở nhiều pháp nhân thì dừng, vì không biết tiền này của pháp nhân nào.
+     */
+    private async applyReceiptFifo(
+        tx: Prisma.TransactionClient,
+        receipt: { id: string; customerPartyId: string; currency: string; amount: Prisma.Decimal | number | string; receivedAt: Date },
+        actor: ScopedActor,
+        bankTransactionId: string | null,
+        legalEntity?: { id: string | null },
+    ) {
+        // One customer lock prevents two confirmations from allocating the same outstanding balance.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'receivable-customer:' + receipt.customerPartyId + ':' + receipt.currency}))`
+        const openItems = await tx.receivableOpenItem.findMany({
+            where: {
+                customerPartyId: receipt.customerPartyId,
+                currency: receipt.currency,
+                settlementType: 'RECEIVABLE',
+                status: { in: openStatuses },
+                ...(legalEntity?.id ? { legalEntityId: legalEntity.id } : {}),
+            },
+            orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+        })
+        if (legalEntity && !legalEntity.id && new Set(openItems.map((item) => item.legalEntityId)).size > 1) {
+            throw new BadRequestException({
+                code: 'BANK_ACCOUNT_LEGAL_ENTITY_REQUIRED',
+                message: 'Khách đang có công nợ ở nhiều pháp nhân nhưng tài khoản nhận tiền chưa khai pháp nhân. Khai pháp nhân cho tài khoản ở màn Tài khoản công ty rồi ghi nhận lại.',
+            })
+        }
+
+        let remaining = new Prisma.Decimal(receipt.amount)
+        for (const item of openItems) {
+            if (!remaining.greaterThan(0)) break
+            const outstanding = new Prisma.Decimal(item.outstandingAmount)
+            const amount = Prisma.Decimal.min(remaining, outstanding)
+            const allocation = await tx.receivableAllocation.create({
+                data: {
+                    customerReceiptId: receipt.id,
+                    bankTransactionId,
+                    openItemId: item.id,
+                    amountInBankCurrency: amount,
+                    amountInItemCurrency: amount,
+                    fxRate: new Prisma.Decimal(1),
+                    idempotencyKey: `customer-receipt:${receipt.id}:${item.id}`,
+                    allocatedById: actor.userId,
+                    effectiveAt: receipt.receivedAt,
+                    allocatedAt: new Date(),
+                },
+            })
+            await tx.receivableLedgerEntry.create({
+                data: {
+                    openItemId: item.id,
+                    type: ReceivableEntryType.RECEIPT,
+                    amountDelta: amount.negated(),
+                    allocationId: allocation.id,
+                    idempotencyKey: `receivable-receipt:${allocation.id}`,
+                    effectiveAt: receipt.receivedAt,
+                },
+            })
+            const newOutstanding = outstanding.minus(amount)
+            await tx.receivableOpenItem.update({
+                where: { id: item.id },
+                data: {
+                    outstandingAmount: newOutstanding,
+                    status: newOutstanding.isZero() ? ReceivableOpenItemStatus.SETTLED : ReceivableOpenItemStatus.PARTIALLY_SETTLED,
+                    version: { increment: 1 },
+                },
+            })
+            remaining = remaining.minus(amount)
+        }
+        return remaining
+    }
+
+    /**
+     * Ghi nhận hàng loạt dòng tiền về vào công nợ khách (màn Thu tiền). Mỗi dòng chạy trong một
+     * giao dịch riêng: một dòng lỗi (đã có người ghi nhận, sai số tiền…) không chặn các dòng khác.
+     */
+    async postBankReceiptsFifo(dto: PostBankReceiptsFifoDto, actor: ScopedActor) {
+        const results: Array<{ bankTransactionId: string; ok: boolean; appliedAmount?: string; unappliedAmount?: string; message?: string }> = []
+        for (const item of dto.items) {
+            try {
+                results.push({ bankTransactionId: item.bankTransactionId, ok: true, ...(await this.postBankReceiptFifo(item, actor)) })
+            } catch (error: any) {
+                const response = error?.response
+                results.push({ bankTransactionId: item.bankTransactionId, ok: false, message: response?.message ?? error?.message ?? 'Lỗi không xác định' })
+            }
+        }
+        return {
+            results,
+            postedCount: results.filter((row) => row.ok).length,
+            failedCount: results.filter((row) => !row.ok).length,
+        }
+    }
+
+    /** Các bút đã trừ nợ phải cùng pháp nhân với tài khoản nhận tiền (bỏ qua khi tài khoản chưa khai). */
+    private assertAllocationsInLegalEntity(allocations: { openItem: { legalEntityId: string } }[], legalEntityId: string | null) {
+        if (!legalEntityId) return
+        if (allocations.some((row) => row.openItem.legalEntityId !== legalEntityId)) {
+            throw new BadRequestException({
+                code: 'BANK_ACCOUNT_LEGAL_ENTITY_MISMATCH',
+                message: 'Khoản thu đã trừ vào công nợ của pháp nhân khác với tài khoản nhận tiền.',
+            })
+        }
+    }
+
+    private async postBankReceiptFifo(item: BankReceiptFifoItemDto, actor: ScopedActor) {
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'bank:' + item.bankTransactionId}))`
+            const bankTransaction = await tx.bankTransaction.findUnique({
+                where: { id: item.bankTransactionId },
+                include: {
+                    bankAccount: { select: { currency: true, legalEntityId: true } },
+                    receivableAllocations: { where: { status: ReceivableAllocationStatus.ACTIVE }, select: { id: true } },
+                    customerReceipt: { select: { id: true } },
+                },
+            })
+            if (!bankTransaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+            if (bankTransaction.direction !== BankTxnDirection.IN) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_NOT_INCOMING', message: 'Chỉ ghi nhận công nợ cho giao dịch tiền vào.' })
+            }
+            if (bankTransaction.reconciliationStatus === BankTxnReconciliationStatus.IGNORED) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_IGNORED', message: 'Giao dịch này đã được bỏ qua.' })
+            }
+            if (bankTransaction.receivableAllocations.length || bankTransaction.customerReceipt) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_ALREADY_POSTED', message: 'Giao dịch này đã được ghi nhận.' })
+            }
+            const customer = await tx.party.findUnique({ where: { id: item.customerPartyId }, select: { id: true, name: true } })
+            if (!customer) throw new NotFoundException('CUSTOMER_NOT_FOUND')
+
+            const currency = (bankTransaction.bankAccount?.currency ?? 'VND').toUpperCase()
+            const amount = new Prisma.Decimal(bankTransaction.amount).abs()
+            // Tiền về tài khoản pháp nhân nào thì chỉ trừ nợ của pháp nhân đó.
+            const legalEntity = { id: bankTransaction.bankAccount?.legalEntityId ?? null }
+            let receiptId: string
+            let remaining: Prisma.Decimal
+            let collectionPlanId: string | null = null
+
+            if (item.customerReceiptId) {
+                // Sale đã báo khoản này: dùng lại, không ghi tiền lần hai.
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'customer-receipt:' + item.customerReceiptId}))`
+                const receipt = await tx.customerReceipt.findUnique({
+                    where: { id: item.customerReceiptId },
+                    include: {
+                        allocations: {
+                            where: { status: ReceivableAllocationStatus.ACTIVE },
+                            select: { amountInBankCurrency: true, openItem: { select: { legalEntityId: true } } },
+                        },
+                    },
+                })
+                if (!receipt) throw new NotFoundException('CUSTOMER_RECEIPT_NOT_FOUND')
+                if (
+                    receipt.customerPartyId !== item.customerPartyId ||
+                    receipt.bankTransactionId ||
+                    receipt.currency !== currency ||
+                    !new Prisma.Decimal(receipt.amount).equals(amount)
+                ) {
+                    throw new BadRequestException({ code: 'BANK_TRANSACTION_RECEIPT_MISMATCH', message: 'Khoản thu đã báo không khớp khách hoặc số tiền của giao dịch.' })
+                }
+                receiptId = receipt.id
+                collectionPlanId = receipt.collectionPlanId
+                if (receipt.status === CustomerReceiptStatus.REPORTED) {
+                    // Ngày trừ nợ lấy theo ngày giao dịch trên sao kê, không theo ngày sale báo.
+                    remaining = await this.applyReceiptFifo(tx, { ...receipt, receivedAt: bankTransaction.txnDate }, actor, bankTransaction.id, legalEntity)
+                } else if (receipt.status === CustomerReceiptStatus.CONFIRMED) {
+                    // Đã trừ nợ lúc xác nhận (khi chưa biết tiền về tài khoản nào): chỉ ghép được
+                    // nếu phần đã trừ nằm đúng pháp nhân của tài khoản nhận tiền.
+                    this.assertAllocationsInLegalEntity(receipt.allocations, legalEntity.id)
+                    // Chỉ gắn các bút phân bổ vào dòng sao kê.
+                    await tx.receivableAllocation.updateMany({
+                        where: { customerReceiptId: receipt.id, status: ReceivableAllocationStatus.ACTIVE },
+                        data: { bankTransactionId: bankTransaction.id },
+                    })
+                    const applied = receipt.allocations.reduce((sum, row) => sum.plus(row.amountInBankCurrency), new Prisma.Decimal(0))
+                    remaining = amount.minus(applied)
+                } else {
+                    throw new BadRequestException({ code: 'CUSTOMER_RECEIPT_NOT_CONFIRMABLE', message: 'Khoản thu đã báo không còn ở trạng thái ghép được.' })
+                }
+            } else {
+                const receipt = await tx.customerReceipt.create({
+                    data: {
+                        customerPartyId: item.customerPartyId,
+                        amount,
+                        currency,
+                        // Ngày trừ nợ là ngày giao dịch trên sao kê, không phải ngày hạch toán hay ngày import.
+                        receivedAt: bankTransaction.txnDate,
+                        transferReference: bankTransaction.externalRef ?? null,
+                        note: 'Ghi nhận từ sao kê ngân hàng',
+                        reportedById: actor.userId,
+                    },
+                })
+                receiptId = receipt.id
+                remaining = await this.applyReceiptFifo(tx, receipt, actor, bankTransaction.id, legalEntity)
+            }
+
+            await tx.customerReceipt.update({
+                where: { id: receiptId },
+                data: {
+                    bankTransactionId: bankTransaction.id,
+                    status: CustomerReceiptStatus.RECONCILED,
+                    confirmedAt: new Date(),
+                    confirmedById: actor.userId,
+                },
+            })
+            await tx.bankTransaction.update({
+                where: { id: bankTransaction.id },
+                data: {
+                    matchStatus: BankTxnMatchStatus.MANUAL_MATCHED,
+                    reconciliationStatus: remaining.greaterThan(0) ? BankTxnReconciliationStatus.PARTIALLY_ALLOCATED : BankTxnReconciliationStatus.ALLOCATED,
+                    counterpartyType: 'CUSTOMER',
+                    counterpartyId: item.customerPartyId,
+                    isConfirmed: true,
+                    confirmedAt: new Date(),
+                    confirmedBy: actor.userId,
+                },
+            })
+
+            const accountNo = String(bankTransaction.counterpartyAcc ?? '').replace(/\D/g, '')
+            if (item.rememberAccount && accountNo.length >= 6) {
+                await tx.partyBankAccount.upsert({
+                    where: { partyId_accountNo: { partyId: item.customerPartyId, accountNo } },
+                    update: { isActive: true },
+                    create: {
+                        partyId: item.customerPartyId,
+                        accountNo,
+                        accountName: bankTransaction.counterpartyName?.trim() || customer.name,
+                        bankName: 'Ghi nhận từ sao kê',
+                    },
+                })
+            }
+            await this.refreshCollectionPlan(tx, collectionPlanId)
+            return { appliedAmount: amount.minus(remaining).toString(), unappliedAmount: remaining.toString() }
+        })
+    }
+
+    /** Match a confirmed manual receipt to an imported bank line without posting it a second time. */
+    async reconcileCustomerReceipt(id: string, bankTransactionId: string, actor: ScopedActor) {
+        return this.prisma.$transaction(async (tx) => {
+            for (const key of [`bank:${bankTransactionId}`, `customer-receipt:${id}`].sort()) {
+                await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`
+            }
+            const receipt = await tx.customerReceipt.findUnique({ where: { id } })
+            if (!receipt) throw new NotFoundException('CUSTOMER_RECEIPT_NOT_FOUND')
+            if (receipt.status !== CustomerReceiptStatus.CONFIRMED && receipt.status !== CustomerReceiptStatus.RECONCILED) {
+                throw new BadRequestException({ code: 'CUSTOMER_RECEIPT_NOT_CONFIRMED', message: 'Chỉ khoản thu đã xác nhận mới được đối soát sao kê.' })
+            }
+            if (receipt.bankTransactionId && receipt.bankTransactionId !== bankTransactionId) {
+                throw new BadRequestException({ code: 'CUSTOMER_RECEIPT_ALREADY_RECONCILED', message: 'Khoản thu đã ghép với một giao dịch ngân hàng khác.' })
+            }
+            const bankTransaction = await tx.bankTransaction.findUnique({
+                where: { id: bankTransactionId },
+                include: { bankAccount: { select: { currency: true, legalEntityId: true } }, receivableAllocations: { where: { status: ReceivableAllocationStatus.ACTIVE }, select: { id: true } }, customerReceipt: { select: { id: true } } },
+            })
+            if (!bankTransaction) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+            if (bankTransaction.direction !== BankTxnDirection.IN || bankTransaction.reconciliationStatus === BankTxnReconciliationStatus.IGNORED) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_NOT_RECONCILABLE', message: 'Giao dịch ngân hàng không thể dùng để đối soát khoản thu này.' })
+            }
+            if (bankTransaction.customerReceipt && bankTransaction.customerReceipt.id !== id) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_ALREADY_RECONCILED', message: 'Giao dịch ngân hàng đã ghép với khoản thu khác.' })
+            }
+            if (bankTransaction.receivableAllocations.length || bankTransaction.bankAccount.currency !== receipt.currency || !new Prisma.Decimal(bankTransaction.amount).abs().equals(receipt.amount)) {
+                throw new BadRequestException({ code: 'BANK_TRANSACTION_RECEIPT_MISMATCH', message: 'Số tiền hoặc loại tiền sao kê không khớp khoản thu đã xác nhận.' })
+            }
+            // Khoản thu đã trừ nợ theo FIFO lúc xác nhận; tiền phải về đúng tài khoản của pháp nhân đó.
+            const receiptAllocations = await tx.receivableAllocation.findMany({
+                where: { customerReceiptId: id, status: ReceivableAllocationStatus.ACTIVE },
+                select: { openItem: { select: { legalEntityId: true } } },
+            })
+            this.assertAllocationsInLegalEntity(receiptAllocations, bankTransaction.bankAccount.legalEntityId)
+            const updated = await tx.customerReceipt.update({ where: { id }, data: { bankTransactionId, status: CustomerReceiptStatus.RECONCILED } })
+            await tx.bankTransaction.update({
+                where: { id: bankTransactionId },
+                data: {
+                    matchStatus: BankTxnMatchStatus.MANUAL_MATCHED,
+                    reconciliationStatus: BankTxnReconciliationStatus.ALLOCATED,
+                    counterpartyType: 'CUSTOMER',
+                    counterpartyId: receipt.customerPartyId,
+                    isConfirmed: true,
+                    confirmedAt: new Date(),
+                    confirmedBy: actor.userId,
+                },
+            })
+            return updated
+        })
+    }
+
+    /**
+     * Hạn mức có hiệu lực tại một thời điểm, dựng lại từ nhật ký thay đổi.
+     *
+     * `history` phải là TOÀN BỘ nhật ký của khách, sắp tăng dần theo thời gian — kể cả các
+     * lần đổi sau thời điểm đang xét. Trước lần đổi đầu tiên, hạn mức là `oldLimit` của
+     * chính lần đổi đó; trước đây chỗ này lấy hạn mức hiện tại của khách, nên báo cáo kỳ
+     * cũ bị so với hạn mức đã được nâng về sau (vd. tháng 3 nợ 1,5 tỷ trên hạn mức 1 tỷ,
+     * tháng 6 nâng lên 2 tỷ → báo cáo tháng 3 hiện "không vượt"). Cùng cách dựng với dòng
+     * thời gian hạn mức ở màn cấu hình (SalesCreditService.buildTimeline).
+     */
+    private limitAt(
+        customer: { creditLimit: Prisma.Decimal | null; tempLimit: Prisma.Decimal | null; tempFrom: Date | null; tempTo: Date | null },
+        history: Array<{ changedAt: Date; oldLimit: Prisma.Decimal | null; newLimit: Prisma.Decimal | null; tempLimit: Prisma.Decimal | null; tempFrom: Date | null; tempTo: Date | null }>,
+        at: Date,
+    ) {
+        /*
+         * Xét theo NGÀY LỊCH, không theo khoảnh khắc — vì số dư đem so là số dư CUỐI NGÀY.
+         * Trước đây hạn mức lấy lúc 0 giờ sáng: khách SONHAI được sếp nâng hạn mức 5 → 20 tỷ
+         * lúc 15:52, xuất hóa đơn 13,765 tỷ lúc 15:55 cùng ngày, nhưng số dư cuối ngày bị
+         * so với hạn mức 5 tỷ của lúc nửa đêm → báo "vượt 175%" trong khi quy trình đúng.
+         *
+         * - Lần đổi hạn mức nào trong ngày cũng tính cho cả ngày đó (so với cuối ngày).
+         * - Hạn mức tạm có hiệu lực nếu khoảng tạm CHẠM tới ngày đó. tempFrom/tempTo là ngày
+         *   (lưu nửa đêm UTC = 7 giờ sáng giờ VN), nên so với đầu/cuối ngày mới lấy trọn ngày
+         *   đầu và ngày cuối; so theo khoảnh khắc sẽ đánh rơi ngày cuối của đợt tạm.
+         */
+        const dayStart = new Date(at)
+        dayStart.setHours(0, 0, 0, 0)
+        const dayEnd = new Date(at)
+        dayEnd.setHours(23, 59, 59, 999)
+        let applicable: (typeof history)[number] | undefined
+        for (let index = history.length - 1; index >= 0; index -= 1) {
+            if (history[index].changedAt <= dayEnd) {
+                applicable = history[index]
+                break
+            }
+        }
+        let baseLimit: Prisma.Decimal | null
+        let tempLimit: Prisma.Decimal | null
+        let tempFrom: Date | null
+        let tempTo: Date | null
+        if (applicable) {
+            baseLimit = applicable.newLimit
+            tempLimit = applicable.tempLimit
+            tempFrom = applicable.tempFrom
+            tempTo = applicable.tempTo
+        } else if (history.length) {
+            // Trước lần đổi đầu tiên: nhật ký không ghi hạn mức tạm của thời kỳ ấy, nên chỉ
+            // dựa vào hạn mức cơ sở — không mượn hạn mức tạm của hiện tại.
+            baseLimit = history[0].oldLimit
+            tempLimit = null
+            tempFrom = null
+            tempTo = null
+        } else {
+            baseLimit = customer.creditLimit
+            tempLimit = customer.tempLimit
+            tempFrom = customer.tempFrom
+            tempTo = customer.tempTo
+        }
+        const temporaryApplies = tempLimit != null && (!tempFrom || tempFrom <= dayEnd) && (!tempTo || tempTo >= dayStart)
+        return temporaryApplies ? tempLimit : baseLimit
+    }
+
+    private dayKey(value: Date) {
+        return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+    }
+
+    /**
+     * The main working report: balances and collection promises are both summarized by customer.
+     * All historic balances derive from immutable ledger entries, never today's open-item balance.
+     */
+    async creditManagement(query: CreditManagementQueryDto) {
+        const period = this.period(query.fromDate, query.toDate)
+        const { from } = period
+        /*
+         * Không tính sang tương lai. Trước đây xem năm đang chạy thì kỳ kéo tới 31/12, các ngày
+         * chưa tới được tính bằng số dư hôm nay — dư nợ bình quân lệch về số dư hôm nay, và
+         * khách đang vượt hạn mức bị cộng thêm hàng trăm "ngày vượt" chưa xảy ra.
+         */
+        const endOfToday = new Date()
+        endOfToday.setHours(23, 59, 59, 999)
+        const to = period.to > endOfToday ? endOfToday : period.to
+        const fromText = this.dayKey(from)
+        const toText = this.dayKey(to)
+
+        const [items, plans, pendingReceipts] = await Promise.all([
+            this.prisma.receivableOpenItem.findMany({
+                where: {
+                    customerPartyId: query.customerPartyId ?? undefined,
+                    settlementType: 'RECEIVABLE',
+                    ...(query.accountingOwnerEmpId ? { customer: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
+                },
+                include: {
+                    customer: { select: { id: true, code: true, name: true, creditLimit: true, tempLimit: true, tempFrom: true, tempTo: true } },
+                    entries: { where: { effectiveAt: { lte: to } }, select: { effectiveAt: true, amountDelta: true, type: true } },
+                },
+            }),
+            this.prisma.customerCollectionPlan.findMany({
+                where: {
+                    customerPartyId: query.customerPartyId ?? undefined,
+                    ...(query.accountingOwnerEmpId ? { customer: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
+                    plannedDate: { gte: from, lte: to },
+                    // Kế hoạch đã hẹn lại vẫn là một lời hứa đã lỡ của kỳ gốc — bỏ nó đi thì kỳ
+                    // có khách hẹn 3 lần, lỡ 2 lần rồi xin dời sẽ hiện "hoàn thành 100%". Tiền đã
+                    // thu nằm lại trên kế hoạch cũ, kế hoạch mới chỉ mang phần còn thiếu, nên
+                    // không đếm trùng tiền thu giữa hai kỳ.
+                    status: { in: [CollectionPlanStatus.ACTIVE, CollectionPlanStatus.COMPLETED, CollectionPlanStatus.CARRIED_FORWARD] },
+                },
+                include: {
+                    customer: { select: { id: true, code: true, name: true, creditLimit: true, tempLimit: true, tempFrom: true, tempTo: true } },
+                    receipts: { select: { amount: true, status: true, receivedAt: true } },
+                },
+            }),
+            this.prisma.customerReceipt.findMany({
+                where: {
+                    customerPartyId: query.customerPartyId ?? undefined,
+                    ...(query.accountingOwnerEmpId ? { customer: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
+                    status: CustomerReceiptStatus.REPORTED,
+                    receivedAt: { gte: from, lte: to },
+                },
+                select: {
+                    customerPartyId: true,
+                    amount: true,
+                    customer: { select: { id: true, code: true, name: true, creditLimit: true, tempLimit: true, tempFrom: true, tempTo: true } },
+                },
+            }),
+        ])
+        const customerMap = new Map<string, any>()
+        const ensure = (customer: any) => {
+            const current = customerMap.get(customer.id) ?? {
+                customer,
+                openingDebt: new Prisma.Decimal(0),
+                debtIncrease: new Prisma.Decimal(0),
+                collectedAmount: new Prisma.Decimal(0),
+                otherDecrease: new Prisma.Decimal(0),
+                dailyChanges: new Map<string, Prisma.Decimal>(),
+                plannedAmount: new Prisma.Decimal(0),
+                plannedActualAmount: new Prisma.Decimal(0),
+                pendingReportedAmount: new Prisma.Decimal(0),
+            }
+            customerMap.set(customer.id, current)
+            return current
+        }
+        for (const item of items) {
+            const row = ensure(item.customer)
+            for (const entry of item.entries) {
+                const amount = new Prisma.Decimal(entry.amountDelta)
+                if (entry.effectiveAt < from) {
+                    row.openingDebt = row.openingDebt.plus(amount)
+                    continue
+                }
+                /*
+                 * Mỗi bút toán rơi vào đúng một cột, nên dòng luôn cộng khớp:
+                 *   Đầu kỳ + Phát sinh − Đã thu − Giảm khác = Cuối kỳ.
+                 *
+                 * Trước đây mọi bút toán dương đều bị tính là "Phát sinh nợ": đảo một khoản tiền
+                 * đã phân bổ (REVERSAL dương — nợ quay lại) thành ra doanh số mới, và "Đã thu"
+                 * vẫn giữ nguyên khoản đã bị đảo. REVERSAL mang hai nghĩa ngược dấu — dương là
+                 * hoàn tác tiền đã thu (ReceivablesService.reverseAllocation), âm là hủy khoản nợ
+                 * (hủy số dư đầu kỳ) — nên phải tách theo dấu chứ không theo loại.
+                 */
+                if (entry.type === ReceivableEntryType.OPEN) {
+                    row.debtIncrease = row.debtIncrease.plus(amount)
+                } else if (entry.type === ReceivableEntryType.RECEIPT) {
+                    row.collectedAmount = row.collectedAmount.minus(amount)
+                } else if (entry.type === ReceivableEntryType.REVERSAL && amount.greaterThan(0)) {
+                    row.collectedAmount = row.collectedAmount.minus(amount)
+                } else {
+                    row.otherDecrease = row.otherDecrease.minus(amount)
+                }
+                const key = this.dayKey(entry.effectiveAt)
+                row.dailyChanges.set(key, (row.dailyChanges.get(key) ?? new Prisma.Decimal(0)).plus(amount))
+            }
+        }
+        for (const plan of plans) {
+            const row = ensure(plan.customer)
+            row.plannedAmount = row.plannedAmount.plus(plan.plannedAmount)
+            // Chỉ tiền đã về tới ngày cuối kỳ: mở lại báo cáo tháng 8 hôm nay không được lẫn tiền
+            // khách trả trong tháng 9 — cùng mốc với các cột nợ, vốn đã chốt theo ngày.
+            row.plannedActualAmount = row.plannedActualAmount.plus(
+                this.receiptTotal(plan.receipts.filter((receipt) => receipt.receivedAt <= to)),
+            )
+        }
+        for (const receipt of pendingReceipts) {
+            const customer = ensure(receipt.customer)
+            customer.pendingReportedAmount = customer.pendingReportedAmount.plus(receipt.amount)
+        }
+
+        const customerIds = [...customerMap.keys()]
+        // Lấy đủ nhật ký kể cả các lần đổi SAU kỳ: cần oldLimit của lần đổi đầu tiên để biết
+        // hạn mức của những ngày trước nó (xem limitAt).
+        const histories = customerIds.length
+            ? await this.prisma.creditLimitHistory.findMany({
+                  where: { customerId: { in: customerIds } },
+                  select: { customerId: true, changedAt: true, oldLimit: true, newLimit: true, tempLimit: true, tempFrom: true, tempTo: true },
+                  orderBy: { changedAt: 'asc' },
+              })
+            : []
+        const historyByCustomer = new Map<string, any[]>()
+        for (const history of histories) historyByCustomer.set(history.customerId, [...(historyByCustomer.get(history.customerId) ?? []), history])
+
+        const itemsOut = [...customerMap.values()].map((row) => {
+            let debt = row.openingDebt
+            let peakDebt = debt
+            let maxOverRate = new Prisma.Decimal(0)
+            let daysOverLimit = 0
+            let totalDailyDebt = new Prisma.Decimal(0)
+            let dayCount = 0
+            const day = new Date(from)
+            const history = historyByCustomer.get(row.customer.id) ?? []
+            while (day <= to) {
+                debt = debt.plus(row.dailyChanges.get(this.dayKey(day)) ?? 0)
+                if (debt.greaterThan(peakDebt)) peakDebt = debt
+                totalDailyDebt = totalDailyDebt.plus(debt)
+                dayCount += 1
+                const limit = this.limitAt(row.customer, history, day)
+                // Hạn mức 0 là "không cho nợ": còn nợ đồng nào là một ngày vượt. Tỷ lệ % thì
+                // không chia được cho 0, nên chỉ tính khi hạn mức dương.
+                if (limit != null && debt.greaterThan(limit)) {
+                    daysOverLimit += 1
+                    if (new Prisma.Decimal(limit).greaterThan(0)) {
+                        const rate = debt.minus(limit).div(limit).mul(100)
+                        if (rate.greaterThan(maxOverRate)) maxOverRate = rate
+                    }
+                }
+                day.setDate(day.getDate() + 1)
+            }
+            const limitAtStart = this.limitAt(row.customer, history, from)
+            const limitAtEnd = this.limitAt(row.customer, history, to)
+            const overAmount = limitAtEnd == null ? null : Prisma.Decimal.max(debt.minus(limitAtEnd), 0)
+            const plannedCompleted = Prisma.Decimal.min(row.plannedActualAmount, row.plannedAmount)
+            return {
+                customer: { id: row.customer.id, code: row.customer.code, name: row.customer.name },
+                openingDebt: row.openingDebt.toString(),
+                debtIncrease: row.debtIncrease.toString(),
+                collectedAmount: row.collectedAmount.toString(),
+                otherDecrease: row.otherDecrease.toString(),
+                closingDebt: debt.toString(),
+                peakClosingDebt: peakDebt.toString(),
+                // Kỳ nằm trọn trong tương lai thì không có ngày nào để lấy bình quân.
+                averageClosingDebt: (dayCount ? totalDailyDebt.div(dayCount) : debt).toDecimalPlaces(2).toString(),
+                creditLimitAtStart: limitAtStart == null ? null : new Prisma.Decimal(limitAtStart).toString(),
+                creditLimit: limitAtEnd == null ? null : new Prisma.Decimal(limitAtEnd).toString(),
+                overAmount: overAmount == null ? null : overAmount.toString(),
+                overRate: limitAtEnd == null || new Prisma.Decimal(limitAtEnd).isZero() ? null : overAmount!.div(limitAtEnd).mul(100).toDecimalPlaces(2).toString(),
+                maxOverRate: maxOverRate.toDecimalPlaces(2).toString(),
+                daysOverLimit,
+                plannedAmount: row.plannedAmount.toString(),
+                plannedActualAmount: row.plannedActualAmount.toString(),
+                plannedRemainingAmount: Prisma.Decimal.max(row.plannedAmount.minus(row.plannedActualAmount), 0).toString(),
+                planCompletionRate: row.plannedAmount.isZero() ? null : plannedCompleted.div(row.plannedAmount).mul(100).toDecimalPlaces(2).toString(),
+                pendingReportedAmount: row.pendingReportedAmount.toString(),
+            }
+        })
+        return { fromDate: fromText, toDate: toText, items: itemsOut.sort((a, b) => Number(b.closingDebt) - Number(a.closingDebt)) }
+    }
+
+    async annualCreditIndicators(year: number, customerPartyId?: string, accountingOwnerEmpId?: string) {
+        const result = await this.creditManagement({
+            customerPartyId,
+            accountingOwnerEmpId,
+            fromDate: `${year}-01-01`,
+            toDate: `${year}-12-31`,
+        })
+        const customerIds = result.items.map((item) => item.customer.id)
+        const proposals = customerIds.length
+            ? await this.prisma.creditLimitProposal.findMany({
+                  where: { year: year + 1, customerId: { in: customerIds } },
+                  select: { customerId: true, proposedLimit: true, approvedLimit: true, status: true, reason: true },
+              })
+            : []
+        const proposalByCustomer = new Map(proposals.map((proposal) => [proposal.customerId, proposal]))
+        return {
+            year,
+            ...result,
+            items: result.items.map((item) => {
+                const proposal = proposalByCustomer.get(item.customer.id)
+                return {
+                    ...item,
+                    /*
+                     * Tỷ lệ vượt của năm là mức vượt cao nhất khi so TỪNG NGÀY với hạn mức có hiệu
+                     * lực đúng ngày đó. Trước đây lấy đỉnh nợ (có thể rơi vào tháng 3) chia cho hạn
+                     * mức ngày 31/12 (có thể đã được nâng từ tháng 7, hoặc đã là hạn mức năm sau
+                     * nếu đề xuất được áp dụng trước Tết) — hai con số ở hai thời điểm khác nhau.
+                     */
+                    annualOverRate: item.creditLimit == null ? null : item.maxOverRate,
+                    nextYearProposedLimit: proposal?.proposedLimit?.toString() ?? null,
+                    nextYearApprovedLimit: proposal?.approvedLimit?.toString() ?? null,
+                    nextYearProposalStatus: proposal?.status ?? null,
+                    nextYearProposalReason: proposal?.reason ?? null,
+                }
+            }),
         }
     }
 
@@ -871,6 +1789,7 @@ export class ReceivablesService {
             this.prisma.receivableOpenItem.findMany({
                 where: {
                     customerPartyId: query.partyId ?? undefined,
+                    ...(query.accountingOwnerEmpId ? { customer: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
                     status: { in: openStatuses },
                 },
                 include: { customer: { select: { id: true, code: true, name: true } } },
@@ -878,6 +1797,7 @@ export class ReceivablesService {
             this.prisma.payableOpenItem.findMany({
                 where: {
                     supplierPartyId: query.partyId ?? undefined,
+                    ...(query.accountingOwnerEmpId ? { supplier: { accountingOwnerEmpId: query.accountingOwnerEmpId } } : {}),
                     status: {
                         in: [PayableOpenItemStatus.OPEN, PayableOpenItemStatus.PARTIALLY_SETTLED],
                     },

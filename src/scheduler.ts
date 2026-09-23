@@ -1,3 +1,5 @@
+// Phải đứng đầu: cố định múi giờ Việt Nam trước khi bất kỳ module nào tạo Date.
+import './common/timezone'
 import { NestFactory } from '@nestjs/core'
 import { SchedulerModule } from './scheduler-app.module'
 import { Logger } from '@nestjs/common'

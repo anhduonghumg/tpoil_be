@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common'
+import { Body, Controller, Get, Param, Post, Query, Req, UseGuards, ParseUUIDPipe } from '@nestjs/common'
 import type { Request } from 'express'
 import { LoggedInGuard } from 'src/modules/auth/guards/logged-in.guard'
 import { PermissionsGuard } from 'src/common/auth/permissions.guard'
@@ -9,10 +9,19 @@ import { ScopedActor } from './sales-warehouse-scope.service'
 import {
     AllocateReceivableDto,
     AllocateBankReceiptDto,
+    AnnualCreditIndicatorsQueryDto,
+    CarryForwardCollectionPlanDto,
+    CreateCollectionPlanDto,
+    CreateCustomerReceiptDto,
+    CreditManagementQueryDto,
     ListReceivablesQueryDto,
+    ListCollectionPlansQueryDto,
+    ListCustomerReceiptsQueryDto,
     ReceivableAgingQueryDto,
     ReceivableCollectionKpiQueryDto,
     PartyDebtQueryDto,
+    PostBankReceiptsFifoDto,
+    ReverseReceiptDto,
 } from './dto/receivable.dto'
 
 function actorFrom(req: Request): ScopedActor {
@@ -49,6 +58,70 @@ export class ReceivablesController {
         return this.service.collectionKpis(query.fromDate, query.toDate)
     }
 
+    /** Daily collection plan and actual collection at customer level. */
+    @Get('collection-plans')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    collectionPlans(@Query() query: ListCollectionPlansQueryDto) {
+        return this.service.collectionPlans(query)
+    }
+
+    @Post('collection-plans')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    createCollectionPlan(@Body() dto: CreateCollectionPlanDto, @Req() req: Request) {
+        return this.service.createCollectionPlan(dto, actorFrom(req))
+    }
+
+    @Post('collection-plans/:id/carry-forward')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    carryForwardCollectionPlan(
+        @Param('id') id: string,
+        @Body() dto: CarryForwardCollectionPlanDto,
+        @Req() req: Request,
+    ) {
+        return this.service.carryForwardCollectionPlan(id, dto, actorFrom(req))
+    }
+
+    /** Customer-reported money is visible immediately but does not lower debt until confirmation. */
+    @Get('customer-receipts')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    customerReceipts(@Query() query: ListCustomerReceiptsQueryDto) {
+        return this.service.customerReceipts(query)
+    }
+
+    @Post('customer-receipts')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    createCustomerReceipt(@Body() dto: CreateCustomerReceiptDto, @Req() req: Request) {
+        return this.service.createCustomerReceipt(dto, actorFrom(req))
+    }
+
+    @Post('customer-receipts/:id/confirm')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    confirmCustomerReceipt(@Param('id') id: string, @Req() req: Request) {
+        return this.service.confirmCustomerReceipt(id, actorFrom(req))
+    }
+
+    @Post('customer-receipts/:id/reconcile/:bankTransactionId')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    reconcileCustomerReceipt(
+        @Param('id') id: string,
+        @Param('bankTransactionId', ParseUUIDPipe) bankTransactionId: string,
+        @Req() req: Request,
+    ) {
+        return this.service.reconcileCustomerReceipt(id, bankTransactionId, actorFrom(req))
+    }
+
+    @Get('credit-management')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    creditManagement(@Query() query: CreditManagementQueryDto) {
+        return this.service.creditManagement(query)
+    }
+
+    @Get('credit-indicators/annual')
+    @RequirePermissions(PERMISSIONS.sales.receivableView)
+    annualCreditIndicators(@Query() query: AnnualCreditIndicatorsQueryDto) {
+        return this.service.annualCreditIndicators(query.year, query.customerPartyId, query.accountingOwnerEmpId)
+    }
+
     /** Receivable and payable side by side for the same party. */
     @Get('party-debt')
     @RequirePermissions(PERMISSIONS.sales.receivableView)
@@ -79,22 +152,43 @@ export class ReceivablesController {
     @Post('bank-transactions/:bankTransactionId/allocate')
     @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
     allocateBankReceipt(
-        @Param('bankTransactionId') bankTransactionId: string,
+        @Param('bankTransactionId', ParseUUIDPipe) bankTransactionId: string,
         @Body() dto: AllocateBankReceiptDto,
         @Req() req: Request,
     ) {
         return this.service.allocateBankReceipt(bankTransactionId, dto, actorFrom(req))
     }
 
+    /** Ghi nhận hàng loạt tiền về vào công nợ khách theo lũy kế (FIFO), không chọn đơn. */
+    @Post('bank-transactions/post-fifo')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    postBankReceiptsFifo(@Body() dto: PostBankReceiptsFifoDto, @Req() req: Request) {
+        return this.service.postBankReceiptsFifo(dto, actorFrom(req))
+    }
+
     @Get('bank-transactions/:bankTransactionId/suggestions')
     @RequirePermissions(PERMISSIONS.sales.receivableView)
-    receiptSuggestions(@Param('bankTransactionId') bankTransactionId: string) {
+    receiptSuggestions(@Param('bankTransactionId', ParseUUIDPipe) bankTransactionId: string) {
         return this.service.receiptSuggestions(bankTransactionId)
     }
 
+    /** Đảo một bút phân bổ; bút thuộc khoản thu FIFO thì đảo cả khoản thu. */
     @Post('allocations/:id/reverse')
     @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
-    reverseAllocation(@Param('id') id: string, @Req() req: Request) {
-        return this.service.reverseAllocation(id, actorFrom(req))
+    reverseAllocation(@Param('id') id: string, @Body() dto: ReverseReceiptDto, @Req() req: Request) {
+        return this.service.reverseAllocation(id, actorFrom(req), dto ?? {})
+    }
+
+    @Post('customer-receipts/:id/reverse')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    reverseCustomerReceipt(@Param('id') id: string, @Body() dto: ReverseReceiptDto, @Req() req: Request) {
+        return this.service.reverseCustomerReceipt(id, dto ?? {}, actorFrom(req))
+    }
+
+    /** Đảo ghi nhận của một dòng tiền vào (màn Thu tiền), trả dòng về hàng đợi để xử lý lại. */
+    @Post('bank-transactions/:bankTransactionId/reverse')
+    @RequirePermissions(PERMISSIONS.sales.receivableAllocate)
+    reverseBankReceipt(@Param('bankTransactionId', ParseUUIDPipe) bankTransactionId: string, @Body() dto: ReverseReceiptDto, @Req() req: Request) {
+        return this.service.reverseBankReceipt(bankTransactionId, dto ?? {}, actorFrom(req))
     }
 }

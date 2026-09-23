@@ -2,6 +2,7 @@ import { Transform, Type } from 'class-transformer'
 import {
     IsBoolean,
     IsDateString,
+    IsEnum,
     IsInt,
     IsNumber,
     IsOptional,
@@ -10,6 +11,7 @@ import {
     MaxLength,
     Min,
 } from 'class-validator'
+import { CreditLimitProposalStatus } from '@prisma/client'
 
 /** Boolean('false') === true, nên cờ trên query string phải parse tay. */
 const parseBool = ({ value }: { value: unknown }) =>
@@ -90,4 +92,41 @@ export class UpdateCustomerCreditDto {
     @IsString()
     @MaxLength(1000)
     reason!: string
+}
+
+export class ListCreditLimitProposalsQueryDto {
+    @Type(() => Number)
+    @IsInt()
+    @Min(2000)
+    year!: number
+
+    @IsOptional()
+    @IsEnum(CreditLimitProposalStatus)
+    status?: CreditLimitProposalStatus
+}
+
+/** One annual review row per customer. Approval of the operational limit remains a separate audited action. */
+export class UpsertCreditLimitProposalDto {
+    @IsUUID()
+    customerId!: string
+
+    @Type(() => Number)
+    @IsInt()
+    @Min(2000)
+    year!: number
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsNumber()
+    @Min(0)
+    proposedLimit?: number | null
+
+    @IsOptional()
+    @IsEnum(CreditLimitProposalStatus)
+    status?: CreditLimitProposalStatus
+
+    @IsOptional()
+    @IsString()
+    @MaxLength(2000)
+    reason?: string
 }

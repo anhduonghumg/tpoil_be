@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer'
-import { IsDateString, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
+import { IsDateString, IsIn, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator'
 
 export class CreateCommercialPaymentRequestDto {
     @IsUUID()
@@ -33,8 +33,25 @@ export class PaymentRequestDecisionDto {
 }
 
 export class RecordCommercialPaymentDto {
+    @IsOptional()
+    @IsIn(['OWN_BANK', 'DIRECT_DISBURSEMENT'])
+    fundingSource?: 'OWN_BANK' | 'DIRECT_DISBURSEMENT'
+
+    @IsOptional()
     @IsUUID()
-    sourceBankAccountId!: string
+    sourceBankAccountId?: string
+
+    @IsOptional()
+    @IsString()
+    lenderBankName?: string
+
+    @IsOptional()
+    @IsString()
+    creditFacilityRef?: string
+
+    @IsOptional()
+    @IsString()
+    disbursementNo?: string
 
     @Type(() => Number)
     @IsNumber()

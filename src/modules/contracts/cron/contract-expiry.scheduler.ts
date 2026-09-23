@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule'
 import { CronJobType } from '@prisma/client'
 import { CronRunnerService } from '../../cron/cron-runner.service'
 import { QueueFactory } from '../../../infra/queue/queue.factory'
+import { vnDateKey } from 'src/common/utils/date.utils'
 
 @Injectable()
 export class ContractExpiryScheduler {
@@ -29,7 +30,8 @@ export class ContractExpiryScheduler {
             CronJobType.CONTRACT_EXPIRY_DAILY,
             {
                 cronRunId: runId,
-                referenceDate: runDate.toISOString().slice(0, 10),
+                // runDate là 0 giờ theo giờ VN; toISOString sẽ lùi về ngày hôm trước (17 giờ UTC).
+                referenceDate: vnDateKey(runDate),
                 status: 'all',
             },
             {

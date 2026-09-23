@@ -1,9 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common'
-import { PartyRoleType, Prisma, ReceivableOpenItemStatus, SalesOrderStatus } from '@prisma/client'
+import { CreditLimitProposalStatus, PartyRoleType, Prisma, ReceivableOpenItemStatus, SalesOrderStatus } from '@prisma/client'
 import { PrismaService } from 'src/infra/prisma/prisma.service'
 import { ScopedActor } from './sales-warehouse-scope.service'
 import { startOfToday } from './receivables.service'
-import { ListCreditCustomersQueryDto, UpdateCustomerCreditDto } from './dto/sales-credit.dto'
+import {
+    ListCreditCustomersQueryDto,
+    ListCreditLimitProposalsQueryDto,
+    UpdateCustomerCreditDto,
+    UpsertCreditLimitProposalDto,
+} from './dto/sales-credit.dto'
 import { salesLineNetAmount } from './sales-order-amount'
 
 const openStatuses: ReceivableOpenItemStatus[] = [
@@ -142,6 +147,66 @@ export class SalesCreditService {
         if (query.overLimitOnly) items = items.filter((row) => row.isOverLimit)
 
         return { items, total, page, limit }
+    }
+
+    /** Annual review rows are separate from the live credit limit until an accountant applies the decision. */
+    async annualProposals(query: ListCreditLimitProposalsQueryDto) {
+        return this.prisma.creditLimitProposal.findMany({
+            where: { year: query.year, status: query.status ?? undefined },
+            include: { customer: { select: { id: true, code: true, name: true, creditLimit: true } } },
+            orderBy: [{ customer: { name: 'asc' } }],
+        })
+    }
+
+    async upsertAnnualProposal(dto: UpsertCreditLimitProposalDto, actor: ScopedActor) {
+        const customer = await this.prisma.party.findUnique({ where: { id: dto.customerId }, select: { id: true } })
+        if (!customer) throw new NotFoundException('CUSTOMER_NOT_FOUND')
+        return this.prisma.creditLimitProposal.upsert({
+            where: { customerId_year: { customerId: dto.customerId, year: dto.year } },
+            create: {
+                customerId: dto.customerId,
+                year: dto.year,
+                proposedLimit: dto.proposedLimit,
+                status: dto.status ?? CreditLimitProposalStatus.DRAFT,
+                reason: dto.reason?.trim() || null,
+                proposedById: actor.userId,
+            },
+            update: {
+                proposedLimit: dto.proposedLimit === undefined ? undefined : dto.proposedLimit,
+                status: dto.status ?? undefined,
+                reason: dto.reason === undefined ? undefined : dto.reason.trim() || null,
+                proposedById: actor.userId,
+            },
+        })
+    }
+
+    /** Applies the approved annual decision through the same audited limit-change path used in daily work. */
+    async applyAnnualProposal(id: string, actor: ScopedActor) {
+        const proposal = await this.prisma.creditLimitProposal.findUnique({ where: { id } })
+        if (!proposal) throw new NotFoundException('CREDIT_LIMIT_PROPOSAL_NOT_FOUND')
+        if (proposal.proposedLimit == null) {
+            throw new BadRequestException({ code: 'CREDIT_LIMIT_PROPOSAL_EMPTY', message: 'Chưa có hạn mức đề xuất để áp dụng.' })
+        }
+        if (proposal.status === CreditLimitProposalStatus.REJECTED) {
+            throw new BadRequestException({ code: 'CREDIT_LIMIT_PROPOSAL_REJECTED', message: 'Đề xuất đã bị từ chối.' })
+        }
+        await this.update(
+            proposal.customerId,
+            {
+                creditLimit: proposal.proposedLimit.toNumber(),
+                reason: proposal.reason?.trim() || `Áp dụng hạn mức tín dụng năm ${proposal.year}`,
+            },
+            actor,
+        )
+        return this.prisma.creditLimitProposal.update({
+            where: { id },
+            data: {
+                status: CreditLimitProposalStatus.APPROVED,
+                approvedLimit: proposal.proposedLimit,
+                approvedById: actor.userId,
+                approvedAt: new Date(),
+            },
+        })
     }
 
     /** Công nợ chưa thu + đơn đã duyệt chưa xuất hóa đơn, gom theo khách. */

@@ -255,7 +255,8 @@ export class TermPaymentBatchesService {
                 orderBy: [{ batchDate: 'desc' }, { createdAt: 'desc' }],
                 include: {
                     bankAccount: true,
-                    items: true,
+                    // Mã đơn của từng dòng: màn ngân hàng tra bảng kê theo đơn hàng.
+                    items: { include: { purchaseOrder: { select: { orderNo: true } } } },
                     files: true,
                 },
             }),

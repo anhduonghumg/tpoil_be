@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import {
     PayableEntryType,
     PayableOpenItemStatus,
+    PaymentFundingSource,
     Prisma,
     PurchaseBizType,
     PurchaseOrderType,
@@ -362,10 +363,15 @@ export class CommercialPaymentsService {
         })
     }
 
+    /**
+     * `afterRecord` chạy trong cùng giao dịch ngay sau khi tạo lần chi — màn ngân hàng dùng để
+     * ghi nhận chi từ dòng sao kê và ghép luôn, không để lại lần chi "mồ côi" nếu bước ghép lỗi.
+     */
     async recordPayment(
         requestId: string,
         dto: RecordCommercialPaymentDto,
         actorId?: string | null,
+        afterRecord?: (tx: Prisma.TransactionClient, payment: { id: string; amountVnd: Prisma.Decimal }) => Promise<void>,
     ) {
         return this.prisma.$transaction(async (tx) => {
             const initialRequest = await tx.purchaseTermPaymentRequest.findFirst({
@@ -391,10 +397,23 @@ export class CommercialPaymentsService {
                 request.status !== TermPaymentRequestStatus.PARTIALLY_PAID
             )
                 throw new BadRequestException('COMMERCIAL_PAYMENT_REQUEST_NOT_READY_TO_PAY')
-            const source = await tx.bankAccount.findFirst({
-                where: { id: dto.sourceBankAccountId, isActive: true },
-            })
-            if (!source) throw new BadRequestException('SOURCE_BANK_ACCOUNT_INVALID')
+            const fundingSource = dto.fundingSource === 'DIRECT_DISBURSEMENT'
+                ? PaymentFundingSource.DIRECT_DISBURSEMENT
+                : PaymentFundingSource.OWN_BANK
+            const source = fundingSource === PaymentFundingSource.OWN_BANK
+                ? await tx.bankAccount.findFirst({
+                    where: { id: dto.sourceBankAccountId, isActive: true },
+                })
+                : null
+            if (fundingSource === PaymentFundingSource.OWN_BANK && !source) {
+                throw new BadRequestException('SOURCE_BANK_ACCOUNT_INVALID')
+            }
+            if (
+                fundingSource === PaymentFundingSource.DIRECT_DISBURSEMENT &&
+                (!dto.lenderBankName?.trim() || !dto.disbursementNo?.trim() || !dto.proofFileUrl?.trim())
+            ) {
+                throw new BadRequestException('DIRECT_DISBURSEMENT_EVIDENCE_REQUIRED')
+            }
             const paid = request.payments.reduce(
                 (sum, item) => sum.plus(item.amountVnd),
                 new Prisma.Decimal(0),
@@ -411,7 +430,17 @@ export class CommercialPaymentsService {
             const payment = await tx.paymentRequestPayment.create({
                 data: {
                     paymentRequestId: request.id,
-                    sourceBankAccountId: source.id,
+                    fundingSource,
+                    sourceBankAccountId: source?.id ?? null,
+                    lenderBankName: fundingSource === PaymentFundingSource.DIRECT_DISBURSEMENT
+                        ? dto.lenderBankName?.trim() || null
+                        : null,
+                    creditFacilityRef: fundingSource === PaymentFundingSource.DIRECT_DISBURSEMENT
+                        ? dto.creditFacilityRef?.trim() || null
+                        : null,
+                    disbursementNo: fundingSource === PaymentFundingSource.DIRECT_DISBURSEMENT
+                        ? dto.disbursementNo?.trim() || null
+                        : null,
                     amountVnd: amount,
                     paidAt,
                     proofFileUrl: dto.proofFileUrl?.trim() || null,
@@ -481,6 +510,7 @@ export class CommercialPaymentsService {
                 },
                 tx,
             )
+            if (afterRecord) await afterRecord(tx, payment)
             return updated
         })
     }

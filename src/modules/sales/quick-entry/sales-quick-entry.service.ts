@@ -9,6 +9,7 @@ import { SalesWithdrawalsService } from '../sales-withdrawals.service'
 import { ScopedActor } from '../sales-warehouse-scope.service'
 import { parseQuickEntry, ParsedOrderKind, parseLocalizedNumber } from './quick-entry.parser'
 import { ConfirmQuickEntryDto, ParseQuickEntryDto } from '../dto/sales-quick-entry.dto'
+import { vnDateKey } from 'src/common/utils/date.utils'
 
 /** One field of the preview: what we read, what it resolved to, and how sure we are. */
 type ResolvedField = {
@@ -245,7 +246,8 @@ export class SalesQuickEntryService {
         const cutoffHour = Number(process.env.SALES_ORDER_DATE_CUTOFF_HOUR ?? 15)
         const now = new Date()
         if (now.getHours() >= cutoffHour) now.setDate(now.getDate() + 1)
-        return now.toISOString().slice(0, 10)
+        // Ngày theo giờ VN: toISOString lấy ngày UTC nên từ 0 đến 7 giờ sáng sẽ ra ngày hôm qua.
+        return vnDateKey(now)
     }
 
     /**

@@ -42,6 +42,7 @@ import {
     VesselListQueryDto,
 } from './dto/operations.dto'
 import { CustomersService } from 'src/modules/customers/customers.service'
+import { vnDateKey } from 'src/common/utils/date.utils'
 
 const SHIP_OWNER_ROLES = [PartyRoleType.SHIP_OWNER, PartyRoleType.SEA_CARRIER] as const
 
@@ -263,7 +264,8 @@ export class ShipCharterService {
     }
 
     private generatedNo(prefix: string) {
-        const date = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+        // Mã đơn mang ngày theo giờ VN, không theo UTC (từ 0 đến 7 giờ sáng UTC vẫn là hôm qua).
+        const date = vnDateKey().replace(/-/g, '')
         return `${prefix}-${date}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
     }
 

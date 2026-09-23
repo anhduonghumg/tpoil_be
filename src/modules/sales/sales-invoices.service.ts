@@ -893,20 +893,21 @@ export class SalesInvoicesService {
      * Lưu cấu hình của MỘT môi trường. Lưu không đồng nghĩa với dùng: muốn đổi nơi hóa đơn
      * bay tới phải bấm chuyển riêng, để không ai vừa sửa vài chữ đã vô tình bắn sang MISA thật.
      *
-     * Mật khẩu và appId để trống = GIỮ NGUYÊN giá trị cũ — màn cấu hình không bao giờ nhận
-     * được giá trị thật nên không thể gửi lại, để trống mà ghi đè thì mất kết nối.
+     * User, mật khẩu và appId để trống = GIỮ NGUYÊN giá trị cũ — màn cấu hình chỉ nhận được
+     * user đã che và không nhận bí mật nên không thể gửi lại, để trống mà ghi đè thì mất kết nối.
      */
     async updateMisaSettings(dto: UpdateInvoiceProviderConfigDto, actor: ScopedActor) {
         const environment = dto.environment
         const current = await this.prisma.invoiceProviderConfig.findUnique({
             where: { environment },
         })
+        const username = dto.username?.trim() || current?.username
         const password = dto.password?.trim() || current?.password
         const appId = dto.appId?.trim() || current?.appId
-        if (!password || !appId) {
+        if (!username || !password || !appId) {
             throw new BadRequestException({
                 code: 'MISA_CREDENTIALS_REQUIRED',
-                message: 'Lần lưu đầu tiên của môi trường này phải nhập đủ mật khẩu và AppID.',
+                message: 'Lần lưu đầu tiên của môi trường này phải nhập đủ user, mật khẩu và AppID.',
             })
         }
 
@@ -914,7 +915,7 @@ export class SalesInvoicesService {
             provider: 'MISA',
             baseUrl: dto.baseUrl.trim().replace(/\/+$/, ''),
             taxCode: dto.taxCode.trim(),
-            username: dto.username.trim(),
+            username,
             password,
             appId,
             templateNo: dto.templateNo.trim(),

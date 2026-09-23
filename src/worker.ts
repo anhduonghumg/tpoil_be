@@ -1,4 +1,6 @@
 // src/worker.ts
+// Phải đứng đầu: cố định múi giờ Việt Nam trước khi bất kỳ module nào tạo Date.
+import './common/timezone'
 import { NestFactory } from '@nestjs/core'
 import { WorkerModule } from './worker-app.module'
 import { Logger } from '@nestjs/common'

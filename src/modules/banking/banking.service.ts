@@ -10,18 +10,21 @@ import {
     Prisma,
 } from '@prisma/client'
 import * as ExcelJS from 'exceljs'
+import * as XLSX from 'xlsx'
 import * as crypto from 'crypto'
 import { PrismaService } from '../../infra/prisma/prisma.service'
 import { QueryBankTransactionsDto } from './dto/query-bank-transactions.dto'
 import { ConfirmBankTransactionDto } from './dto/confirm-bank-transaction.dto'
 import { CreateBankImportDto } from './dto/create-bank-import.dto'
 import { BankImportTemplatesService } from '../bank-import-templates/bank-import-templates.service'
+import { BankCounterpartyRecognizer } from './bank-counterparty-recognizer.service'
 import { DeleteMultipleBankTransactionsDto } from './dto/delete-multiple-bank-transactions.dto'
 import { CreateManualBankTransactionDto } from './dto/create-manual-bank-transaction.dto'
 
 type ParsedBankRow = {
     rowNo?: number
     txnDate: Date
+    valueDate?: Date
     direction: BankTxnDirection
     amount: number
     description: string
@@ -46,7 +49,101 @@ export class BankingService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly bankImportTemplatesService: BankImportTemplatesService,
+        private readonly recognizer: BankCounterpartyRecognizer,
     ) {}
+
+    /** Đề xuất đối tượng cho các dòng sao kê đã lưu (khách nào trả, nội bộ, phí…). Không ghi gì. */
+    async recognizeTransactions(ids: string[]) {
+        const rows = await this.prisma.bankTransaction.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, bankAccountId: true, direction: true, amount: true, txnDate: true, description: true, counterpartyName: true, counterpartyAcc: true },
+        })
+        const result = await this.recognizer.recognize(
+            rows.map((row) => ({ key: row.id, ...row, amount: Number(row.amount) })),
+        )
+        const pairs = await this.pairInternalTransfers(rows.filter((row) => result.get(row.id)?.kind === 'INTERNAL'))
+        return rows.map((row) => ({ id: row.id, ...result.get(row.id)!, pairedTransaction: pairs.get(row.id) ?? null }))
+    }
+
+    /**
+     * Chuyển nội bộ luôn có hai đầu: MB chi 450tr thì BIDV nhận 450tr. Tìm dòng đối ứng ở tài khoản
+     * công ty khác — ngược chiều, cùng số tiền, lệch không quá 1 ngày — mỗi dòng chỉ ghép một lần.
+     */
+    private async pairInternalTransfers(rows: { id: string; bankAccountId: string; direction: BankTxnDirection; amount: Prisma.Decimal; txnDate: Date }[]) {
+        const pairs = new Map<string, { id: string; bankCode: string; accountNo: string; txnDate: Date; reconciliationStatus: string }>()
+        if (!rows.length) return pairs
+        const day = 86_400_000
+        const times = rows.map((row) => row.txnDate.getTime())
+        const candidates = await this.prisma.bankTransaction.findMany({
+            where: {
+                id: { notIn: rows.map((row) => row.id) },
+                amount: { in: [...new Set(rows.map((row) => row.amount.toString()))].map((value) => new Prisma.Decimal(value)) },
+                txnDate: { gte: new Date(Math.min(...times) - day), lte: new Date(Math.max(...times) + day) },
+            },
+            select: {
+                id: true,
+                bankAccountId: true,
+                direction: true,
+                amount: true,
+                txnDate: true,
+                reconciliationStatus: true,
+                bankAccount: { select: { bankCode: true, accountNo: true } },
+            },
+            orderBy: { txnDate: 'asc' },
+        })
+        const used = new Set<string>()
+        // Dòng gần giờ nhất ghép trước, để 16 lệnh 450tr cùng phút không ghép chéo lung tung.
+        for (const row of [...rows].sort((a, b) => a.txnDate.getTime() - b.txnDate.getTime())) {
+            const best = candidates
+                .filter(
+                    (candidate) =>
+                        !used.has(candidate.id) &&
+                        candidate.bankAccountId !== row.bankAccountId &&
+                        candidate.direction !== row.direction &&
+                        new Prisma.Decimal(candidate.amount).equals(row.amount) &&
+                        Math.abs(candidate.txnDate.getTime() - row.txnDate.getTime()) <= day,
+                )
+                .sort((a, b) => Math.abs(a.txnDate.getTime() - row.txnDate.getTime()) - Math.abs(b.txnDate.getTime() - row.txnDate.getTime()))[0]
+            if (!best) continue
+            used.add(best.id)
+            pairs.set(row.id, {
+                id: best.id,
+                bankCode: best.bankAccount.bankCode,
+                accountNo: best.bankAccount.accountNo,
+                txnDate: best.txnDate,
+                reconciliationStatus: best.reconciliationStatus,
+            })
+        }
+        return pairs
+    }
+
+    /** Bỏ qua nhiều dòng không phải công nợ (chuyển nội bộ, phí/lãi NH); dòng đã phân bổ thì giữ nguyên. */
+    async ignoreTransactions(ids: string[], counterpartyType: 'INTERNAL' | 'OTHER', reason?: string) {
+        const rows = await this.prisma.bankTransaction.findMany({
+            where: { id: { in: ids } },
+            select: {
+                id: true,
+                payableAllocations: { where: { status: PayableAllocationStatus.ACTIVE }, select: { id: true } },
+                receivableAllocations: { where: { status: 'ACTIVE' }, select: { id: true } },
+                customerReceipt: { select: { id: true } },
+            },
+        })
+        const allowed = rows.filter((row) => !row.payableAllocations.length && !row.receivableAllocations.length && !row.customerReceipt).map((row) => row.id)
+        if (allowed.length) {
+            await this.prisma.bankTransaction.updateMany({
+                where: { id: { in: allowed } },
+                data: {
+                    matchStatus: BankTxnMatchStatus.IGNORED,
+                    reconciliationStatus: 'IGNORED',
+                    counterpartyType,
+                    ignoredReason: this.cleanOptionalText(reason) ?? (counterpartyType === 'INTERNAL' ? 'Chuyển nội bộ' : null),
+                    isConfirmed: true,
+                    confirmedAt: new Date(),
+                },
+            })
+        }
+        return { ignoredIds: allowed, skippedIds: ids.filter((id) => !allowed.includes(id)) }
+    }
 
     private legacyAllocation(allocation: any) {
         const openItem = allocation.openItem
@@ -70,13 +167,21 @@ export class BankingService {
         const payableAllocations = (item.payableAllocations ?? []).map((allocation: any) => this.legacyAllocation(allocation))
         const receivableAllocations = item.receivableAllocations ?? []
         const allocations = item.direction === BankTxnDirection.IN ? receivableAllocations : payableAllocations
-        const allocatedAmount = allocations
-            .filter((allocation: any) => allocation.status === PayableAllocationStatus.ACTIVE || allocation.status === 'ACTIVE')
-            .reduce(
-                (sum: number, allocation: any) =>
-                    sum + Number(allocation.allocatedAmount ?? allocation.amountInBankCurrency ?? 0),
-                0,
-            )
+        // Tiền ra còn có thể ghép với Mua TM, chi khác, bảng kê TERM — cộng cả vào "đã phân bổ".
+        const outgoingMatched =
+            item.direction === BankTxnDirection.OUT
+                ? (item.commercialPaymentReconciliations ?? []).reduce((sum: number, row: any) => sum + Number(row.amountVnd ?? 0), 0) +
+                  (item.generalPaymentReconciliations ?? []).reduce((sum: number, row: any) => sum + Number(row.payment?.amountVnd ?? 0), 0) +
+                  (item.termBankInstructions ?? []).reduce((sum: number, row: any) => sum + Number(row.amountVnd ?? 0), 0)
+                : 0
+        const allocatedAmount =
+            allocations
+                .filter((allocation: any) => allocation.status === PayableAllocationStatus.ACTIVE || allocation.status === 'ACTIVE')
+                .reduce(
+                    (sum: number, allocation: any) =>
+                        sum + Number(allocation.allocatedAmount ?? allocation.amountInBankCurrency ?? 0),
+                    0,
+                ) + outgoingMatched
         return {
             ...item,
             allocations,
@@ -175,6 +280,10 @@ export class BankingService {
                         },
                         orderBy: { allocatedAt: 'asc' },
                     },
+                    // Các kiểu ghép tiền ra khác ngoài công nợ NCC, để cột "đã phân bổ" tính đủ.
+                    commercialPaymentReconciliations: { where: { reversedAt: null }, select: { amountVnd: true } },
+                    generalPaymentReconciliations: { where: { reversedAt: null }, select: { payment: { select: { amountVnd: true } } } },
+                    termBankInstructions: { where: { status: { not: 'CANCELLED' } }, select: { amountVnd: true } },
                 },
             }),
             this.prisma.bankTransaction.count({ where }),
@@ -703,6 +812,28 @@ export class BankingService {
         })
     }
 
+    /** Dòng bị bỏ qua nhầm (tưởng nội bộ / phí): đưa lại về hàng đợi để xử lý lại. */
+    async restoreTransaction(id: string) {
+        const item = await this.prisma.bankTransaction.findUnique({ where: { id }, select: { reconciliationStatus: true } })
+        if (!item) throw new NotFoundException('BANK_TRANSACTION_NOT_FOUND')
+        if (item.reconciliationStatus !== 'IGNORED') {
+            throw new BadRequestException({ code: 'BANK_TRANSACTION_NOT_IGNORED', message: 'Giao dịch này không ở trạng thái bỏ qua.' })
+        }
+        return this.prisma.bankTransaction.update({
+            where: { id },
+            data: {
+                matchStatus: BankTxnMatchStatus.UNMATCHED,
+                reconciliationStatus: 'PENDING',
+                ignoredReason: null,
+                counterpartyType: null,
+                counterpartyId: null,
+                isConfirmed: false,
+                confirmedAt: null,
+                confirmedBy: null,
+            },
+        })
+    }
+
     async listTemplates(bankCode?: string) {
         return this.bankImportTemplatesService.listActive(bankCode)
     }
@@ -805,8 +936,8 @@ export class BankingService {
             throw new BadRequestException('FILE_REQUIRED')
         }
 
-        if (!file.originalname.toLowerCase().endsWith('.xlsx')) {
-            throw new BadRequestException('ONLY_XLSX_SUPPORTED_IN_PHASE_1')
+        if (!this.isSupportedStatementFile(file.originalname)) {
+            throw new BadRequestException('ONLY_XLSX_OR_HTML_XLS_SUPPORTED')
         }
 
         const bankAccount = await this.prisma.bankAccount.findUnique({
@@ -830,13 +961,14 @@ export class BankingService {
             },
         })
 
-        const parsed = await this.parseXlsxWithExcelJS(file.buffer, template?.columnMap, template?.normalizeRule)
+        const parsed = await this.parseBankStatementFile(file, template?.columnMap, template?.normalizeRule)
         const prepared = await this.prepareBankRows(body.bankAccountId, parsed.rows)
         const duplicateFlags = await this.detectDuplicateFlags(body.bankAccountId, prepared)
 
         const allRows = prepared.map((row) => ({
             rowNo: row.rowNo ?? 0,
             txnDate: row.txnDate,
+            valueDate: row.valueDate ?? null,
             direction: row.direction,
             amount: row.amount,
             description: row.description,
@@ -852,6 +984,23 @@ export class BankingService {
         const rows = allRows.slice(0, 500)
 
         const duplicatedCount = allRows.filter((row) => row.isDuplicate).length
+
+        // Nhận diện ngay ở bước xem trước để người import thấy dòng nào đã rõ đối tượng.
+        const recognition = await this.recognizer.recognize(
+            rows.map((row) => ({
+                key: String(row.rowNo),
+                bankAccountId: body.bankAccountId,
+                direction: row.direction,
+                amount: row.amount,
+                txnDate: row.txnDate,
+                description: row.description,
+                counterpartyName: row.counterpartyName,
+                counterpartyAcc: row.counterpartyAcc,
+            })),
+        )
+        const recognizedRows = rows.map((row) => ({ ...row, recognition: recognition.get(String(row.rowNo)) ?? null }))
+        const kindCount = (kind: string, direction?: BankTxnDirection) =>
+            recognizedRows.filter((row) => !row.isDuplicate && row.recognition?.kind === kind && (!direction || row.direction === direction)).length
 
         return {
             fileName: file.originalname,
@@ -876,8 +1025,19 @@ export class BankingService {
                 previewCount: rows.length,
                 validCount: prepared.length - duplicatedCount,
                 duplicatedCount,
+                inCount: recognizedRows.filter((row) => !row.isDuplicate && row.direction === BankTxnDirection.IN).length,
+                outCount: recognizedRows.filter((row) => !row.isDuplicate && row.direction === BankTxnDirection.OUT).length,
+                customerRecognizedCount: recognizedRows.filter(
+                    (row) => !row.isDuplicate && row.direction === BankTxnDirection.IN && row.recognition?.kind === 'CUSTOMER' && row.recognition.party,
+                ).length,
+                customerHighCount: recognizedRows.filter(
+                    (row) => !row.isDuplicate && row.recognition?.kind === 'CUSTOMER' && row.recognition.confidence === 'HIGH',
+                ).length,
+                internalCount: kindCount('INTERNAL'),
+                bankFeeCount: kindCount('BANK_FEE'),
+                undeclaredCompanyAccounts: [...new Set(recognizedRows.map((row) => row.recognition?.undeclaredCompanyAccount).filter(Boolean))],
             },
-            rows,
+            rows: recognizedRows,
         }
     }
 
@@ -886,8 +1046,8 @@ export class BankingService {
             throw new BadRequestException('FILE_REQUIRED')
         }
 
-        if (!file.originalname.toLowerCase().endsWith('.xlsx')) {
-            throw new BadRequestException('ONLY_XLSX_SUPPORTED_IN_PHASE_1')
+        if (!this.isSupportedStatementFile(file.originalname)) {
+            throw new BadRequestException('ONLY_XLSX_OR_HTML_XLS_SUPPORTED')
         }
 
         const bankAccount = await this.prisma.bankAccount.findUnique({
@@ -926,7 +1086,7 @@ export class BankingService {
         })
 
         try {
-            const parsed = await this.parseXlsxWithExcelJS(file.buffer, template?.columnMap, template?.normalizeRule)
+            const parsed = await this.parseBankStatementFile(file, template?.columnMap, template?.normalizeRule)
 
             if (!parsed.rows.length) {
                 throw new BadRequestException('BANK_IMPORT_NO_VALID_ROWS')
@@ -983,7 +1143,7 @@ export class BankingService {
                         bankAccountId: body.bankAccountId,
                         importId: importJob.id,
                         txnDate: row.txnDate,
-                        valueDate: row.txnDate,
+                        valueDate: row.valueDate ?? row.txnDate,
                         direction: row.direction,
                         amount: new Prisma.Decimal(row.amount),
                         source: BankTransactionSource.EXCEL,
@@ -1033,6 +1193,28 @@ export class BankingService {
         }
     }
 
+    private isSupportedStatementFile(fileName: string) {
+        const lower = fileName.toLowerCase()
+        return lower.endsWith('.xlsx') || lower.endsWith('.xls')
+    }
+
+    private async parseBankStatementFile(
+        file: Express.Multer.File,
+        columnMapRaw?: Prisma.JsonValue | null,
+        normalizeRuleRaw?: Prisma.JsonValue | null,
+    ): Promise<{ rows: ParsedBankRow[] }> {
+        if (file.originalname.toLowerCase().endsWith('.xls')) {
+            const html = Buffer.from(file.buffer).toString('utf8')
+            if (/<html\b|<table\b/i.test(html)) {
+                return this.parseTableRows(this.extractHtmlTableRows(html), columnMapRaw, normalizeRuleRaw)
+            }
+            // .xls nhị phân (Excel 97-2003) — VietinBank eFAST xuất đúng dạng này.
+            return this.parseTableRows(this.extractBinaryXlsRows(file.buffer, columnMapRaw), columnMapRaw, normalizeRuleRaw)
+        }
+
+        return this.parseXlsxWithExcelJS(file.buffer, columnMapRaw, normalizeRuleRaw)
+    }
+
     private async parseXlsxWithExcelJS(
         buffer: Buffer | Uint8Array | ArrayBuffer,
         columnMapRaw?: Prisma.JsonValue | null,
@@ -1062,6 +1244,8 @@ export class BankingService {
             }
         })
 
+        this.assertRequiredImportColumns(columnMap, columnIndexMap)
+
         const getCell = (row: ExcelJS.Row, key: string) => {
             const header = columnMap[key]
             if (!header) return null
@@ -1079,6 +1263,7 @@ export class BankingService {
 
             const mapped = {
                 date: getCell(row, 'date'),
+                valueDate: getCell(row, 'valueDate'),
                 description: getCell(row, 'description'),
                 amount: getCell(row, 'amount'),
                 credit: getCell(row, 'credit'),
@@ -1089,6 +1274,7 @@ export class BankingService {
                 externalRef: getCell(row, 'externalRef'),
                 documentCode: getCell(row, 'documentCode'),
                 purpose: getCell(row, 'purpose'),
+                balance: getCell(row, 'balance'),
             }
 
             if (this.isEmptyMappedRow(mapped)) {
@@ -1096,6 +1282,7 @@ export class BankingService {
             }
 
             const txnDate = this.parseTxnDate(mapped.date)
+            const valueDate = this.parseTxnDate(mapped.valueDate)
             const normalized = this.parseAmountAndDirection(mapped.amount, mapped.credit, mapped.debit, mapped.direction, normalizeRule)
             const description = this.cleanOptionalText(mapped.description)
 
@@ -1109,6 +1296,7 @@ export class BankingService {
             result.push({
                 rowNo: rowNumber,
                 txnDate,
+                valueDate: valueDate ?? undefined,
                 direction: normalized.direction,
                 amount: normalized.amount,
                 description,
@@ -1122,6 +1310,166 @@ export class BankingService {
         })
 
         return { rows: result }
+    }
+
+    /** Đọc sheet của file .xls nhị phân thành mảng dòng chữ, cùng dạng với bảng HTML. */
+    private extractBinaryXlsRows(buffer: Buffer | Uint8Array, columnMapRaw?: Prisma.JsonValue | null): string[][] {
+        const columnMap = (columnMapRaw || {}) as Record<string, any>
+        let workbook: XLSX.WorkBook
+        try {
+            workbook = XLSX.read(Buffer.from(buffer), { type: 'buffer', cellDates: false })
+        } catch {
+            throw new BadRequestException('BINARY_XLS_UNREADABLE')
+        }
+        const sheetName = columnMap.sheetName && workbook.SheetNames.includes(columnMap.sheetName) ? columnMap.sheetName : workbook.SheetNames[0]
+        const sheet = sheetName ? workbook.Sheets[sheetName] : undefined
+        if (!sheet) throw new BadRequestException('BANK_IMPORT_SHEET_NOT_FOUND')
+        // raw: false → lấy đúng chữ đang hiện trên file (ngày, số có dấu phẩy); blankrows giữ
+        // nguyên số thứ tự dòng để headerRow trong mẫu trùng với số dòng trên Excel.
+        const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: '', blankrows: true })
+        return rows.map((row) => row.map((cell) => String(cell ?? '')))
+    }
+
+    /** Tiêu đề cột so theo chữ đã gộp khoảng trắng: file ngân hàng hay xuống dòng giữa tiêu đề. */
+    private normalizeHeader(value: unknown) {
+        return String(value ?? '').replace(/\s+/g, ' ').trim()
+    }
+
+    /** Bộ đọc chung cho mọi file dạng bảng chữ (.xls HTML của VCB, .xls nhị phân của VietinBank). */
+    private parseTableRows(
+        tableRows: string[][],
+        columnMapRaw?: Prisma.JsonValue | null,
+        normalizeRuleRaw?: Prisma.JsonValue | null,
+    ): { rows: ParsedBankRow[] } {
+        const columnMap = (columnMapRaw || {}) as Record<string, any>
+        const normalizeRule = (normalizeRuleRaw || {}) as Record<string, any>
+        const headerRowIndex = Number(columnMap.headerRow || 1)
+        const headerRow = tableRows[headerRowIndex - 1]
+
+        if (!headerRow) {
+            throw new BadRequestException('BANK_IMPORT_HEADER_ROW_NOT_FOUND')
+        }
+
+        const columnIndexMap: Record<string, number> = {}
+        headerRow.forEach((header, index) => {
+            const text = this.normalizeHeader(header)
+            if (text && columnIndexMap[text] === undefined) columnIndexMap[text] = index
+        })
+
+        this.assertRequiredImportColumns(
+            Object.fromEntries(Object.entries(columnMap).map(([key, value]) => [key, typeof value === 'string' ? this.normalizeHeader(value) : value])),
+            columnIndexMap,
+        )
+
+        const getCell = (row: string[], key: string) => {
+            const header = columnMap[key]
+            if (!header) return null
+            const colIndex = columnIndexMap[this.normalizeHeader(header)]
+            return colIndex === undefined ? null : row[colIndex]
+        }
+
+        const result: ParsedBankRow[] = []
+        tableRows.slice(headerRowIndex).forEach((row, offset) => {
+            const mapped = {
+                date: getCell(row, 'date'),
+                valueDate: getCell(row, 'valueDate'),
+                description: getCell(row, 'description'),
+                amount: getCell(row, 'amount'),
+                credit: getCell(row, 'credit'),
+                debit: getCell(row, 'debit'),
+                direction: getCell(row, 'direction'),
+                counterpartyName: getCell(row, 'counterpartyName'),
+                counterpartyAcc: getCell(row, 'counterpartyAcc'),
+                externalRef: getCell(row, 'externalRef'),
+                documentCode: getCell(row, 'documentCode'),
+                purpose: getCell(row, 'purpose'),
+                balance: getCell(row, 'balance'),
+            }
+
+            if (this.isEmptyMappedRow(mapped) && normalizeRule.skipEmptyRows !== false) return
+
+            const txnDate = this.parseTxnDate(mapped.date)
+            const valueDate = this.parseTxnDate(mapped.valueDate)
+            const normalized = this.parseAmountAndDirection(
+                mapped.amount,
+                mapped.credit,
+                mapped.debit,
+                mapped.direction,
+                normalizeRule,
+            )
+            const description = this.cleanOptionalText(mapped.description)
+
+            if (!txnDate || !normalized || !description) return
+
+            result.push({
+                rowNo: headerRowIndex + offset + 1,
+                txnDate,
+                valueDate: valueDate ?? undefined,
+                direction: normalized.direction,
+                amount: normalized.amount,
+                description,
+                counterpartyName: this.cleanOptionalText(mapped.counterpartyName),
+                counterpartyAcc: this.cleanOptionalText(mapped.counterpartyAcc),
+                externalRef: this.cleanOptionalText(mapped.externalRef),
+                documentCode: this.cleanOptionalText(mapped.documentCode)?.toUpperCase(),
+                purposeRaw: this.cleanOptionalText(mapped.purpose),
+                raw: mapped,
+            })
+        })
+
+        return { rows: result }
+    }
+
+    private extractHtmlTableRows(html: string): string[][] {
+        const rows: string[][] = []
+        for (const rowMatch of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+            const cells: string[] = []
+            for (const cellMatch of rowMatch[1].matchAll(/<t[dh]\b([^>]*)>([\s\S]*?)<\/t[dh]>/gi)) {
+                const attributes = cellMatch[1]
+                const colspan = Math.max(1, Number(/colspan\s*=\s*["']?(\d+)/i.exec(attributes)?.[1] || 1))
+                cells.push(this.decodeHtmlCell(cellMatch[2]))
+                for (let index = 1; index < colspan; index += 1) cells.push('')
+            }
+            if (cells.length) rows.push(cells)
+        }
+        return rows
+    }
+
+    private decodeHtmlCell(value: string) {
+        return value
+            .replace(/<br\s*\/?\s*>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;|&apos;/gi, "'")
+            .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+            .replace(/&#(\d+);/g, (_, decimal) => String.fromCodePoint(Number(decimal)))
+            .replace(/\s+/g, ' ')
+            .trim()
+    }
+
+    private assertRequiredImportColumns(
+        columnMap: Record<string, any>,
+        columnIndexMap: Record<string, number>,
+    ) {
+        const requiredKeys = ['date', 'description']
+        if (columnMap.amount) {
+            requiredKeys.push('amount')
+        } else {
+            if (columnMap.credit) requiredKeys.push('credit')
+            if (columnMap.debit) requiredKeys.push('debit')
+        }
+
+        const missingColumns = requiredKeys
+            .map((key) => String(columnMap[key] || '').trim())
+            .filter((header) => !header || columnIndexMap[header] === undefined)
+
+        if (missingColumns.length) {
+            throw new BadRequestException(`BANK_IMPORT_COLUMNS_NOT_FOUND: ${missingColumns.join(', ')}`)
+        }
     }
 
     private extractExcelCellValue(value: ExcelJS.CellValue): any {
@@ -1251,38 +1599,78 @@ export class BankingService {
         if (!value) return null
 
         if (value instanceof Date && !Number.isNaN(value.getTime())) {
-            return new Date(value.getFullYear(), value.getMonth(), value.getDate())
+            return new Date(
+                value.getFullYear(),
+                value.getMonth(),
+                value.getDate(),
+                value.getHours(),
+                value.getMinutes(),
+                value.getSeconds(),
+            )
         }
 
         if (typeof value === 'number') {
             const excelEpoch = new Date(1899, 11, 30)
             const d = new Date(excelEpoch.getTime() + value * 24 * 60 * 60 * 1000)
             if (!Number.isNaN(d.getTime())) {
-                return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+                return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds())
             }
         }
 
         const s = String(value).trim()
         if (!s) return null
 
-        const ddmmyyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s)
-        if (ddmmyyyy) {
-            const [, dd, mm, yyyy] = ddmmyyyy
-            return new Date(Number(yyyy), Number(mm) - 1, Number(dd))
+        // dd/mm/yyyy (BIDV, MB) hoặc dd-mm-yyyy (VietinBank), có thể kèm giờ.
+        const slashDate = /^(\d{1,2})([\/\-.])(\d{1,2})\2(\d{2}|\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s)
+        if (slashDate) {
+            let day = Number(slashDate[1])
+            let month = Number(slashDate[3])
+            let year = Number(slashDate[4])
+            if (month > 12 && day <= 12) [day, month] = [month, day]
+            if (year < 100) year += 2000
+            return this.buildValidatedDate(
+                year,
+                month,
+                day,
+                Number(slashDate[5] || 0),
+                Number(slashDate[6] || 0),
+                Number(slashDate[7] || 0),
+            )
         }
 
-        const yyyymmdd = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s)
+        const yyyymmdd = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s)
         if (yyyymmdd) {
-            const [, yyyy, mm, dd] = yyyymmdd
-            return new Date(Number(yyyy), Number(mm) - 1, Number(dd))
+            return this.buildValidatedDate(
+                Number(yyyymmdd[1]),
+                Number(yyyymmdd[2]),
+                Number(yyyymmdd[3]),
+                Number(yyyymmdd[4] || 0),
+                Number(yyyymmdd[5] || 0),
+                Number(yyyymmdd[6] || 0),
+            )
         }
 
         const d = new Date(s)
         if (!Number.isNaN(d.getTime())) {
-            return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+            return d
         }
 
         return null
+    }
+
+    private buildValidatedDate(year: number, month: number, day: number, hour = 0, minute = 0, second = 0) {
+        const date = new Date(year, month - 1, day, hour, minute, second)
+        if (
+            date.getFullYear() !== year ||
+            date.getMonth() !== month - 1 ||
+            date.getDate() !== day ||
+            date.getHours() !== hour ||
+            date.getMinutes() !== minute ||
+            date.getSeconds() !== second
+        ) {
+            return null
+        }
+        return date
     }
 
     private parseAmountAndDirection(
@@ -1344,21 +1732,33 @@ export class BankingService {
         let s = String(value).trim()
         if (!s) return null
 
-        s = s.replace(/\s+/g, '')
-        s = s.replace(/₫|VND|vnd/gi, '')
+        const negativeByParentheses = /^\(.*\)$/.test(s)
+        s = s
+            .replace(/^'+/, '')
+            .replace(/[()]/g, '')
+            .replace(/\s+/g, '')
+            .replace(/₫|VND/gi, '')
+            .replace(/[^0-9,+.\-]/g, '')
 
-        if (s.includes('.') && s.includes(',')) {
-            s = s.replace(/\./g, '').replace(/,/g, '.')
-        } else if (s.includes(',')) {
-            s = s.replace(/,/g, '.')
-        } else {
-            const dotCount = (s.match(/\./g) || []).length
-            if (dotCount > 1) {
-                s = s.replace(/\./g, '')
-            }
+        const commaCount = (s.match(/,/g) || []).length
+        const dotCount = (s.match(/\./g) || []).length
+        const lastComma = s.lastIndexOf(',')
+        const lastDot = s.lastIndexOf('.')
+
+        if (commaCount && dotCount) {
+            const decimalSeparator = lastComma > lastDot ? ',' : '.'
+            const thousandsSeparator = decimalSeparator === ',' ? '.' : ','
+            s = s.replace(new RegExp(`\\${thousandsSeparator}`, 'g'), '')
+            if (decimalSeparator === ',') s = s.replace(',', '.')
+        } else if (commaCount) {
+            const digitsAfter = s.length - lastComma - 1
+            s = commaCount > 1 || digitsAfter === 3 ? s.replace(/,/g, '') : s.replace(',', '.')
+        } else if (dotCount) {
+            const digitsAfter = s.length - lastDot - 1
+            if (dotCount > 1 || digitsAfter === 3) s = s.replace(/\./g, '')
         }
 
-        const n = Number(s)
+        const n = Number(s) * (negativeByParentheses ? -1 : 1)
         return Number.isFinite(n) ? n : null
     }
 

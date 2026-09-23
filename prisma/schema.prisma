@@ -478,6 +478,29 @@ enum ReceivableAllocationStatus {
   REVERSED
 }
 
+/// A daily collection target belongs to a customer, never to an individual order.
+enum CollectionPlanStatus {
+  ACTIVE
+  COMPLETED
+  CARRIED_FORWARD
+  CANCELLED
+}
+
+/// A customer can report a transfer before the bank statement is imported.
+enum CustomerReceiptStatus {
+  REPORTED
+  CONFIRMED
+  RECONCILED
+  REVERSED
+}
+
+enum CreditLimitProposalStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
 enum SalesDeliveryStatus {
   DRAFT
   READY
@@ -557,6 +580,30 @@ enum TermPaymentBatchFileType {
   BANK_RETURN
   UNC
   OTHER
+}
+
+enum PaymentFundingSource {
+  OWN_BANK
+  DIRECT_DISBURSEMENT
+}
+
+enum GeneralPaymentRequestCategory {
+  INTERNAL_EXPENSE
+  FIXED_ASSET
+  TAX_AND_FEE
+  ADVANCE
+  OTHER
+}
+
+enum GeneralPaymentRequestStatus {
+  PENDING_APPROVAL
+  REJECTED
+  APPROVED
+  BANK_VERIFIED
+  BANK_RETURNED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
 }
 
 enum PaymentMode {
@@ -1199,7 +1246,7 @@ model NotificationRecipient {
   readAt         DateTime?                   @db.Timestamptz(6)
   archivedAt     DateTime?                   @db.Timestamptz(6)
   /// True only when this recipient owns the business action, never for an admin observing it.
-  actionRequired Boolean                      @default(false)
+  actionRequired Boolean                     @default(false)
   createdAt      DateTime                    @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime                    @updatedAt @db.Timestamptz(6)
 
@@ -1270,12 +1317,12 @@ model NotificationDelivery {
 }
 
 model NotificationWorkItem {
-  id         String @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  userId     String @db.Uuid
+  id             String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId         String  @db.Uuid
   notificationId String? @db.Uuid
-  sourceType String
-  sourceId   String
-  action     String
+  sourceType     String
+  sourceId       String
+  action         String
 
   /// Version/cycle of the source entity that last touched this item. The processor ignores
   /// events carrying an older value, so a late event cannot reopen a newer state (spec v1.2 D6).
@@ -1287,7 +1334,7 @@ model NotificationWorkItem {
   createdAt   DateTime                   @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime                   @updatedAt @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@unique([userId, sourceType, sourceId, action])
@@ -1746,6 +1793,28 @@ model CreditLimitHistory {
   reason    String?
   changedBy String
   changedAt DateTime  @default(now())
+}
+
+/// Annual review record. The approved operational limit is still written through
+/// CreditLimitHistory so historical reports retain the limit that was in force.
+model CreditLimitProposal {
+  id            String                    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerId    String                    @db.Uuid
+  year          Int
+  proposedLimit Decimal?                  @db.Decimal(24, 4)
+  approvedLimit Decimal?                  @db.Decimal(24, 4)
+  status        CreditLimitProposalStatus @default(DRAFT)
+  reason        String?
+  proposedById  String?                   @db.Uuid
+  approvedById  String?                   @db.Uuid
+  approvedAt    DateTime?                 @db.Timestamptz(6)
+  createdAt     DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime                  @updatedAt @db.Timestamptz(6)
+
+  customer Party @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([customerId, year])
+  @@index([year, status])
 }
 
 model RiskFlag {
@@ -2259,8 +2328,12 @@ model PaymentRequestPayment {
   id                  String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
   paymentRequestId    String                     @db.Uuid
   paymentRequest      PurchaseTermPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  sourceBankAccountId String                     @db.Uuid
-  sourceBankAccount   BankAccount                @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  fundingSource       PaymentFundingSource       @default(OWN_BANK)
+  sourceBankAccountId String?                    @db.Uuid
+  sourceBankAccount   BankAccount?               @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lenderBankName      String?
+  creditFacilityRef   String?
+  disbursementNo      String?
   amountVnd           Decimal                    @db.Decimal(18, 2)
   paidAt              DateTime                   @db.Date
   proofFileUrl        String?
@@ -2269,8 +2342,116 @@ model PaymentRequestPayment {
   createdById         String?                    @db.Uuid
   createdAt           DateTime                   @default(now())
 
+  reconciliations CommercialPaymentReconciliation[]
+
   @@index([paymentRequestId, paidAt])
   @@index([sourceBankAccountId])
+}
+
+/// Standalone expense/payment voucher. Unlike PurchaseTermPaymentRequest, this
+/// covers non-fuel purchasing such as fixed assets, tax, advances and overheads.
+model GeneralPaymentRequest {
+  id                     String                        @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  requestNo              String                        @unique
+  requestDate            DateTime                      @db.Date
+  category               GeneralPaymentRequestCategory
+  beneficiaryName        String
+  beneficiaryTaxCode     String?
+  beneficiaryAccountNo   String?
+  beneficiaryAccountName String?
+  beneficiaryBankName    String?
+  content                String
+  referenceNo            String?
+  invoiceNo              String?
+  amountVnd              Decimal                       @db.Decimal(18, 2)
+  currency               String                        @default("VND") @db.Char(3)
+  paymentDeadline        DateTime?                     @db.Date
+  status                 GeneralPaymentRequestStatus   @default(PENDING_APPROVAL)
+  note                   String?
+  approvalNote           String?
+  approvedById           String?                       @db.Uuid
+  approvedAt             DateTime?
+  bankCheckedById        String?                       @db.Uuid
+  bankCheckedAt          DateTime?
+  bankCheckNote          String?
+  returnedReason         String?
+  createdById            String?                       @db.Uuid
+  createdAt              DateTime                      @default(now())
+  updatedAt              DateTime                      @updatedAt
+
+  payments GeneralPaymentRequestPayment[]
+
+  @@index([status, requestDate])
+  @@index([category, status])
+  @@index([beneficiaryName])
+}
+
+model GeneralPaymentRequestPayment {
+  id                  String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  paymentRequestId    String                @db.Uuid
+  paymentRequest      GeneralPaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  fundingSource       PaymentFundingSource  @default(OWN_BANK)
+  sourceBankAccountId String?               @db.Uuid
+  sourceBankAccount   BankAccount?          @relation(fields: [sourceBankAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lenderBankName      String?
+  creditFacilityRef   String?
+  disbursementNo      String?
+  amountVnd           Decimal               @db.Decimal(18, 2)
+  paidAt              DateTime              @db.Date
+  proofFileUrl        String?
+  proofFileName       String?
+  note                String?
+  createdById         String?               @db.Uuid
+  createdAt           DateTime              @default(now())
+
+  reconciliations GeneralPaymentReconciliation[]
+
+  @@index([paymentRequestId, paidAt])
+  @@index([sourceBankAccountId])
+}
+
+/// One company-bank outgoing transaction matched to one independently recorded
+/// general payment. Direct supplier disbursements do not create this evidence.
+model GeneralPaymentReconciliation {
+  id                String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bankTransactionId String    @db.Uuid
+  paymentId         String    @db.Uuid
+  reconciledById    String?   @db.Uuid
+  reconciledAt      DateTime  @default(now())
+  note              String?
+  reversedAt        DateTime?
+  reversedById      String?   @db.Uuid
+  reversalReason    String?
+
+  bankTransaction BankTransaction              @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  payment         GeneralPaymentRequestPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([bankTransactionId])
+  @@index([paymentId])
+  @@index([reversedAt])
+  @@index([reconciledAt])
+}
+
+/// Ghép một lần chi Mua TM (đã ghi nhận) với dòng tiền ra trên sao kê. Có số tiền trên
+/// từng dòng ghép: một lần chi có thể trả từ nhiều tài khoản, một lệnh có thể gộp nhiều lần chi.
+model CommercialPaymentReconciliation {
+  id                String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bankTransactionId String    @db.Uuid
+  paymentId         String    @db.Uuid
+  amountVnd         Decimal   @db.Decimal(18, 2)
+  reconciledById    String?   @db.Uuid
+  reconciledAt      DateTime  @default(now())
+  note              String?
+  reversedAt        DateTime?
+  reversedById      String?   @db.Uuid
+  reversalReason    String?
+
+  bankTransaction BankTransaction       @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  payment         PaymentRequestPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([bankTransactionId])
+  @@index([paymentId])
+  @@index([reversedAt])
 }
 
 model TermPaymentBatch {
@@ -3315,7 +3496,8 @@ model ReceivableLedgerEntry {
 /// Money in from a customer applied to an open item; reversible, never edited in place.
 model ReceivableAllocation {
   id                   String                     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  bankTransactionId    String                     @db.Uuid
+  bankTransactionId    String?                    @db.Uuid
+  customerReceiptId    String?                    @db.Uuid
   openItemId           String                     @db.Uuid
   amountInBankCurrency Decimal                    @db.Decimal(24, 4)
   amountInItemCurrency Decimal                    @db.Decimal(24, 4)
@@ -3328,14 +3510,74 @@ model ReceivableAllocation {
   effectiveAt          DateTime?                  @db.Timestamptz(6)
   allocatedAt          DateTime                   @db.Timestamptz(6)
 
-  bankTransaction BankTransaction        @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  bankTransaction BankTransaction?       @relation(fields: [bankTransactionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customerReceipt CustomerReceipt?       @relation(fields: [customerReceiptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   openItem        ReceivableOpenItem     @relation(fields: [openItemId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   ledgerEntry     ReceivableLedgerEntry?
   reversalOf      ReceivableAllocation?  @relation("ReceivableAllocationReversal", fields: [reversalOfId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversedBy      ReceivableAllocation?  @relation("ReceivableAllocationReversal")
 
   @@index([bankTransactionId, status])
+  @@index([customerReceiptId, status])
   @@index([openItemId, status])
+}
+
+/// The accountant's promised collection amount for one customer on one date.
+/// It is deliberately independent of sale orders: the customer pays its revolving balance.
+model CustomerCollectionPlan {
+  id               String               @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerPartyId  String               @db.Uuid
+  plannedDate      DateTime             @db.Date
+  plannedAmount    Decimal              @db.Decimal(24, 4)
+  status           CollectionPlanStatus @default(ACTIVE)
+  confirmationNote String?
+  note             String?
+  parentPlanId     String?              @db.Uuid
+  createdById      String?              @db.Uuid
+  completedAt      DateTime?            @db.Timestamptz(6)
+  cancelledAt      DateTime?            @db.Timestamptz(6)
+  createdAt        DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime             @updatedAt @db.Timestamptz(6)
+
+  customer Party                    @relation(fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  parent   CustomerCollectionPlan?  @relation("CollectionPlanCarryForward", fields: [parentPlanId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  children CustomerCollectionPlan[] @relation("CollectionPlanCarryForward")
+  receipts CustomerReceipt[]
+
+  @@index([customerPartyId, plannedDate])
+  @@index([plannedDate, status])
+  @@index([parentPlanId])
+}
+
+/// A reported or confirmed customer payment. Confirmation reduces receivables immediately;
+/// reconciliation with an imported bank line is a later state transition, not another receipt.
+model CustomerReceipt {
+  id                String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  customerPartyId   String                @db.Uuid
+  collectionPlanId  String?               @db.Uuid
+  bankTransactionId String?               @unique @db.Uuid
+  amount            Decimal               @db.Decimal(24, 4)
+  currency          String                @default("VND") @db.Char(3)
+  receivedAt        DateTime              @db.Timestamptz(6)
+  status            CustomerReceiptStatus @default(REPORTED)
+  transferReference String?
+  evidenceReference String?
+  note              String?
+  reportedById      String?               @db.Uuid
+  confirmedById     String?               @db.Uuid
+  confirmedAt       DateTime?             @db.Timestamptz(6)
+  reversedById      String?               @db.Uuid
+  reversedAt        DateTime?             @db.Timestamptz(6)
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime              @updatedAt @db.Timestamptz(6)
+
+  customer        Party                   @relation(fields: [customerPartyId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  collectionPlan  CustomerCollectionPlan? @relation(fields: [collectionPlanId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  bankTransaction BankTransaction?        @relation(fields: [bankTransactionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  allocations     ReceivableAllocation[]
+
+  @@index([customerPartyId, receivedAt, status])
+  @@index([collectionPlanId])
 }
 
 /// Append-only business workflow audit, written inside the same transaction as the transition.
@@ -4125,11 +4367,12 @@ model BankAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  imports                BankStatementImport[]
-  transactions           BankTransaction[]
-  termPaymentBatches     TermPaymentBatch[]
-  paymentRequestPayments PaymentRequestPayment[]
-  legalEntity            LegalEntity?            @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  imports                       BankStatementImport[]
+  transactions                  BankTransaction[]
+  termPaymentBatches            TermPaymentBatch[]
+  paymentRequestPayments        PaymentRequestPayment[]
+  generalPaymentRequestPayments GeneralPaymentRequestPayment[]
+  legalEntity                   LegalEntity?                   @relation(fields: [legalEntityId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
   @@unique([legalEntityId, bankCode, accountNo])
   @@index([legalEntityId, isActive])
@@ -4232,10 +4475,13 @@ model BankTransaction {
   import      BankStatementImport?    @relation(fields: [importId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   purpose     BankTransactionPurpose? @relation(fields: [purposeId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
-  payableAllocations    PayableAllocation[]
-  receivableAllocations ReceivableAllocation[]
-  termBankInstructions  PurchaseTermBankInstruction[]
-  termPaymentBatchItems TermPaymentBatchItem[]
+  payableAllocations            PayableAllocation[]
+  receivableAllocations         ReceivableAllocation[]
+  customerReceipt               CustomerReceipt?
+  termBankInstructions          PurchaseTermBankInstruction[]
+  termPaymentBatchItems         TermPaymentBatchItem[]
+  generalPaymentReconciliations GeneralPaymentReconciliation[]
+  commercialPaymentReconciliations CommercialPaymentReconciliation[]
 
   isConfirmed Boolean   @default(false)
   confirmedAt DateTime?
@@ -4794,6 +5040,9 @@ model Party {
   contracts                     Contract[]
   riskFlags                     RiskFlag[]
   creditHistories               CreditLimitHistory[]
+  creditLimitProposals          CreditLimitProposal[]
+  collectionPlans               CustomerCollectionPlan[]
+  customerReceipts              CustomerReceipt[]
   addresses                     CustomerAddress[]
   vehicles                      Vehicle[]
   drivers                       Driver[]
@@ -6221,4 +6470,18 @@ model InvoiceProviderConfig {
 enum InvoiceEnvironment {
   TEST
   PRODUCTION
+}
+
+/// Lãi suất tiền gửi tham chiếu, nhập tay theo mốc ngày hiệu lực. Dùng để ước tính tiền
+/// lãi công ty bỏ lỡ khi tiền nằm ở công nợ khách hàng thay vì gửi ngân hàng. Mỗi mức áp
+/// dụng từ ngày hiệu lực tới trước mốc kế tiếp — lãi đổi giữa kỳ vẫn tính đúng từng ngày.
+model DepositInterestRate {
+  id            String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  effectiveFrom DateTime @unique @db.Date
+  /// %/năm, vd. 5.5 là 5,5%/năm. Ràng buộc 0..100 nằm ở CHECK trong migration.
+  annualRate    Decimal  @db.Decimal(7, 4)
+  note          String?
+  createdById   String?  @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
 }

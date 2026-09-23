@@ -6,7 +6,7 @@ import { ContractListQueryDto } from './dto/contract-list-query.dto'
 import { ContractKind, ContractStatus, PartyRoleType, Prisma } from '@prisma/client'
 import { AssignContractsToCustomerDto } from '../customers/dto/assign-contracts.dto'
 import { AssignCustomerToContractDto } from './dto/assign-customer.dto'
-import { addDays, diffInDays, startOfDay, subDays, formatDate } from 'src/common/utils/date.utils'
+import { addDays, diffInDays, startOfDay, subDays, formatDate, vnDateKey } from 'src/common/utils/date.utils'
 import { CONTRACT_EXPIRED_WITHIN_DAYS, CONTRACT_EXPIRING_IN_DAYS } from 'src/common/constants/constants'
 import { ContractExpiryCounts, ContractExpiryListItem, ContractExpiryListParams, ContractExpiryListResult } from './contracts-expiry.types'
 import * as ExcelJS from 'exceljs'
@@ -935,7 +935,7 @@ export class ContractsService {
             status,
         })
 
-        const refDateLabel = referenceDate ? formatDate(typeof referenceDate === 'string' ? new Date(referenceDate) : referenceDate) : formatDate(new Date())
+        const refDateLabel = referenceDate ? formatDate(typeof referenceDate === 'string' ? new Date(referenceDate) : referenceDate) : vnDateKey()
 
         // 2. Láº¥y danh sÃ¡ch customerId trong report
         const customerIds = Array.from(new Set(result.items.map((x) => x.customerId).filter((x): x is string => !!x)))

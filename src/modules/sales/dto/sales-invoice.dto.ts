@@ -96,8 +96,8 @@ export class IssueSalesInvoiceDto {
 }
 
 /**
- * Cấu hình nhà cung cấp hóa đơn điện tử. Mật khẩu và AppID để trống = giữ nguyên giá trị
- * đang lưu; màn cấu hình không bao giờ nhận được giá trị thật nên không thể gửi lại.
+ * Cấu hình nhà cung cấp hóa đơn điện tử. User, mật khẩu và AppID để trống = giữ nguyên giá
+ * trị đang lưu; màn cấu hình không bao giờ nhận được giá trị thật nên không thể gửi lại.
  */
 export class UpdateInvoiceProviderConfigDto {
     /** Lưu cho môi trường nào — thử nghiệm hay thật. */
@@ -114,10 +114,10 @@ export class UpdateInvoiceProviderConfigDto {
     @MaxLength(50)
     taxCode!: string
 
+    @IsOptional()
     @IsString()
-    @IsNotEmpty()
     @MaxLength(128)
-    username!: string
+    username?: string
 
     @IsOptional()
     @IsString()

@@ -20,12 +20,12 @@ import { ListTermPurchaseOrdersQueryDto } from './dto/list-term-purchase-orders.
 import { UpdateTermPurchaseOrderDto } from './dto/update-term-purchase-order.dto'
 import { PurchaseTermMapper } from './purchase-term.mapper'
 import { PurchaseTermNextActionService } from './purchase-term-next-action.service'
+import { TRADING_CONTRACT_TYPE_WHERE } from 'src/modules/contracts/contract-type.constants'
 import dayjs from 'dayjs'
+import { vnDateKey } from 'src/common/utils/date.utils'
 
 @Injectable()
 export class PurchaseTermOrdersService {
-    private readonly termPurchaseContractTypeId = '019f0303-32fe-73a1-84e9-76f9a0c4fa0e'
-
     constructor(
         private readonly prisma: PrismaService,
         private readonly nextActionService: PurchaseTermNextActionService,
@@ -217,7 +217,9 @@ export class PurchaseTermOrdersService {
         return db.contract.findFirst({
             where: {
                 customerId: supplierCustomerId,
-                contractTypeId: this.termPurchaseContractTypeId,
+                // Lọc theo cờ allowsTrading của loại hợp đồng (dữ liệu người dùng bật/tắt ở màn
+                // quản lý loại HĐ), không theo id cứng — thêm loại HĐ mua bán mới không cần deploy.
+                contractType: TRADING_CONTRACT_TYPE_WHERE,
                 status: ContractStatus.Active,
                 startDate: {
                     lte: day.end,
@@ -238,7 +240,8 @@ export class PurchaseTermOrdersService {
             throw new BadRequestException('SUPPLIER_CUSTOMER_ID_REQUIRED')
         }
 
-        const today = new Date().toISOString().slice(0, 10)
+        // Hôm nay theo giờ VN, không theo UTC (từ 0 đến 7 giờ sáng UTC vẫn là hôm qua).
+        const today = vnDateKey()
         const date = this.toDateOnly(orderDate ?? today)!
         const day = this.dateRangeOfDay(date)
         const contract = await this.findValidPurchaseContract(this.prisma, supplierCustomerId, date)
@@ -260,7 +263,9 @@ export class PurchaseTermOrdersService {
         const purchaseContracts = await this.prisma.contract.findMany({
             where: {
                 customerId: supplierCustomerId,
-                contractTypeId: this.termPurchaseContractTypeId,
+                // Lọc theo cờ allowsTrading của loại hợp đồng (dữ liệu người dùng bật/tắt ở màn
+                // quản lý loại HĐ), không theo id cứng — thêm loại HĐ mua bán mới không cần deploy.
+                contractType: TRADING_CONTRACT_TYPE_WHERE,
                 deletedAt: null,
             },
             select: {
@@ -275,8 +280,9 @@ export class PurchaseTermOrdersService {
         const activeOtherTypeContract = await this.prisma.contract.findFirst({
             where: {
                 customerId: supplierCustomerId,
-                contractTypeId: {
-                    not: this.termPurchaseContractTypeId,
+                contractType: {
+                    allowsTrading: false,
+                    deletedAt: null,
                 },
                 status: ContractStatus.Active,
                 startDate: {
@@ -332,7 +338,6 @@ export class PurchaseTermOrdersService {
             reason,
             message,
             checkedDate: date.toISOString().slice(0, 10),
-            requiredContractTypeId: this.termPurchaseContractTypeId,
             activeOtherTypeContract,
             purchaseContracts: purchaseContracts.map((x) => ({
                 ...x,
